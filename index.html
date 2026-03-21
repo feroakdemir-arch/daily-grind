@@ -278,6 +278,7 @@ function DailyGrind() {
   const [calEventStart, setCalEventStart] = useState("09:00");
   const [calEventEnd, setCalEventEnd] = useState("10:00");
   const [calEventColor, setCalEventColor] = useState("#4fc3f7");
+  const [calEventRepeat, setCalEventRepeat] = useState("none");
   const prevScoreRef = useRef(0);
   const today = getToday();
   const weekDates = getWeekDates();
@@ -423,11 +424,42 @@ function DailyGrind() {
 
   // Calendar helpers
   function saveCalEvents(evts) { setCalEvents(evts); localStorage.setItem("dg-cal-events", JSON.stringify(evts)); }
-  function addCalEvent(dateStr, title, start, end, color) {
+  function addCalEvent(dateStr, title, start, end, color, repeat) {
     const evt = { id: `ce_${Date.now()}`, date: dateStr, title, start, end, color: color || "#4fc3f7" };
+    if (repeat && repeat !== "none") evt.repeat = repeat;
     saveCalEvents([...calEvents, evt]);
   }
-  function deleteCalEvent(id) { saveCalEvents(calEvents.filter(e => e.id !== id)); }
+  function deleteCalEvent(id, deleteAll) {
+    if (deleteAll) {
+      const evt = calEvents.find(e => e.id === id);
+      if (evt && evt.repeat) {
+        // Delete this and all events with same title, time, and repeat
+        saveCalEvents(calEvents.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat)));
+      } else {
+        saveCalEvents(calEvents.filter(e => e.id !== id));
+      }
+    } else {
+      saveCalEvents(calEvents.filter(e => e.id !== id));
+    }
+  }
+  function getEventsForDate(dateStr) {
+    const d = new Date(dateStr + "T12:00");
+    const dayOfWeek = d.getDay(); // 0=Sun, 1=Mon, etc.
+    const directEvents = calEvents.filter(e => e.date === dateStr);
+    const repeatingEvents = calEvents.filter(e => {
+      if (!e.repeat) return false;
+      const eDate = new Date(e.date + "T12:00");
+      if (eDate > d) return false; // don't show before the original date
+      if (e.date === dateStr) return false; // already in directEvents
+      if (e.repeat === "weekly") {
+        return eDate.getDay() === dayOfWeek;
+      }
+      if (e.repeat === "daily") return true;
+      if (e.repeat === "weekdays") return dayOfWeek >= 1 && dayOfWeek <= 5;
+      return false;
+    }).map(e => ({ ...e, _repeating: true, _origId: e.id, id: e.id + "_" + dateStr }));
+    return [...directEvents, ...repeatingEvents];
+  }
   function getCalWeekDates(offset) {
     const d = new Date(); d.setDate(d.getDate() + offset * 7);
     const day = d.getDay(); const diff = d.getDate() - day + (day === 0 ? -6 : 1);
@@ -877,6 +909,7 @@ function DailyGrind() {
                             setCalEventStart(`${String(h).padStart(2,"0")}:00`);
                             setCalEventEnd(`${String(h+1).padStart(2,"0")}:00`);
                             setCalEventTitle("");
+                            setCalEventRepeat("none");
                           }} />
                       ))}
                     </React.Fragment>
@@ -885,20 +918,31 @@ function DailyGrind() {
                   {/* Events overlay */}
                   {calDates.map((d, di) => {
                     const ds = localDateStr(d);
-                    const dayEvents = calEvents.filter(e => e.date === ds);
+                    const dayEvents = getEventsForDate(ds);
                     return dayEvents.map(evt => {
                       const startMin = timeToMin(evt.start);
                       const endMin = timeToMin(evt.end);
                       const topPx = ((startMin - 360) / 60) * HOUR_H;
                       const heightPx = Math.max(((endMin - startMin) / 60) * HOUR_H, 20);
                       const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${m}${ampm}`; };
+                      const isRepeating = evt._repeating;
                       return (
                         <div key={evt.id} style={{
                           position: "absolute", left: `calc(40px + ${di} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
-                          fontSize: 9, color: "#fff", fontWeight: 700, cursor: "pointer", zIndex: 10, boxShadow: "0 1px 3px #00000044", lineHeight: 1.2
-                        }} onClick={(e) => { e.stopPropagation(); if (confirm("Delete \"" + evt.title + "\"?")) deleteCalEvent(evt.id); }}>
-                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{evt.title}</div>
+                          fontSize: 9, color: "#fff", fontWeight: 700, cursor: "pointer", zIndex: 10, boxShadow: "0 1px 3px #00000044", lineHeight: 1.2,
+                          borderLeft: isRepeating ? "3px solid #ffffff88" : "none"
+                        }} onClick={(e) => { e.stopPropagation();
+                          const origId = evt._origId || evt.id;
+                          const origEvt = calEvents.find(ev => ev.id === origId);
+                          if (origEvt && origEvt.repeat) {
+                            const choice = confirm("Delete ALL repeating instances of \"" + evt.title + "\"?\n\nOK = Delete all\nCancel = Keep");
+                            if (choice) deleteCalEvent(origId, true);
+                          } else {
+                            if (confirm("Delete \"" + evt.title + "\"?")) deleteCalEvent(evt.id);
+                          }
+                        }}>
+                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{evt.repeat ? "\u21BB " : ""}{evt.title}</div>
                           {heightPx > 24 && <div style={{ fontSize: 8, opacity: 0.8, fontWeight: 600 }}>{fmtTime(evt.start)} - {fmtTime(evt.end)}</div>}
                         </div>
                       );
@@ -940,7 +984,13 @@ function DailyGrind() {
                         <input type="time" style={S.inp} value={calEventEnd} onChange={(e) => setCalEventEnd(e.target.value)} />
                       </div>
                     </div>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>COLOR</label>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"]].map(([v,l]) => (
+                        <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
+                      ))}
+                    </div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
                       {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
                         <button key={c} onClick={() => setCalEventColor(c)} style={{ width: 28, height: 28, borderRadius: 14, background: c, border: calEventColor === c ? "3px solid #fff" : "2px solid transparent", cursor: "pointer" }} />
@@ -950,8 +1000,8 @@ function DailyGrind() {
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
                         if (calEventTitle.trim()) {
-                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor);
-                          setCalAddEvent(null);
+                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat);
+                          setCalAddEvent(null); setCalEventRepeat("none");
                         }
                       }} style={S.okBtn}>Add Event</button>
                     </div>
