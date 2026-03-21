@@ -15,25 +15,85 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Firebase SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script>
+    // Initialize Firebase
+    const firebaseConfig = {
+      apiKey: "AIzaSyCD_PvI8o1cxD_XLSls8vNN18xPMVdn9X8",
+      authDomain: "daily-grind-370cd.firebaseapp.com",
+      projectId: "daily-grind-370cd",
+      storageBucket: "daily-grind-370cd.firebasestorage.app",
+      messagingSenderId: "737935273645",
+      appId: "1:737935273645:web:aadc0b000f33048ebea024",
+      measurementId: "G-75RD0FXWRY"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const fbAuth = firebase.auth();
+    const fbDb = firebase.firestore();
+
+    // Sign in anonymously and set up synced storage
+    let _fbUserId = null;
+    let _fbReady = new Promise((resolve) => {
+      fbAuth.signInAnonymously().then((cred) => {
+        _fbUserId = cred.user.uid;
+        console.log("Firebase signed in:", _fbUserId);
+        resolve();
+      }).catch((err) => {
+        console.warn("Firebase auth failed, using localStorage only:", err);
+        resolve();
+      });
+    });
+
+    // Storage that syncs localStorage + Firestore
+    window.storage = {
+      async get(key) {
+        try {
+          // Always try localStorage first (fast)
+          const raw = localStorage.getItem(key);
+          const localData = raw !== null ? { key, value: raw } : null;
+
+          // Try to get from Firestore if signed in
+          await _fbReady;
+          if (_fbUserId) {
+            try {
+              const doc = await fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).get();
+              if (doc.exists) {
+                const fbValue = doc.data().value;
+                // Firestore has data - use it and update localStorage
+                localStorage.setItem(key, fbValue);
+                return { key, value: fbValue };
+              } else if (localData) {
+                // Firestore empty but localStorage has data - push to Firestore
+                await fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).set({ value: localData.value, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+              }
+            } catch (e) { console.warn("Firestore get failed:", e); }
+          }
+          return localData;
+        } catch { return null; }
+      },
+      async set(key, value) {
+        try {
+          // Always save to localStorage (fast, offline-capable)
+          localStorage.setItem(key, value);
+
+          // Also save to Firestore if signed in
+          await _fbReady;
+          if (_fbUserId) {
+            fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).set({
+              value: value,
+              updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }).catch((e) => console.warn("Firestore set failed:", e));
+          }
+          return { key, value };
+        } catch { return null; }
+      }
+    };
+  </script>
   <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
-
-// localStorage-backed storage that matches the window.storage API
-window.storage = {
-  async get(key) {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw !== null) return { key, value: raw };
-      return null;
-    } catch { return null; }
-  },
-  async set(key, value) {
-    try {
-      localStorage.setItem(key, value);
-      return { key, value };
-    } catch { return null; }
-  }
-};
 
 const STORAGE_KEY = "daily-grind-v13";
 const DAYS = ["Sa", "Su", "Mo", "Tu", "We", "Th", "Fr"];
