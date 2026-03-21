@@ -905,42 +905,65 @@ function DailyGrind() {
 
               {/* Time grid */}
               <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "65vh", background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12 }}>
-                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H }}
+                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
                     if (!calDragging || !calGridRef.current) return;
                     const rect = calGridRef.current.getBoundingClientRect();
                     const y = e.clientY - rect.top;
+                    const x = e.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + 360;
                     const snapped = Math.round(totalMin / 15) * 15;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
                     const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
                     const endMin = snapped + duration;
                     const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    setCalDragging({ ...calDragging, newStart, newEnd });
+                    const colW = (rect.width - 40) / 7;
+                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    const newDate = localDateStr(calDates[dayIdx]);
+                    setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onMouseUp={() => {
-                    if (calDragging && calDragging.newStart) {
-                      editCalEvent(calDragging.id, { start: calDragging.newStart, end: calDragging.newEnd });
+                    if (calDragging && calDragging.moved) {
+                      const updates = {};
+                      if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
+                      if (calDragging.newDate) updates.date = calDragging.newDate;
+                      editCalEvent(calDragging.id, updates);
                     }
                     setCalDragging(null);
                   }}
-                  onMouseLeave={() => setCalDragging(null)}
+                  onMouseLeave={() => {
+                    if (calDragging && calDragging.moved) {
+                      const updates = {};
+                      if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
+                      if (calDragging.newDate) updates.date = calDragging.newDate;
+                      editCalEvent(calDragging.id, updates);
+                    }
+                    setCalDragging(null);
+                  }}
                   onTouchMove={(e) => {
                     if (!calDragging || !calGridRef.current) return;
+                    e.preventDefault();
                     const touch = e.touches[0];
                     const rect = calGridRef.current.getBoundingClientRect();
                     const y = touch.clientY - rect.top;
+                    const x = touch.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + 360;
                     const snapped = Math.round(totalMin / 15) * 15;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
                     const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
                     const endMin = snapped + duration;
                     const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    setCalDragging({ ...calDragging, newStart, newEnd });
+                    const colW = (rect.width - 40) / 7;
+                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    const newDate = localDateStr(calDates[dayIdx]);
+                    setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onTouchEnd={() => {
-                    if (calDragging && calDragging.newStart) {
-                      editCalEvent(calDragging.id, { start: calDragging.newStart, end: calDragging.newEnd });
+                    if (calDragging && calDragging.moved) {
+                      const updates = {};
+                      if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
+                      if (calDragging.newDate) updates.date = calDragging.newDate;
+                      editCalEvent(calDragging.id, updates);
                     }
                     setCalDragging(null);
                   }}
@@ -952,6 +975,7 @@ function DailyGrind() {
                       {calDates.map((d, di) => (
                         <div key={di} style={{ gridColumn: di + 2, gridRow: hi + 1, borderTop: "1px solid #2d2d3a44", borderLeft: "1px solid #2d2d3a22", height: HOUR_H, cursor: "pointer", position: "relative" }}
                           onClick={() => {
+                            if (calDragging) return; // don't open add modal after drag
                             const ds = localDateStr(d);
                             setCalAddEvent(ds);
                             setCalEventStart(`${String(h).padStart(2,"0")}:00`);
@@ -968,6 +992,7 @@ function DailyGrind() {
                     const dayEvents = getEventsForDate(ds);
                     return dayEvents.map(evt => {
                       const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
+                      if (isDraggingThis && calDragging.newDate && calDragging.newDate !== ds) return null; // hide from original column
                       const displayStart = isDraggingThis && calDragging.newStart ? calDragging.newStart : evt.start;
                       const displayEnd = isDraggingThis && calDragging.newEnd ? calDragging.newEnd : evt.end;
                       const startMin = timeToMin(displayStart);
@@ -976,16 +1001,23 @@ function DailyGrind() {
                       const heightPx = Math.max(((endMin - startMin) / 60) * HOUR_H, 20);
                       const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${m}${ampm}`; };
                       const isRepeating = evt._repeating || evt.repeat;
+                      // If dragging to a different day, render at that column
+                      let displayDi = di;
+                      if (isDraggingThis && calDragging.newDate) {
+                        const idx = calDates.findIndex(cd => localDateStr(cd) === calDragging.newDate);
+                        if (idx >= 0) displayDi = idx;
+                      }
                       return (
                         <div key={evt.id} style={{
-                          position: "absolute", left: `calc(40px + ${di} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
+                          position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
                           fontSize: 9, color: "#fff", fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
                           borderLeft: isRepeating ? "3px solid #ffffff88" : "none", opacity: isDraggingThis ? 0.85 : 1,
                           transition: isDraggingThis ? "none" : "top 0.15s, height 0.15s", userSelect: "none",
                         }}
-                          onClick={(e) => { e.stopPropagation(); if (calDragging) return;
+                          onClick={(e) => { e.stopPropagation();
+                            if (calDragging && calDragging.moved) return; // don't open popup after drag
                             const origId = evt._origId || evt.id;
                             const origEvt = calEvents.find(ev => ev.id === origId) || evt;
                             setCalSelectedEvent({ ...origEvt, _displayDate: ds });
@@ -993,15 +1025,14 @@ function DailyGrind() {
                           }}
                           onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
                             const origId = evt._origId || evt.id;
-                            if (evt._repeating) return; // can't drag repeated instances
-                            setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end });
+                            if (evt._repeating) return;
+                            setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end, moved: false });
                           }}
                           onTouchStart={(e) => {
                             const origId = evt._origId || evt.id;
                             if (evt._repeating) return;
-                            // Long press for drag on mobile
                             const timer = setTimeout(() => {
-                              setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end });
+                              setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end, moved: false });
                             }, 400);
                             e.currentTarget._dragTimer = timer;
                           }}
