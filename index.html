@@ -662,9 +662,9 @@ function DailyGrind() {
   if (view === "main") return (
     <div style={S.shell}>
       <div style={S.box}>
-        {winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
+        {page !== "calendar" && winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
 
-        <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        {page !== "calendar" && <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <h1 style={S.title}>DAILY GRIND</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
@@ -673,9 +673,9 @@ function DailyGrind() {
             {data.streak > 0 && <div style={S.streakB}>{"\uD83D\uDD25"} {data.streak}</div>}
             <button onClick={() => setView("settings")} style={S.gear}>{"\u2699"}</button>
           </div>
-        </div>
+        </div>}
 
-        <div style={{ ...S.sc, cursor: "pointer" }} onClick={() => setShowScoreDetail(!showScoreDetail)}>
+        <div style={{ ...S.sc, cursor: "pointer", display: page === "calendar" ? "none" : "block" }} onClick={() => setShowScoreDetail(!showScoreDetail)}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 12 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
               <span style={{ fontSize: 42, fontWeight: 900, lineHeight: 1, color: won ? "#00ff87" : prog > 0.7 ? "#ffd43b" : "#7c3aed" }}>{score}</span>
@@ -904,7 +904,7 @@ function DailyGrind() {
               </div>
 
               {/* Time grid */}
-              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "65vh", background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12 }}>
+              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 160px)", background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12 }}>
                 <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
                     if (!calDragging || !calGridRef.current) return;
