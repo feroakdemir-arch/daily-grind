@@ -660,8 +660,8 @@ function DailyGrind() {
 
   // MAIN
   if (view === "main") return (
-    <div style={S.shell}>
-      <div style={S.box}>
+    <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
+      <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : S.box}>
         {page !== "calendar" && winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
 
         {page !== "calendar" && <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -904,7 +904,7 @@ function DailyGrind() {
               </div>
 
               {/* Time grid */}
-              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 160px)", background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12 }}>
+              <div style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 130px)", background: "#1a1a2e", border: "none", borderRadius: 0 }}>
                 <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
                     if (!calDragging || !calGridRef.current) return;
