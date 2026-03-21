@@ -282,6 +282,7 @@ function DailyGrind() {
   const [calSelectedEvent, setCalSelectedEvent] = useState(null);
   const [calEditMode, setCalEditMode] = useState(false);
   const [calEventDesc, setCalEventDesc] = useState("");
+  const [calCreating, setCalCreating] = useState(null); // {date, startMin, endMin}
   const [calDragging, setCalDragging] = useState(null);
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
@@ -907,22 +908,44 @@ function DailyGrind() {
               <div style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 130px)", background: "#1a1a2e", border: "none", borderRadius: 0 }}>
                 <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
-                    if (!calDragging || !calGridRef.current) return;
+                    if (!calGridRef.current) return;
                     const rect = calGridRef.current.getBoundingClientRect();
                     const y = e.clientY - rect.top;
                     const x = e.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + 360;
                     const snapped = Math.round(totalMin / 15) * 15;
+                    const colW = (rect.width - 40) / 7;
+                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    // Drag-to-create on empty space
+                    if (calCreating) {
+                      setCalCreating({ ...calCreating, endMin: Math.max(calCreating.startMin + 15, snapped) });
+                      return;
+                    }
+                    // Drag existing event
+                    if (!calDragging) return;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
                     const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
                     const endMin = snapped + duration;
                     const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    const colW = (rect.width - 40) / 7;
-                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
                     const newDate = localDateStr(calDates[dayIdx]);
                     setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onMouseUp={() => {
+                    // Finish drag-to-create
+                    if (calCreating) {
+                      const dur = calCreating.endMin - calCreating.startMin;
+                      if (dur >= 15) {
+                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(calCreating.date);
+                        setCalEventStart(startStr);
+                        setCalEventEnd(endStr);
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                      }
+                      setCalCreating(null);
+                      return;
+                    }
+                    // Finish drag existing event
                     if (calDragging && calDragging.moved) {
                       const updates = {};
                       if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
@@ -932,6 +955,19 @@ function DailyGrind() {
                     setCalDragging(null);
                   }}
                   onMouseLeave={() => {
+                    if (calCreating) {
+                      const dur = calCreating.endMin - calCreating.startMin;
+                      if (dur >= 15) {
+                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(calCreating.date);
+                        setCalEventStart(startStr);
+                        setCalEventEnd(endStr);
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                      }
+                      setCalCreating(null);
+                      return;
+                    }
                     if (calDragging && calDragging.moved) {
                       const updates = {};
                       if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
@@ -941,7 +977,7 @@ function DailyGrind() {
                     setCalDragging(null);
                   }}
                   onTouchMove={(e) => {
-                    if (!calDragging || !calGridRef.current) return;
+                    if (!calGridRef.current) return;
                     e.preventDefault();
                     const touch = e.touches[0];
                     const rect = calGridRef.current.getBoundingClientRect();
@@ -949,16 +985,34 @@ function DailyGrind() {
                     const x = touch.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + 360;
                     const snapped = Math.round(totalMin / 15) * 15;
+                    const colW = (rect.width - 40) / 7;
+                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    if (calCreating) {
+                      setCalCreating({ ...calCreating, endMin: Math.max(calCreating.startMin + 15, snapped) });
+                      return;
+                    }
+                    if (!calDragging) return;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
                     const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
                     const endMin = snapped + duration;
                     const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    const colW = (rect.width - 40) / 7;
-                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
                     const newDate = localDateStr(calDates[dayIdx]);
                     setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onTouchEnd={() => {
+                    if (calCreating) {
+                      const dur = calCreating.endMin - calCreating.startMin;
+                      if (dur >= 15) {
+                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(calCreating.date);
+                        setCalEventStart(startStr);
+                        setCalEventEnd(endStr);
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                      }
+                      setCalCreating(null);
+                      return;
+                    }
                     if (calDragging && calDragging.moved) {
                       const updates = {};
                       if (calDragging.newStart) { updates.start = calDragging.newStart; updates.end = calDragging.newEnd; }
@@ -973,18 +1027,36 @@ function DailyGrind() {
                     <React.Fragment key={h}>
                       <div style={{ gridColumn: "1", gridRow: hi + 1, fontSize: 9, color: "#555566", textAlign: "right", paddingRight: 6, paddingTop: 2, height: HOUR_H, borderTop: "1px solid #2d2d3a22" }}>{fmtHour(h)}</div>
                       {calDates.map((d, di) => (
-                        <div key={di} style={{ gridColumn: di + 2, gridRow: hi + 1, borderTop: "1px solid #2d2d3a44", borderLeft: "1px solid #2d2d3a22", height: HOUR_H, cursor: "pointer", position: "relative" }}
-                          onClick={() => {
-                            if (calDragging) return; // don't open add modal after drag
-                            const ds = localDateStr(d);
-                            setCalAddEvent(ds);
-                            setCalEventStart(`${String(h).padStart(2,"0")}:00`);
-                            setCalEventEnd(`${String(h+1).padStart(2,"0")}:00`);
-                            setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                        <div key={di} style={{ gridColumn: di + 2, gridRow: hi + 1, borderTop: "1px solid #2d2d3a44", borderLeft: "1px solid #2d2d3a22", height: HOUR_H, cursor: "crosshair", position: "relative" }}
+                          onMouseDown={(e) => {
+                            if (calDragging) return;
+                            e.preventDefault();
+                            const rect = calGridRef.current.getBoundingClientRect();
+                            const y = e.clientY - rect.top;
+                            const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                            const snapped = Math.round(totalMin / 15) * 15;
+                            setCalCreating({ date: localDateStr(d), startMin: snapped, endMin: snapped + 15, di });
                           }} />
                       ))}
                     </React.Fragment>
                   ))}
+
+                  {/* Drag-to-create preview */}
+                  {calCreating && (() => {
+                    const topPx = ((calCreating.startMin - 360) / 60) * HOUR_H;
+                    const heightPx = Math.max(((calCreating.endMin - calCreating.startMin) / 60) * HOUR_H, 15);
+                    const fmtT = (m) => { const hr = Math.floor(m/60); const mn = m%60; const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${String(mn).padStart(2,"0")}${ampm}`; };
+                    return (
+                      <div style={{
+                        position: "absolute", left: `calc(40px + ${calCreating.di} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
+                        top: topPx, height: heightPx, background: "#7c3aed88", border: "2px solid #7c3aed", borderRadius: 4, padding: "2px 6px",
+                        fontSize: 10, color: "#fff", fontWeight: 700, zIndex: 25, pointerEvents: "none",
+                      }}>
+                        <div>(New event)</div>
+                        <div style={{ fontSize: 9, opacity: 0.8 }}>{fmtT(calCreating.startMin)} - {fmtT(calCreating.endMin)}</div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Events overlay */}
                   {calDates.map((d, di) => {
