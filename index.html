@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Daily Grind</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231a1a2e'/%3E%3Ctext x='50' y='68' font-size='55' text-anchor='middle' font-weight='900' font-family='monospace' fill='%237c3aed'%3EG%3C/text%3E%3C/svg%3E" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f5f5f7; overflow-x: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// localStorage-backed storage that matches the window.storage API
+window.storage = {
+  async get(key) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw !== null) return { key, value: raw };
+      return null;
+    } catch { return null; }
+  },
+  async set(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return { key, value };
+    } catch { return null; }
+  }
+};
+
+const STORAGE_KEY = "daily-grind-v13";
+const DAYS = ["Sa", "Su", "Mo", "Tu", "We", "Th", "Fr"];
+
+const DEFAULT_HABIT_SECTIONS = [
+  { id: "morning", title: "MORNING ROUTINE", icon: "\u2600", items: [
+    { id: "h21", name: "Fast everyday", points: 12 },
+    { id: "h30", name: "Wake up at 8:45 am", points: 4 },
+    { id: "h23", name: "Take pills", points: 4 },
+    { id: "h29", name: "Delete apps", points: 4 },
+    { id: "h22", name: "Calendarize and fill tasks", points: 3 },
+    { id: "h24", name: "Tehhajud 5 AM", points: 3 },
+    { id: "h28", name: "Weight tracker first thing", points: 3 },
+    { id: "h25", name: "Clean room", points: 3 },
+    { id: "h26", name: "Fill water bottle", points: 2 },
+    { id: "h27", name: "Read goals everyday and dua", points: 2 },
+  ]},
+  { id: "allday", title: "ALL DAY", icon: "\u26A1", items: [
+    { id: "h4", name: "First vid", points: 30 },
+    { id: "h5", name: "2nd vid", points: 30 },
+    { id: "h7", name: "Personal brand vid", points: 20 },
+    { id: "h6", name: "3rd vid", points: 20 },
+    { id: "h16", name: "Meal 10 pages", points: 12 },
+    { id: "h17", name: "Quran 2 pages", points: 10 },
+    { id: "h18", name: "10 pages Islamic book", points: 10 },
+    { id: "h19", name: "Course 30 mins", points: 10 },
+    { id: "h20", name: "Serra time 1:15 hour", points: 10 },
+    { id: "h10", name: "Diet and diet tracking", points: 8 },
+    { id: "h12", name: "Lift/combat", points: 8, desc: "Monday- push and abs\nTuesday-rest/makeup\nWednesday- Pull and forearms\nThursday-rest/makeup\nFriday- lower body and abs\nSaturday=upper body +forearms\nSunday= rest" },
+    { id: "h13", name: "500 calories/jitz", points: 8 },
+    { id: "h11", name: "3 liters of water", points: 5 },
+    { id: "h15", name: "Tesbihat", points: 5 },
+    { id: "h9", name: "No distracted out of pomodoro", points: 5 },
+    { id: "h8", name: "No swearing", points: 4 },
+    { id: "h14", name: "Call anne ve baba", points: 3 },
+  ]},
+  { id: "night", title: "NIGHT ROUTINE", icon: "\u263E", items: [
+    { id: "h1", name: "No prune no seconds", points: 12 },
+    { id: "h3", name: "Stretching", points: 6 },
+    { id: "h2", name: "White strips", points: 3 },
+  ]},
+];
+
+const DEFAULT_TASK_LISTS = [
+  { id: "tl_main", title: "Main Tasks / Goals", resetsDaily: false, items: [] },
+  { id: "tl_prebars", title: "Prebars", resetsDaily: false, items: [] },
+  { id: "tl_today", title: "Today's Tasks", resetsDaily: true, items: [] },
+  { id: "tl_hw", title: "HW", resetsDaily: false, items: [] },
+];
+
+const mkDefault = () => ({
+  habitSections: JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
+  taskLists: JSON.parse(JSON.stringify(DEFAULT_TASK_LISTS)),
+  dailyGoal: 200, log: {}, streak: 0, lastCompletedDate: null, history: {},
+});
+
+function localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function getToday() { return localDateStr(new Date()); }
+function getYesterday() { const d = new Date(); d.setDate(d.getDate() - 1); return localDateStr(d); }
+function getWeekDates() {
+  const today = new Date(); const dow = today.getDay();
+  const satOff = dow >= 6 ? dow - 6 : dow + 1;
+  const sat = new Date(today); sat.setDate(today.getDate() - satOff);
+  return Array.from({ length: 7 }, (_, i) => { const d = new Date(sat); d.setDate(sat.getDate() + i); return localDateStr(d); });
+}
+function allHabits(secs) { return secs.flatMap((s) => s.items); }
+function habitScore(tl, secs) { return allHabits(secs).reduce((sc, i) => sc + (tl[i.id] === "done" ? i.points : 0), 0); }
+function taskScore(lists) { return lists.flatMap((l) => l.items).reduce((sc, t) => sc + (t.done ? t.points : 0), 0); }
+function getStreak(id, log, today) {
+  if (log[today]?.[id] !== "done") return 0; let s = 1;
+  const d = new Date(today + "T12:00:00");
+  for (let i = 1; i < 365; i++) { const p = new Date(d); p.setDate(d.getDate() - i); if (log[localDateStr(p)]?.[id] === "done") s++; else break; }
+  return s;
+}
+function getOverall(id, log) { const ds = Object.keys(log); if (!ds.length) return 0; return Math.round((ds.filter((d) => log[d]?.[id] === "done").length / ds.length) * 100); }
+const statusCycle = [undefined, "done", "skip", "neutral"];
+
+function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd }) {
+  const [text, setText] = useState("");
+  const [pts, setPts] = useState("");
+  const [showDone, setShowDone] = useState(false);
+  const inputRef = useRef(null);
+
+  const pending = list.items.filter((t) => !t.done);
+  const completed = list.items.filter((t) => t.done);
+
+  function handleAdd() {
+    if (!text.trim()) return;
+    onAdd(list.id, text.trim(), Math.max(0, parseInt(pts) || 0));
+    setText(""); setPts("");
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }
+
+  return (
+    <div style={S.taskList}>
+      <div style={S.tlHead}>
+        <span style={S.tlTitle}>{list.title}</span>
+        <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
+      </div>
+
+      {pending.map((t) => (
+        <div key={t.id} style={S.tRow}>
+          <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
+          <span style={S.tText}>{t.name}</span>
+          {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
+          <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
+        </div>
+      ))}
+
+      <div style={S.tAddRow}>
+        <span style={S.tAddIcon}>+</span>
+        <input ref={inputRef} style={S.tAddInp} placeholder="Add a task" value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }} />
+        <input style={S.tAddPts} placeholder="pts" type="number" value={pts}
+          onChange={(e) => setPts(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }} />
+      </div>
+
+      {completed.length > 0 && (
+        <>
+          <button onClick={() => setShowDone(!showDone)} style={S.compToggle}>
+            <span style={{ marginRight: 6 }}>{showDone ? "\u25BE" : "\u25B8"}</span>
+            Completed ({completed.length})
+          </button>
+          {showDone && completed.map((t) => (
+            <div key={t.id} style={{ ...S.tRow, opacity: 0.4 }}>
+              <button onClick={() => onToggle(list.id, t.id)} style={{ ...S.tCircle, background: "#4cd137", borderColor: "#4cd137" }}>
+                <span style={{ fontSize: 10, color: "#fff" }}>{"\u2713"}</span>
+              </button>
+              <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e" }}>{t.name}</span>
+              {t.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be" }}>+{t.points}</span>}
+              <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function DailyGrind() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState("habits");
+  const [view, setView] = useState("main");
+  const [editItem, setEditItem] = useState(null);
+  const [editSection, setEditSection] = useState(null);
+  const [formName, setFormName] = useState("");
+  const [formPoints, setFormPoints] = useState("10");
+  const [formDesc, setFormDesc] = useState("");
+  const [formComment, setFormComment] = useState("");
+  const [goalInput, setGoalInput] = useState("200");
+  const [winAnim, setWinAnim] = useState(false);
+  const [newListName, setNewListName] = useState("");
+  const [showNewList, setShowNewList] = useState(false);
+  const [pomoWork, setPomWork] = useState(25);
+  const [pomoBreak, setPomBreak] = useState(5);
+  const [pomoRunning, setPomoRunning] = useState(false);
+  const [pomoSeconds, setPomoSeconds] = useState(25 * 60);
+  const [pomoIsBreak, setPomoIsBreak] = useState(false);
+  const [pomoSessions, setPomoSessions] = useState(0);
+  const [customTimerMin, setCustomTimerMin] = useState("5");
+  const [customTimerSec, setCustomTimerSec] = useState(0);
+  const [customTimerRunning, setCustomTimerRunning] = useState(false);
+  const [stopwatchSec, setStopwatchSec] = useState(0);
+  const [stopwatchRunning, setStopwatchRunning] = useState(false);
+  const [pomoTask, setPomoTask] = useState("");
+  const [showScoreDetail, setShowScoreDetail] = useState(false);
+  const prevScoreRef = useRef(0);
+  const today = getToday();
+  const weekDates = getWeekDates();
+
+  useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
+  const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
+
+  // Day rollover
+  useEffect(() => {
+    if (!data) return;
+    const yday = getYesterday();
+    if (data.log[yday] && !data.history[yday]) {
+      const yLog = data.log[yday];
+      const hs = allHabits(data.habitSections).reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
+      const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + (t.done ? t.points : 0), 0);
+      const totalScore = hs + ts;
+      const won = totalScore >= data.dailyGoal;
+      const nh = { ...data.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
+      let ns = data.streak;
+      if (won) { const db = new Date(yday + "T12:00:00"); db.setDate(db.getDate() - 1); ns = (!data.lastCompletedDate || data.lastCompletedDate === localDateStr(db)) ? ns + 1 : 1; } else ns = 0;
+      const resetLists = data.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
+      save({ ...data, history: nh, streak: ns, lastCompletedDate: won ? yday : data.lastCompletedDate, taskLists: resetLists, lastTaskResetDate: today });
+    }
+    if (data.lastTaskResetDate && data.lastTaskResetDate !== today && !data.history[yday]) {
+      const resetLists = data.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
+      save({ ...data, taskLists: resetLists, lastTaskResetDate: today });
+    }
+    if (!data.lastTaskResetDate) {
+      save({ ...data, lastTaskResetDate: today });
+    }
+  }, [data, save]);
+
+  const getTL = () => data?.log[today] || {};
+
+  function toggleHabit(itemId) {
+    const tl = getTL(); const cur = tl[itemId]; const next = statusCycle[(statusCycle.indexOf(cur) + 1) % statusCycle.length];
+    const ntl = { ...tl }; if (next === undefined) { delete ntl[itemId]; delete ntl[itemId + "_note"]; } else ntl[itemId] = next;
+    save({ ...data, log: { ...data.log, [today]: ntl } });
+  }
+  function saveNote(itemId, note) {
+    const tl = getTL();
+    save({ ...data, log: { ...data.log, [today]: { ...tl, [itemId + "_note"]: note } } });
+  }
+  function addHabit(secId) {
+    if (!formName.trim()) return;
+    const item = { id: `h_${Date.now()}`, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    save({ ...data, habitSections: data.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item].sort((a, b) => b.points - a.points) } : s) });
+    setFormName(""); setFormPoints("10"); setFormDesc(""); setView("main");
+  }
+  function deleteHabit(id) { save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) }); setView("main"); }
+  function saveHabitEdit() {
+    if (!editItem || !formName.trim()) return;
+    const u = { ...editItem, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    const newLog = { ...data.log, [today]: { ...getTL(), [editItem.id + "_note"]: formComment.trim() } };
+    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i).sort((a, b) => b.points - a.points) })), log: newLog });
+    setView("main"); setEditItem(null); setFormDesc(""); setFormComment("");
+  }
+  function moveHabitTo(tgt) {
+    if (!editItem) return;
+    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem].sort((a, b) => b.points - a.points) : s.items.filter((i) => i.id !== editItem.id) })) });
+    setEditSection(tgt);
+  }
+
+  const toggleTask = useCallback((listId, taskId) => {
+    setData((prev) => {
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => t.id === taskId ? { ...t, done: !t.done } : t) } : l) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+  const deleteTaskItem = useCallback((listId, taskId) => {
+    setData((prev) => {
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+  const addTaskItem = useCallback((listId, name, points) => {
+    setData((prev) => {
+      const task = { id: `t_${Date.now()}`, name, points, done: false };
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+  const deleteTaskList = useCallback((listId) => {
+    setData((prev) => {
+      const nd = { ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+
+  function addNewList() {
+    if (!newListName.trim()) return;
+    const list = { id: `tl_${Date.now()}`, title: newListName.trim(), items: [] };
+    save({ ...data, taskLists: [...data.taskLists, list] });
+    setNewListName(""); setShowNewList(false);
+  }
+  function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save({ ...data, dailyGoal: v }); setGoalInput(String(v)); setView("main"); }
+  function resetAll() { save(mkDefault()); setGoalInput("200"); setView("main"); setPage("habits"); }
+
+  useEffect(() => {
+    if (!data) return;
+    const sc = habitScore(getTL(), data.habitSections) + taskScore(data.taskLists);
+    if (sc >= data.dailyGoal && prevScoreRef.current < data.dailyGoal && data.dailyGoal > 0) { setWinAnim(true); setTimeout(() => setWinAnim(false), 3000); }
+    prevScoreRef.current = sc;
+  }, [data]);
+
+  // Pomodoro timer
+  useEffect(() => {
+    if (!pomoRunning) return;
+    const i = setInterval(() => {
+      setPomoSeconds((s) => {
+        if (s <= 1) {
+          setPomoRunning(false);
+          if (!pomoIsBreak) { setPomoSessions((p) => p + 1); setPomoIsBreak(true); return pomoBreak * 60; }
+          else { setPomoIsBreak(false); return pomoWork * 60; }
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(i);
+  }, [pomoRunning, pomoIsBreak, pomoWork, pomoBreak]);
+
+  // Custom timer
+  useEffect(() => {
+    if (!customTimerRunning) return;
+    const i = setInterval(() => {
+      setCustomTimerSec((s) => { if (s <= 1) { setCustomTimerRunning(false); return 0; } return s - 1; });
+    }, 1000);
+    return () => clearInterval(i);
+  }, [customTimerRunning]);
+
+  // Stopwatch
+  useEffect(() => {
+    if (!stopwatchRunning) return;
+    const i = setInterval(() => setStopwatchSec((s) => s + 1), 1000);
+    return () => clearInterval(i);
+  }, [stopwatchRunning]);
+
+  if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 4 }}>LOADING...</span></div></div>;
+
+  const tl = getTL();
+  const hScore = habitScore(tl, data.habitSections);
+  const tScore = taskScore(data.taskLists);
+  const score = hScore + tScore;
+  const prog = data.dailyGoal > 0 ? Math.min(1, score / data.dailyGoal) : 0;
+  const won = score >= data.dailyGoal && data.dailyGoal > 0;
+  const allH = allHabits(data.habitSections);
+  const allT = data.taskLists.flatMap((l) => l.items);
+  const doneN = Object.values(tl).filter((v) => v === "done").length + allT.filter((t) => t.done).length;
+  const totalN = allH.length + allT.length;
+
+  const navIcons = {
+    habits: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>,
+    tasks: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>,
+    timer: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><line x1="12" y1="1" x2="12" y2="3"/></svg>,
+  };
+  const Nav = () => (
+    <div style={S.nav}>
+      {[["habits", "Habits"], ["tasks", "Tasks"], ["timer", "Timer"]].map(([k, lb]) => (
+        <button key={k} onClick={() => { setPage(k); setView("main"); }} style={{ ...S.navBtn, opacity: page === k ? 1 : 0.4, color: page === k ? "#a78bfa" : "#e2e2ea" }}>
+          {navIcons[k]}
+          <span style={S.navLbl}>{lb}</span>
+        </button>
+      ))}
+    </div>
+  );
+
+  const HabitCard = ({ item, secId }) => {
+    const streak = getStreak(item.id, data.log, today);
+    const overall = getOverall(item.id, data.log);
+    const todayStatus = tl[item.id];
+    const todayNote = tl[item.id + "_note"] || "";
+    const [showPicker, setShowPicker] = useState(false);
+    const [showComment, setShowComment] = useState(false);
+    const [commentText, setCommentText] = useState(todayNote);
+
+    function pickStatus(st) {
+      const ntl = { ...tl };
+      if (st === undefined) { delete ntl[item.id]; delete ntl[item.id + "_note"]; }
+      else ntl[item.id] = st;
+      save({ ...data, log: { ...data.log, [today]: ntl } });
+      setShowPicker(false); setShowComment(false);
+    }
+
+    function saveComment() {
+      save({ ...data, log: { ...data.log, [today]: { ...tl, [item.id + "_note"]: commentText.trim() } } });
+      setShowComment(false); setShowPicker(false);
+    }
+
+    return (
+      <div style={S.card}>
+        <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <span style={S.cardName}>{item.name}</span>
+          </div>
+          <span style={S.cardPts}>+{item.points}</span>
+        </div>
+        <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
+        {item.desc && <div style={S.cardDesc}>{item.desc}</div>}
+        <div style={{ position: "relative" }}>
+          <div style={S.week}>
+            {weekDates.map((date, i) => {
+              const st = data.log[date]?.[item.id];
+              const nt = data.log[date]?.[item.id + "_note"];
+              const isT = date === today, isF = date > today;
+              let bg = "#2d2d3a", clr = "#aaaabb", bdr = "2px solid transparent", lbl = "";
+              if (st === "done") { bg = "#4cd137"; clr = "#fff"; }
+              else if (st === "skip") { bg = "#e84118"; clr = "#fff"; }
+              else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
+              if (nt && !st) { bg = "#4cd13744"; bdr = "2px solid #4cd137"; lbl = "\u00B7\u00B7\u00B7"; clr = "#4cd137"; }
+              else if (nt && st) { bdr = `2px solid ${st === "done" ? "#4cd137" : st === "skip" ? "#e84118" : "#636e72"}`; }
+              if (isT) {
+                bdr = "2px solid #c4b5fd";
+                lbl = st === "done" ? "\u2713" : st === "skip" ? "\u2717" : st === "neutral" ? "\u2014" : nt ? "\u00B7\u00B7\u00B7" : "\u00B7\u00B7\u00B7";
+              }
+              return (
+                <div key={date} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flex: 1 }}>
+                  <button onClick={() => { if (isT) { setShowPicker(!showPicker); setShowComment(false); } }} disabled={!isT} style={{
+                    width: 32, height: 32, borderRadius: 16, background: isF ? "#c0c0cc" : bg, color: clr, border: bdr,
+                    fontSize: 11, fontWeight: 800, cursor: isT ? "pointer" : "default", fontFamily: "inherit",
+                    display: "flex", alignItems: "center", justifyContent: "center", opacity: isF ? 0.2 : 1, transition: "all 0.15s", padding: 0,
+                  }}>{lbl}</button>
+                  <span style={{ fontSize: 8, color: isT ? "#7c3aed" : "#555566", fontWeight: isT ? 800 : 600 }}>{DAYS[i]}</span>
+                  {isT && <span style={{ fontSize: 6, color: "#8b8b9e", letterSpacing: 1, marginTop: -2, fontWeight: 700 }}>TODAY</span>}
+                </div>
+              );
+            })}
+          </div>
+          {showPicker && (
+            <div style={S.pickerWrap}>
+              <div style={S.picker}>
+                <button onClick={() => pickStatus("done")} style={{ ...S.pickBtn, background: "#4cd137" }}>{"\u2713"}</button>
+                <button onClick={() => pickStatus("skip")} style={{ ...S.pickBtn, background: "#e84118" }}>{"\u2717"}</button>
+                <button onClick={() => pickStatus("neutral")} style={{ ...S.pickBtn, background: "#636e72" }}>{"\u2014"}</button>
+                <button onClick={() => { setShowComment(!showComment); setCommentText(todayNote); }} style={{ ...S.pickBtn, background: "#1a1a2e", color: "#f8f8fa", border: todayNote ? "3px solid #4cd137" : "none" }}>{"\u00B7\u00B7\u00B7"}</button>
+              </div>
+              {showComment && (
+                <div style={S.commentRow}>
+                  <input style={S.commentInp} placeholder="Write a comment..." value={commentText} onChange={(e) => setCommentText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveComment(); }} autoFocus />
+                  <button onClick={saveComment} style={S.commentSave}>{"\u2713"}</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {todayNote && !showPicker && (
+          <div style={S.commentPreview} onClick={() => { setShowPicker(true); setShowComment(true); setCommentText(todayNote); }}>
+            {"\uD83D\uDCDD"} {todayNote}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // MAIN
+  if (view === "main") return (
+    <div style={S.shell}>
+      <div style={S.box}>
+        {winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
+
+        <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <h1 style={S.title}>DAILY GRIND</h1>
+            <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {data.streak > 0 && <div style={S.streakB}>{"\uD83D\uDD25"} {data.streak}</div>}
+            <button onClick={() => setView("settings")} style={S.gear}>{"\u2699"}</button>
+          </div>
+        </div>
+
+        <div style={{ ...S.sc, cursor: "pointer" }} onClick={() => setShowScoreDetail(!showScoreDetail)}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 42, fontWeight: 900, lineHeight: 1, color: won ? "#00ff87" : prog > 0.7 ? "#ffd43b" : "#7c3aed" }}>{score}</span>
+              <span style={{ fontSize: 18, color: "#8b8b9e" }}>/ {data.dailyGoal}</span>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <span style={{ fontSize: 11, color: "#8b8b9e", letterSpacing: 1 }}>{doneN}/{totalN}</span>
+              <div style={{ fontSize: 8, color: "#555566", marginTop: 2 }}>{showScoreDetail ? "\u25B2 tap to close" : "\u25BC tap for details"}</div>
+            </div>
+          </div>
+          <div style={S.tr}><div style={{ ...S.fl, width: `${prog * 100}%`, background: won ? "linear-gradient(90deg,#00ff87,#00d9ff)" : prog > 0.7 ? "linear-gradient(90deg,#ffd43b,#ff922b)" : "linear-gradient(90deg,#7c3aed,#c4b5fd)", boxShadow: won ? "0 0 20px #00ff8744" : "none" }} /></div>
+          <div style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 2, textTransform: "uppercase", marginTop: 8 }}>
+            {won ? "TARGET HIT" : `${data.dailyGoal - score} to go`}
+            {(hScore > 0 || tScore > 0) ? ` \u00B7 H:${hScore} \u00B7 T:${tScore}` : ""}
+          </div>
+        </div>
+
+        {showScoreDetail && (
+          <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "16px", marginBottom: 20, marginTop: -12 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 3, color: "#8b8b9e", marginBottom: 12 }}>TODAY'S COMPLETED</div>
+            {allH.filter((h) => tl[h.id] === "done").length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 9, color: "#555566", letterSpacing: 2, marginBottom: 6 }}>HABITS</div>
+                {allH.filter((h) => tl[h.id] === "done").map((h) => (
+                  <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #2d2d3a" }}>
+                    <button onClick={(e) => { e.stopPropagation(); toggleHabit(h.id); }} style={{ width: 22, height: 22, borderRadius: 11, background: "#4cd137", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{"\u2713"}</button>
+                    <span style={{ flex: 1, fontSize: 12, color: "#f0f0f4" }}>{h.name}</span>
+                    <span style={{ fontSize: 10, color: "#4cd137", fontWeight: 700 }}>+{h.points}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {allT.filter((t) => t.done).length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 9, color: "#555566", letterSpacing: 2, marginBottom: 6 }}>TASKS</div>
+                {data.taskLists.flatMap((list) => list.items.filter((t) => t.done).map((t) => ({ ...t, listId: list.id, listTitle: list.title }))).map((t) => (
+                  <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #2d2d3a" }}>
+                    <button onClick={(e) => { e.stopPropagation(); toggleTask(t.listId, t.id); }} style={{ width: 22, height: 22, borderRadius: 11, background: "#4cd137", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{"\u2713"}</button>
+                    <span style={{ flex: 1, fontSize: 12, color: "#f0f0f4" }}>{t.name}</span>
+                    <span style={{ fontSize: 10, color: "#4cd137", fontWeight: 700 }}>{t.points > 0 ? `+${t.points}` : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {doneN === 0 && <div style={{ fontSize: 12, color: "#555566", textAlign: "center", padding: "12px 0" }}>Nothing completed yet. Get to work.</div>}
+            <div style={{ fontSize: 9, color: "#555566", textAlign: "center", marginTop: 8 }}>Tap the green {"\u2713"} to undo a completion</div>
+          </div>
+        )}
+
+        {page === "habits" && data.habitSections.map((sec) => {
+          const sp = sec.items.reduce((s, i) => s + (tl[i.id] === "done" ? i.points : 0), 0);
+          const sm = sec.items.reduce((s, i) => s + i.points, 0);
+          return (
+            <div key={sec.id} style={{ marginBottom: 20 }}>
+              <div style={S.secH}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14 }}>{sec.icon}</span>
+                  <span style={S.secLbl}>{sec.title}</span>
+                  <span style={S.secCnt}>{sec.items.length}</span>
+                </div>
+                <span style={S.secPt}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>
+              </div>
+              {sec.items.map((item) => <HabitCard key={item.id} item={item} secId={sec.id} />)}
+              <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
+            </div>
+          );
+        })}
+
+        {page === "habits" && Object.keys(data.history).length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={S.secH}><span style={S.secLbl}>LAST 7 DAYS</span></div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {Object.entries(data.history).sort(([a], [b]) => b.localeCompare(a)).slice(0, 7).map(([d, inf]) => (
+                <div key={d} style={{ flex: 1, borderRadius: 8, border: `1px solid ${inf.won ? "#00ff8733" : "#ff475733"}`, background: inf.won ? "#00ff8716" : "#ff475716", padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: "#8b8b9e" }}>{new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "narrow" })}</span>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: inf.won ? "#00ff87" : "#ff4757" }}>{inf.score}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {page === "tasks" && (
+          <div>
+            {data.taskLists.map((list) => (
+              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} />
+            ))}
+            {showNewList ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <input style={S.inp} placeholder="List name" value={newListName} onChange={(e) => setNewListName(e.target.value)} autoFocus
+                  onKeyDown={(e) => { if (e.key === "Enter") addNewList(); }} />
+                <button onClick={addNewList} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Add</button>
+                <button onClick={() => { setShowNewList(false); setNewListName(""); }} style={{ ...S.cBtn, flex: "none", padding: "11px 16px" }}>&times;</button>
+              </div>
+            ) : (
+              <button onClick={() => setShowNewList(true)} style={{ ...S.addR, marginTop: 12 }}><span style={S.addI}>+</span> New task list</button>
+            )}
+          </div>
+        )}
+
+        {page === "timer" && (() => {
+          const fmtSec = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+          const pomoProg = pomoIsBreak ? 1 - (pomoSeconds / (pomoBreak * 60)) : 1 - (pomoSeconds / (pomoWork * 60));
+          return (
+            <div>
+              <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "28px 20px", marginBottom: 16, textAlign: "center" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: pomoIsBreak ? "#00ff87" : "#7c3aed", marginBottom: 12, textTransform: "uppercase" }}>
+                  {pomoIsBreak ? "\u2615 BREAK" : "\uD83C\uDF45 POMODORO"}
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <input value={pomoTask} onChange={(e) => setPomoTask(e.target.value)}
+                    placeholder="What are you working on?"
+                    style={{ width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 10, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", padding: "10px 14px", outline: "none", boxSizing: "border-box", textAlign: "center" }} />
+                  {pomoTask && <div style={{ fontSize: 10, color: "#f0f0f4", marginTop: 6, fontWeight: 700, letterSpacing: 1 }}>WORKING ON: {pomoTask}</div>}
+                </div>
+                <div style={{ position: "relative", width: 180, height: 180, margin: "0 auto 20px" }}>
+                  <svg width="180" height="180" style={{ transform: "rotate(-90deg)" }}>
+                    <circle cx="90" cy="90" r="80" fill="none" stroke="#2d2d3a" strokeWidth="6" />
+                    <circle cx="90" cy="90" r="80" fill="none" stroke={pomoIsBreak ? "#00ff87" : "#7c3aed"} strokeWidth="6"
+                      strokeDasharray={2 * Math.PI * 80} strokeDashoffset={2 * Math.PI * 80 * (1 - pomoProg)} strokeLinecap="round" style={{ transition: "stroke-dashoffset 1s linear" }} />
+                  </svg>
+                  <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                    <span style={{ fontSize: 40, fontWeight: 900, color: "#f0f0f4", fontFamily: "inherit" }}>{fmtSec(pomoSeconds)}</span>
+                    <span style={{ fontSize: 10, color: "#8b8b9e", marginTop: 4 }}>Session #{pomoSessions + 1}</span>
+                  </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 16 }}>
+                  <button onClick={() => setPomoRunning(!pomoRunning)} style={{ ...S.okBtn, flex: "none", padding: "12px 28px", fontSize: 13, borderRadius: 24 }}>
+                    {pomoRunning ? "\u23F8 Pause" : "\u25B6 Start"}
+                  </button>
+                  <button onClick={() => { setPomoRunning(false); setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }} style={{ ...S.cBtn, flex: "none", padding: "12px 20px", borderRadius: 24 }}>
+                    {"\u21BA"} Reset
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+                  <div style={{ textAlign: "center" }}>
+                    <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>WORK</label>
+                    <input type="number" value={pomoWork} onChange={(e) => { const v = Math.max(1, parseInt(e.target.value) || 25); setPomWork(v); if (!pomoRunning && !pomoIsBreak) setPomoSeconds(v * 60); }}
+                      style={{ ...S.inp, width: 60, textAlign: "center", padding: "6px", fontSize: 13, marginTop: 4 }} />
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>BREAK</label>
+                    <input type="number" value={pomoBreak} onChange={(e) => { const v = Math.max(1, parseInt(e.target.value) || 5); setPomBreak(v); if (!pomoRunning && pomoIsBreak) setPomoSeconds(v * 60); }}
+                      style={{ ...S.inp, width: 60, textAlign: "center", padding: "6px", fontSize: 13, marginTop: 4 }} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 12 }}>Sessions completed: {pomoSessions}</div>
+              </div>
+
+              <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "24px 20px", marginBottom: 16, textAlign: "center" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#ffd43b", marginBottom: 16 }}>{"\u23F1"} COUNTDOWN TIMER</div>
+                <div style={{ fontSize: 36, fontWeight: 900, color: customTimerSec > 0 ? "#ffd43b" : "#f0f0f4", marginBottom: 16, fontFamily: "inherit" }}>{fmtSec(customTimerSec)}</div>
+                {!customTimerRunning && customTimerSec === 0 && (
+                  <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
+                    <input type="number" placeholder="min" value={customTimerMin} onChange={(e) => setCustomTimerMin(e.target.value)}
+                      style={{ ...S.inp, width: 70, textAlign: "center", padding: "8px" }} />
+                    <button onClick={() => { const s = Math.max(1, parseInt(customTimerMin) || 5) * 60; setCustomTimerSec(s); }} style={{ ...S.okBtn, flex: "none", padding: "8px 16px", background: "linear-gradient(135deg, #ffd43b, #ff922b)", color: "#f8f8fa" }}>Set</button>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "center", gap: 10 }}>
+                  <button onClick={() => setCustomTimerRunning(!customTimerRunning)} disabled={customTimerSec === 0}
+                    style={{ ...S.okBtn, flex: "none", padding: "10px 24px", borderRadius: 20, opacity: customTimerSec === 0 ? 0.3 : 1, background: "linear-gradient(135deg, #ffd43b, #ff922b)", color: "#f8f8fa" }}>
+                    {customTimerRunning ? "\u23F8 Pause" : "\u25B6 Start"}
+                  </button>
+                  <button onClick={() => { setCustomTimerRunning(false); setCustomTimerSec(0); }} style={{ ...S.cBtn, flex: "none", padding: "10px 16px", borderRadius: 20 }}>{"\u21BA"}</button>
+                </div>
+              </div>
+
+              <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "24px 20px", textAlign: "center" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#00ff87", marginBottom: 16 }}>{"\u23F1"} STOPWATCH</div>
+                <div style={{ fontSize: 36, fontWeight: 900, color: stopwatchRunning ? "#00ff87" : "#f0f0f4", marginBottom: 16, fontFamily: "inherit" }}>
+                  {`${String(Math.floor(stopwatchSec / 3600)).padStart(2, "0")}:${String(Math.floor((stopwatchSec % 3600) / 60)).padStart(2, "0")}:${String(stopwatchSec % 60).padStart(2, "0")}`}
+                </div>
+                <div style={{ display: "flex", justifyContent: "center", gap: 10 }}>
+                  <button onClick={() => setStopwatchRunning(!stopwatchRunning)} style={{ ...S.okBtn, flex: "none", padding: "10px 24px", borderRadius: 20, background: "linear-gradient(135deg, #00ff87, #00d9ff)", color: "#f8f8fa" }}>
+                    {stopwatchRunning ? "\u23F8 Pause" : "\u25B6 Start"}
+                  </button>
+                  <button onClick={() => { setStopwatchRunning(false); setStopwatchSec(0); }} style={{ ...S.cBtn, flex: "none", padding: "10px 16px", borderRadius: 20 }}>{"\u21BA"}</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        <div style={{ height: 80 }} />
+      </div>
+      <Nav />
+    </div>
+  );
+
+  const FW = ({ children }) => <div style={S.shell}><div style={S.box}>{children}</div><Nav /></div>;
+
+  if (view === "addHabit") {
+    const sec = data.habitSections.find((s) => s.id === editSection);
+    return <FW><div style={S.fCard}><h2 style={S.fTitle}>ADD TO {sec?.title}</h2>
+      <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
+      <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
+      <label style={S.lbl}>Description (optional)</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="e.g., Mon-Push, Tue-Rest, Wed-Pull..." rows={3} />
+      <div style={S.fAct}><button onClick={() => { setView("main"); setFormDesc(""); }} style={S.cBtn}>Cancel</button><button onClick={() => addHabit(editSection)} style={S.okBtn}>Add</button></div>
+    </div></FW>;
+  }
+
+  if (view === "editHabit" && editItem) {
+    return <FW><div style={S.fCard}><h2 style={S.fTitle}>EDIT HABIT</h2>
+      <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
+      <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
+      <label style={S.lbl}>Description</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="Add details, schedule, notes..." rows={4} />
+      <label style={S.lbl}>{"\uD83D\uDCDD"} Today's Comment</label><textarea style={{ ...S.textarea, borderColor: "#7c3aed44" }} value={formComment} onChange={(e) => setFormComment(e.target.value)} placeholder="e.g., 82.5kg, skipped because sick, did 30 min instead..." rows={2} />
+      <label style={S.lbl}>Move to section</label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+        {data.habitSections.map((sec) => <button key={sec.id} onClick={() => moveHabitTo(sec.id)} style={{ padding: "7px 12px", background: editSection === sec.id ? "#7c3aed33" : "#12122a", border: `1px solid ${editSection === sec.id ? "#7c3aed" : "#2d2d3a"}`, borderRadius: 8, color: editSection === sec.id ? "#7c3aed" : "#8b8b9e", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>{sec.icon} {sec.title}</button>)}
+      </div>
+      <div style={S.fAct}>
+        <button onClick={() => deleteHabit(editItem.id)} style={S.dBtn}>Delete</button>
+        <button onClick={() => { setView("main"); setEditItem(null); }} style={S.cBtn}>Cancel</button>
+        <button onClick={saveHabitEdit} style={S.okBtn}>Save</button>
+      </div>
+    </div></FW>;
+  }
+
+  if (view === "settings") {
+    return <FW><div style={S.fCard}><h2 style={S.fTitle}>SETTINGS</h2>
+      <label style={S.lbl}>Daily Point Goal</label><input style={S.inp} type="number" value={goalInput} onChange={(e) => setGoalInput(e.target.value)} min="1" />
+      <div style={S.fAct}><button onClick={() => setView("main")} style={S.cBtn}>Cancel</button><button onClick={saveGoal} style={S.okBtn}>Save</button></div>
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
+      </div>
+    </div></FW>;
+  }
+  return null;
+}
+
+const S = {
+  shell: { minHeight: "100vh", background: "#f5f5f7", color: "#1a1a2e", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',monospace" },
+  box: { padding: "16px 14px", maxWidth: 900, margin: "0 auto", paddingBottom: 80 },
+  title: { fontSize: 18, fontWeight: 900, letterSpacing: 6, margin: 0, color: "#1a1a2e" },
+  date: { fontSize: 11, color: "#8b8b9e", letterSpacing: 1, marginTop: 4, textTransform: "uppercase" },
+  streakB: { fontSize: 13, fontWeight: 700, color: "#d97706", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 20, padding: "4px 12px" },
+  gear: { background: "none", border: "1px solid #2d2d3a", color: "#2d2d3a", fontSize: 16, width: 34, height: 34, borderRadius: 8, cursor: "pointer" },
+  sc: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "20px 18px", marginBottom: 24, boxShadow: "0 1px 3px #0000000a" },
+  tr: { height: 6, background: "#2d2d3a", borderRadius: 3, overflow: "hidden" },
+  fl: { height: "100%", borderRadius: 3, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" },
+  secH: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0 10px", borderBottom: "1px solid #2d2d3a", marginBottom: 10 },
+  secLbl: { fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#1a1a2e", textTransform: "uppercase" },
+  secCnt: { fontSize: 10, color: "#8b8b9e", background: "#2d2d3a", borderRadius: 10, padding: "2px 7px", fontWeight: 700 },
+  secPt: { fontSize: 12, color: "#7c3aed", fontWeight: 700 },
+  card: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "14px 16px 16px", marginBottom: 10, boxShadow: "0 1px 3px #0000000a" },
+  cardHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", cursor: "pointer", marginBottom: 4 },
+  cardName: { fontSize: 14, fontWeight: 700, color: "#f0f0f4", lineHeight: 1.3 },
+  cardPts: { fontSize: 13, fontWeight: 800, color: "#a78bfa", flexShrink: 0, marginLeft: 8 },
+  cardMeta: { fontSize: 10, color: "#8b8b9e", letterSpacing: 0.5, marginBottom: 12 },
+  cardDesc: { fontSize: 11, color: "#a0a0b0", lineHeight: 1.6, marginBottom: 12, whiteSpace: "pre-wrap", background: "#12122a", borderRadius: 8, padding: "8px 10px", border: "1px solid #2d2d3a" },
+  noteRow: { marginTop: 10, paddingTop: 8, borderTop: "1px solid #2d2d3a" },
+  noteInp: { width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 12, fontFamily: "inherit", padding: "8px 10px", outline: "none", boxSizing: "border-box" },
+  textarea: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 },
+  week: { display: "flex", justifyContent: "space-between", gap: 2 },
+  picker: { display: "flex", justifyContent: "center", gap: 10 },
+  pickerWrap: { marginTop: 10, padding: "12px 0 4px", borderTop: "1px solid #2d2d3a" },
+  pickBtn: { width: 44, height: 44, borderRadius: 22, border: "none", fontSize: 20, fontWeight: 900, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit", boxShadow: "0 2px 8px #00000022", boxSizing: "border-box" },
+  commentRow: { display: "flex", gap: 6, marginTop: 10 },
+  commentInp: { flex: 1, background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 12, fontFamily: "inherit", padding: "8px 10px", outline: "none" },
+  commentSave: { background: "#4cd137", border: "none", borderRadius: 8, color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", padding: "0 14px", fontFamily: "inherit" },
+  commentPreview: { marginTop: 8, padding: "6px 10px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a", fontSize: 11, color: "#a78bfa", cursor: "pointer", lineHeight: 1.4 },
+  addR: { display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "1px dashed #2d2d3a55", borderRadius: 8, padding: "10px 12px", color: "#555566", fontSize: 12, cursor: "pointer", fontFamily: "inherit", marginTop: 6, letterSpacing: 1 },
+  addI: { color: "#7c3aed", fontSize: 16, fontWeight: 700 },
+
+  taskList: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "16px", marginBottom: 12, boxShadow: "0 1px 3px #0000000a" },
+  tlHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid #2d2d3a", paddingBottom: 10 },
+  tlTitle: { fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 },
+  tlDel: { background: "none", border: "none", color: "#555566", fontSize: 20, cursor: "pointer", fontFamily: "inherit", padding: "0 4px", lineHeight: 1 },
+  tRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #2d2d3a" },
+  tCircle: { width: 20, height: 20, borderRadius: 10, border: "2px solid #555566", background: "transparent", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
+  tText: { flex: 1, fontSize: 13, color: "#f0f0f4", lineHeight: 1.4 },
+  tPts: { fontSize: 10, color: "#a78bfa", fontWeight: 700, flexShrink: 0 },
+  tX: { background: "none", border: "none", color: "#555566", fontSize: 16, cursor: "pointer", fontFamily: "inherit", padding: "0 2px", flexShrink: 0, lineHeight: 1 },
+  tAddRow: { display: "flex", alignItems: "center", gap: 8, padding: "10px 0 4px" },
+  tAddIcon: { color: "#a78bfa", fontSize: 16, fontWeight: 700, flexShrink: 0 },
+  tAddInp: { flex: 1, background: "none", border: "none", borderBottom: "1px solid #2d2d3a", color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", padding: "8px 0", outline: "none" },
+  tAddPts: { width: 48, background: "none", border: "none", borderBottom: "1px solid #2d2d3a", color: "#a78bfa", fontSize: 12, fontFamily: "inherit", padding: "8px 4px", outline: "none", textAlign: "center" },
+  compToggle: { background: "none", border: "none", color: "#8b8b9e", fontSize: 11, cursor: "pointer", fontFamily: "inherit", padding: "10px 0 4px", letterSpacing: 1, fontWeight: 600, display: "flex", alignItems: "center" },
+
+  fCard: { background: "#1a1a2e", borderRadius: 14, padding: "28px 22px", marginTop: 40, border: "1px solid #2d2d3a", boxShadow: "0 1px 3px #0000000a" },
+  fTitle: { fontSize: 13, fontWeight: 900, letterSpacing: 4, margin: "0 0 20px 0", color: "#f0f0f4" },
+  lbl: { fontSize: 9, fontWeight: 800, letterSpacing: 3, color: "#8b8b9e", textTransform: "uppercase", display: "block", marginBottom: 6, marginTop: 14 },
+  inp: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 14, fontFamily: "inherit", outline: "none", boxSizing: "border-box" },
+  fAct: { display: "flex", gap: 8, marginTop: 24 },
+  cBtn: { flex: 1, padding: 11, background: "none", border: "1px solid #2d2d3a", borderRadius: 8, color: "#8b8b9e", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1 },
+  okBtn: { flex: 1, padding: 11, background: "linear-gradient(135deg,#7c3aed,#a78bfa)", border: "none", borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1 },
+  dBtn: { padding: "11px 14px", background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+
+  nav: { position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", background: "#1a1a2eee", borderTop: "1px solid #2d2d3a", zIndex: 100, backdropFilter: "blur(10px)", padding: "4px 0 env(safe-area-inset-bottom, 6px)" },
+  navBtn: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "10px 0 6px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", transition: "opacity 0.2s" },
+  navLbl: { fontSize: 9, fontWeight: 700, letterSpacing: 2, color: "#e2e2ea", textTransform: "uppercase" },
+  win: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "radial-gradient(circle at center,#00ff8722 0%,#f5f5f7ee 60%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999, pointerEvents: "none" },
+  winTxt: { fontSize: 24, fontWeight: 900, letterSpacing: 8, color: "#16a34a", textShadow: "0 0 40px #00ff8744" },
+  winSub: { fontSize: 13, color: "#8b8b9e", marginTop: 8, letterSpacing: 2 },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode><DailyGrind /></React.StrictMode>
+);
+  </script>
+</body>
+</html>
