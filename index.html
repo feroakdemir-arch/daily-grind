@@ -283,6 +283,7 @@ function DailyGrind() {
   const [calEditMode, setCalEditMode] = useState(false);
   const [calEventDesc, setCalEventDesc] = useState("");
   const [calCreating, setCalCreating] = useState(null); // {date, startMin, endMin}
+  const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
   const [calDragging, setCalDragging] = useState(null);
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
@@ -439,11 +440,19 @@ function DailyGrind() {
   function editCalEvent(id, updates) {
     saveCalEvents(calEvents.map(e => e.id === id ? { ...e, ...updates } : e));
   }
-  function deleteCalEvent(id, deleteAll) {
-    if (deleteAll) {
+  function deleteCalEvent(id, deleteAll, exceptionDate) {
+    if (exceptionDate) {
+      // Add exception date to skip this one instance
+      saveCalEvents(calEvents.map(e => {
+        if (e.id === id) {
+          const exceptions = e.exceptions ? [...e.exceptions, exceptionDate] : [exceptionDate];
+          return { ...e, exceptions };
+        }
+        return e;
+      }));
+    } else if (deleteAll) {
       const evt = calEvents.find(e => e.id === id);
       if (evt && evt.repeat) {
-        // Delete this and all events with same title, time, and repeat
         saveCalEvents(calEvents.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat)));
       } else {
         saveCalEvents(calEvents.filter(e => e.id !== id));
@@ -455,9 +464,10 @@ function DailyGrind() {
   function getEventsForDate(dateStr) {
     const d = new Date(dateStr + "T12:00");
     const dayOfWeek = d.getDay(); // 0=Sun, 1=Mon, etc.
-    const directEvents = calEvents.filter(e => e.date === dateStr);
+    const directEvents = calEvents.filter(e => e.date === dateStr && !(e.exceptions && e.exceptions.includes(dateStr)));
     const repeatingEvents = calEvents.filter(e => {
       if (!e.repeat) return false;
+      if (e.exceptions && e.exceptions.includes(dateStr)) return false;
       const eDate = new Date(e.date + "T12:00");
       if (eDate > d) return false; // don't show before the original date
       if (e.date === dateStr) return false; // already in directEvents
@@ -1141,7 +1151,7 @@ function DailyGrind() {
                 const repeatLabel = evt.repeat === "weekly" ? "Weekly" : evt.repeat === "daily" ? "Daily" : evt.repeat === "weekdays" ? "Weekdays" : null;
                 return (
                   <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
-                    onClick={() => setCalSelectedEvent(null)}>
+                    onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}>
                     <div style={{ background: "#fff", borderRadius: 14, maxWidth: 360, width: "100%", overflow: "hidden", boxShadow: "0 8px 32px #00000044" }}
                       onClick={(e) => e.stopPropagation()}>
                       {/* Color bar top */}
@@ -1151,10 +1161,10 @@ function DailyGrind() {
                         <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventDesc(evt.desc || ""); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
-                          if (evt.repeat) { if (confirm("Delete ALL repeating instances?")) { deleteCalEvent(evt.id, true); setCalSelectedEvent(null); } }
-                          else { deleteCalEvent(evt.id); setCalSelectedEvent(null); }
+                          if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
+                          else { deleteCalEvent(evt.id); setCalSelectedEvent(null); setCalDeleteConfirm(false); }
                         }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
-                        <button onClick={() => setCalSelectedEvent(null)}
+                        <button onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u2715"}</button>
                       </div>
                       {/* Content */}
@@ -1174,6 +1184,23 @@ function DailyGrind() {
                               <span style={{ fontSize: 12, color: "#888" }}>Description</span>
                             </div>
                             <div style={{ fontSize: 13, color: "#333", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{evt.desc}</div>
+                          </div>
+                        )}
+                        {calDeleteConfirm && (
+                          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #eee", display: "flex", flexDirection: "column", gap: 8 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 2 }}>Delete this event?</div>
+                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #e0e0e0", background: "#fff", cursor: "pointer", fontSize: 13, color: "#333", textAlign: "left" }}>
+                              {"\uD83D\uDDD1"} Delete only this one
+                            </button>
+                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, true); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ffcdd2", background: "#ffebee", cursor: "pointer", fontSize: 13, color: "#c62828", textAlign: "left" }}>
+                              {"\uD83D\uDDD1"} Delete all repeating instances
+                            </button>
+                            <button onClick={() => setCalDeleteConfirm(false)}
+                              style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "none", cursor: "pointer", fontSize: 12, color: "#888", textAlign: "center" }}>
+                              Cancel
+                            </button>
                           </div>
                         )}
                       </div>
