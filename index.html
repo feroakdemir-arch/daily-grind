@@ -446,6 +446,7 @@ function DailyGrind() {
     const [showPicker, setShowPicker] = useState(false);
     const [showComment, setShowComment] = useState(false);
     const [commentText, setCommentText] = useState(todayNote);
+    const [showDesc, setShowDesc] = useState(false);
 
     function pickStatus(st) {
       const ntl = { ...tl };
@@ -462,14 +463,19 @@ function DailyGrind() {
 
     return (
       <div style={S.card}>
-        <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
+        <div style={{ display: "flex", alignItems: "flex-start" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <span style={S.cardName}>{item.name}</span>
+            <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={S.cardName}>{item.name}</span>
+              </div>
+              <span style={S.cardPts}>+{item.points}</span>
+            </div>
+            <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
           </div>
-          <span style={S.cardPts}>+{item.points}</span>
+          {item.desc && <button onClick={() => setShowDesc(!showDesc)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 2px 4px 8px", marginTop: 2, transition: "transform 0.2s", transform: showDesc ? "rotate(180deg)" : "rotate(0deg)" }}>{"\u25BE"}</button>}
         </div>
-        <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
-        {item.desc && <div style={S.cardDesc}>{item.desc}</div>}
+        {item.desc && showDesc && <div style={S.cardDesc}>{item.desc}</div>}
         <div style={{ position: "relative" }}>
           <div style={S.week}>
             {weekDates.map((date, i) => {
