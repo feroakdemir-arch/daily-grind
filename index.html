@@ -293,6 +293,109 @@ function DailyGrind() {
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
+  // One-time task migration from Google Tasks PDF
+  useEffect(() => {
+    if (!data || localStorage.getItem("dg-tasks-migrated-v1")) return;
+    const MIGRATED_TASKS = [
+      "Set TikTok shop up on Instagram",
+      "Buy a TikTok shop account",
+      "Zach D style TikTok shop",
+      "Find chosen niche for shop",
+      "Sign up for TikTok shop course",
+      "Read TikTok shop rules",
+      "Check out TikTok shop dude saved on TT",
+      "Should I disclose commercial content for extra reach",
+      "Figure out ad budget strategy (viral vs paid)",
+      "Why can't I get spotlight creator",
+      "How does Solo consistently get picked up",
+      "Should I keep posting vids for GMV Max",
+      "How does GMV Max work - conversion vs retention",
+      "Check out new products for GMV Max",
+      "Should I private old vids to stop violations",
+      "Fix violations - adjust scripts for Claude",
+      "How to make great short form video",
+      "Learn how to be the goat of hooks",
+      "How do curiosity loops work",
+      "Learn about product virality",
+      "Create cart preview - TikTok interface before posting",
+      "Study audience and feed to Claude",
+      "Better research - sign up to DailyVirals",
+      "Great content example FYP TT",
+      "List saved TikTok favorites",
+      "Become a product selection monster",
+      "What is UGC",
+      "Learn YT Shorts selling",
+      "Recreate nano to Kling workflow",
+      "Try AI Kling 3.0 replacement videos",
+      "Kling generator for Claude Chrome",
+      "Try Higgsfield motion graphics + automation",
+      "ChatGPT to Higgsfield workflow automation",
+      "Figure out how to create AI vid",
+      "Can I recreate vid and switch characters",
+      "Video workflow - 10 vids/day (skeleton, face AI, reaction)",
+      "Try motion graphics IRL",
+      "How to keep voice same throughout videos",
+      "Video idea finder (in downloads)",
+      "Music player for vids",
+      "Get Claude to edit for me",
+      "Learn GitHub",
+      "What is Claude Code / how to use it properly",
+      "What is Claude Dispatch",
+      "What is Claude Projects",
+      "Learn Claude Cowork",
+      "What is Remote Claude Control",
+      "Claude Code subscription - tokens & $200 request",
+      "Learn Claude best performers content evolution",
+      "Search up Practically AI for Claude tips",
+      "How to do Claude connectors",
+      "Finish Anthropic courses",
+      "Try automating, if not buy Claude Max",
+      "Learn OpenClaw",
+      "What is Notebook LM",
+      "Learn Python",
+      "What is an accelerator",
+      "CS or engineering decision",
+      "Should I do engineering for physical products",
+      "How to test if a company will work",
+      "Finance - banking, real estate, investing, VC",
+      "Study ecommerce",
+      "Redo Amazon stuff",
+      "Learn Kalodata - find viral products",
+      "How to get app onto app store",
+      "How to build an app",
+      "Checkout fake doctor thing on TikTok",
+      "Clean room very well",
+      "Do the nomination thing with Abdulrahman",
+      "Ask Yaser to bring his switch to the event",
+      "Lock in for Eid",
+      "Set up alarms (both phones)",
+      "Do the acct project before Thursday",
+      "4 citings out of books and print it out",
+      "Summarize the voice recording",
+      "Watch Matrix",
+      "Diet plan",
+      "Learn about what to do for rooms",
+      "Locking down on habits",
+      "Check test dates",
+      "And the reaction to my vid",
+      "Side control to mount",
+      "Kimura and darce finishes from side control",
+      "Triangle defense",
+      "Finish automation videos from Nate on YT (5 hrs)",
+      "Simpletistics check out",
+      "Checkout that fake doctor thing on TikTok",
+    ];
+    const existingNames = new Set(data.taskLists.find(l => l.id === "tl_main")?.items.map(t => t.name.toLowerCase()) || []);
+    const newTasks = MIGRATED_TASKS.filter(t => !existingNames.has(t.toLowerCase())).map((name, i) => ({
+      id: `t_mig_${Date.now()}_${i}`, name, points: 10, done: false
+    }));
+    if (newTasks.length > 0) {
+      const nd = { ...data, taskLists: data.taskLists.map(l => l.id === "tl_main" ? { ...l, items: [...l.items, ...newTasks] } : l) };
+      save(nd);
+    }
+    localStorage.setItem("dg-tasks-migrated-v1", "true");
+  }, [data, save]);
+
   // Day rollover
   useEffect(() => {
     if (!data) return;
