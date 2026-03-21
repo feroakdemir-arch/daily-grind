@@ -272,6 +272,7 @@ function DailyGrind() {
   const [calEvents, setCalEvents] = useState(() => {
     try { return JSON.parse(localStorage.getItem("dg-cal-events") || "[]"); } catch { return []; }
   });
+  const [calEventsLoaded, setCalEventsLoaded] = useState(false);
   const [calView, setCalView] = useState("week");
   const [calAddEvent, setCalAddEvent] = useState(null);
   const [calEventTitle, setCalEventTitle] = useState("");
@@ -532,8 +533,20 @@ function DailyGrind() {
 
   if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 4 }}>LOADING...</span></div></div>;
 
+  // Load calendar events from cloud sync
+  useEffect(() => {
+    if (calEventsLoaded) return;
+    (async () => {
+      try {
+        const r = await window.storage.get("dg-cal-events");
+        if (r?.value) { setCalEvents(JSON.parse(r.value)); }
+      } catch(e) { console.warn("Cal sync load failed:", e); }
+      setCalEventsLoaded(true);
+    })();
+  }, [calEventsLoaded]);
+
   // Calendar helpers
-  function saveCalEvents(evts) { setCalEvents(evts); localStorage.setItem("dg-cal-events", JSON.stringify(evts)); }
+  function saveCalEvents(evts) { setCalEvents(evts); window.storage.set("dg-cal-events", JSON.stringify(evts)).catch(console.error); }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc) {
     const evt = { id: `ce_${Date.now()}`, date: dateStr, title, start, end, color: color || "#4fc3f7" };
     if (repeat && repeat !== "none") evt.repeat = repeat;
