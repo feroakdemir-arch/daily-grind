@@ -34,40 +34,43 @@
     const fbAuth = firebase.auth();
     const fbDb = firebase.firestore();
 
-    // Sign in anonymously and set up synced storage
-    let _fbUserId = null;
+    // Sign in anonymously
     let _fbReady = new Promise((resolve) => {
-      fbAuth.signInAnonymously().then((cred) => {
-        _fbUserId = cred.user.uid;
-        console.log("Firebase signed in:", _fbUserId);
-        resolve();
+      fbAuth.signInAnonymously().then(() => {
+        console.log("Firebase auth ready");
+        resolve(true);
       }).catch((err) => {
-        console.warn("Firebase auth failed, using localStorage only:", err);
-        resolve();
+        console.warn("Firebase auth failed:", err);
+        resolve(false);
       });
     });
 
-    // Storage that syncs localStorage + Firestore
+    // Sync code - stored in localStorage, shared across devices
+    const SYNC_CODE_KEY = "daily-grind-sync-code";
+    window._getSyncCode = () => localStorage.getItem(SYNC_CODE_KEY);
+    window._setSyncCode = (code) => {
+      if (code) localStorage.setItem(SYNC_CODE_KEY, code);
+      else localStorage.removeItem(SYNC_CODE_KEY);
+    };
+
+    // Storage that syncs localStorage + Firestore via sync code
     window.storage = {
       async get(key) {
         try {
-          // Always try localStorage first (fast)
           const raw = localStorage.getItem(key);
           const localData = raw !== null ? { key, value: raw } : null;
 
-          // Try to get from Firestore if signed in
-          await _fbReady;
-          if (_fbUserId) {
+          const syncCode = window._getSyncCode();
+          if (syncCode) {
+            await _fbReady;
             try {
-              const doc = await fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).get();
+              const doc = await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).get();
               if (doc.exists) {
                 const fbValue = doc.data().value;
-                // Firestore has data - use it and update localStorage
                 localStorage.setItem(key, fbValue);
                 return { key, value: fbValue };
               } else if (localData) {
-                // Firestore empty but localStorage has data - push to Firestore
-                await fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).set({ value: localData.value, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
               }
             } catch (e) { console.warn("Firestore get failed:", e); }
           }
@@ -76,13 +79,12 @@
       },
       async set(key, value) {
         try {
-          // Always save to localStorage (fast, offline-capable)
           localStorage.setItem(key, value);
 
-          // Also save to Firestore if signed in
-          await _fbReady;
-          if (_fbUserId) {
-            fbDb.collection("users").doc(_fbUserId).collection("data").doc(key).set({
+          const syncCode = window._getSyncCode();
+          if (syncCode) {
+            await _fbReady;
+            fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({
               value: value,
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             }).catch((e) => console.warn("Firestore set failed:", e));
@@ -249,6 +251,7 @@ function DailyGrind() {
   const [formDesc, setFormDesc] = useState("");
   const [formComment, setFormComment] = useState("");
   const [goalInput, setGoalInput] = useState("200");
+  const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
   const [winAnim, setWinAnim] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [showNewList, setShowNewList] = useState(false);
@@ -765,6 +768,14 @@ function DailyGrind() {
     return <FW><div style={S.fCard}><h2 style={S.fTitle}>SETTINGS</h2>
       <label style={S.lbl}>Daily Point Goal</label><input style={S.inp} type="number" value={goalInput} onChange={(e) => setGoalInput(e.target.value)} min="1" />
       <div style={S.fAct}><button onClick={() => setView("main")} style={S.cBtn}>Cancel</button><button onClick={saveGoal} style={S.okBtn}>Save</button></div>
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Sync Code (same code on all devices to sync)</label>
+        <input style={S.inp} type="text" value={syncCode} onChange={(e) => setSyncCode(e.target.value.trim())} placeholder="e.g. mycode123" />
+        <div style={S.fAct}>
+          <button onClick={() => { window._setSyncCode(syncCode || null); alert(syncCode ? "Sync code set! Use the same code on your other devices." : "Sync disabled."); }} style={S.okBtn}>{syncCode ? "Enable Sync" : "Disable Sync"}</button>
+          {window._getSyncCode() && <button onClick={() => { window.storage.get("daily-grind-v13"); alert("Syncing from cloud..."); location.reload(); }} style={{ ...S.cBtn, marginLeft: 8 }}>Pull from Cloud</button>}
+        </div>
+      </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
       </div>
