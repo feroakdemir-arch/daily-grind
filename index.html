@@ -279,6 +279,11 @@ function DailyGrind() {
   const [calEventEnd, setCalEventEnd] = useState("10:00");
   const [calEventColor, setCalEventColor] = useState("#4fc3f7");
   const [calEventRepeat, setCalEventRepeat] = useState("none");
+  const [calSelectedEvent, setCalSelectedEvent] = useState(null);
+  const [calEditMode, setCalEditMode] = useState(false);
+  const [calEventDesc, setCalEventDesc] = useState("");
+  const [calDragging, setCalDragging] = useState(null);
+  const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
   const today = getToday();
   const weekDates = getWeekDates();
@@ -424,10 +429,14 @@ function DailyGrind() {
 
   // Calendar helpers
   function saveCalEvents(evts) { setCalEvents(evts); localStorage.setItem("dg-cal-events", JSON.stringify(evts)); }
-  function addCalEvent(dateStr, title, start, end, color, repeat) {
+  function addCalEvent(dateStr, title, start, end, color, repeat, desc) {
     const evt = { id: `ce_${Date.now()}`, date: dateStr, title, start, end, color: color || "#4fc3f7" };
     if (repeat && repeat !== "none") evt.repeat = repeat;
+    if (desc) evt.desc = desc;
     saveCalEvents([...calEvents, evt]);
+  }
+  function editCalEvent(id, updates) {
+    saveCalEvents(calEvents.map(e => e.id === id ? { ...e, ...updates } : e));
   }
   function deleteCalEvent(id, deleteAll) {
     if (deleteAll) {
@@ -896,7 +905,46 @@ function DailyGrind() {
 
               {/* Time grid */}
               <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "65vh", background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H }}>
+                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H }}
+                  onMouseMove={(e) => {
+                    if (!calDragging || !calGridRef.current) return;
+                    const rect = calGridRef.current.getBoundingClientRect();
+                    const y = e.clientY - rect.top;
+                    const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                    const snapped = Math.round(totalMin / 15) * 15;
+                    const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
+                    const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
+                    const endMin = snapped + duration;
+                    const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
+                    setCalDragging({ ...calDragging, newStart, newEnd });
+                  }}
+                  onMouseUp={() => {
+                    if (calDragging && calDragging.newStart) {
+                      editCalEvent(calDragging.id, { start: calDragging.newStart, end: calDragging.newEnd });
+                    }
+                    setCalDragging(null);
+                  }}
+                  onMouseLeave={() => setCalDragging(null)}
+                  onTouchMove={(e) => {
+                    if (!calDragging || !calGridRef.current) return;
+                    const touch = e.touches[0];
+                    const rect = calGridRef.current.getBoundingClientRect();
+                    const y = touch.clientY - rect.top;
+                    const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                    const snapped = Math.round(totalMin / 15) * 15;
+                    const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
+                    const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
+                    const endMin = snapped + duration;
+                    const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
+                    setCalDragging({ ...calDragging, newStart, newEnd });
+                  }}
+                  onTouchEnd={() => {
+                    if (calDragging && calDragging.newStart) {
+                      editCalEvent(calDragging.id, { start: calDragging.newStart, end: calDragging.newEnd });
+                    }
+                    setCalDragging(null);
+                  }}
+                >
                   {/* Hour labels + grid lines */}
                   {hours.map((h, hi) => (
                     <React.Fragment key={h}>
@@ -908,8 +956,7 @@ function DailyGrind() {
                             setCalAddEvent(ds);
                             setCalEventStart(`${String(h).padStart(2,"0")}:00`);
                             setCalEventEnd(`${String(h+1).padStart(2,"0")}:00`);
-                            setCalEventTitle("");
-                            setCalEventRepeat("none");
+                            setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
                           }} />
                       ))}
                     </React.Fragment>
@@ -920,30 +967,48 @@ function DailyGrind() {
                     const ds = localDateStr(d);
                     const dayEvents = getEventsForDate(ds);
                     return dayEvents.map(evt => {
-                      const startMin = timeToMin(evt.start);
-                      const endMin = timeToMin(evt.end);
+                      const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
+                      const displayStart = isDraggingThis && calDragging.newStart ? calDragging.newStart : evt.start;
+                      const displayEnd = isDraggingThis && calDragging.newEnd ? calDragging.newEnd : evt.end;
+                      const startMin = timeToMin(displayStart);
+                      const endMin = timeToMin(displayEnd);
                       const topPx = ((startMin - 360) / 60) * HOUR_H;
                       const heightPx = Math.max(((endMin - startMin) / 60) * HOUR_H, 20);
                       const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${m}${ampm}`; };
-                      const isRepeating = evt._repeating;
+                      const isRepeating = evt._repeating || evt.repeat;
                       return (
                         <div key={evt.id} style={{
                           position: "absolute", left: `calc(40px + ${di} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
-                          fontSize: 9, color: "#fff", fontWeight: 700, cursor: "pointer", zIndex: 10, boxShadow: "0 1px 3px #00000044", lineHeight: 1.2,
-                          borderLeft: isRepeating ? "3px solid #ffffff88" : "none"
-                        }} onClick={(e) => { e.stopPropagation();
-                          const origId = evt._origId || evt.id;
-                          const origEvt = calEvents.find(ev => ev.id === origId);
-                          if (origEvt && origEvt.repeat) {
-                            const choice = confirm("Delete ALL repeating instances of \"" + evt.title + "\"?\n\nOK = Delete all\nCancel = Keep");
-                            if (choice) deleteCalEvent(origId, true);
-                          } else {
-                            if (confirm("Delete \"" + evt.title + "\"?")) deleteCalEvent(evt.id);
-                          }
-                        }}>
-                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{evt.repeat ? "\u21BB " : ""}{evt.title}</div>
-                          {heightPx > 24 && <div style={{ fontSize: 8, opacity: 0.8, fontWeight: 600 }}>{fmtTime(evt.start)} - {fmtTime(evt.end)}</div>}
+                          fontSize: 9, color: "#fff", fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
+                          boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
+                          borderLeft: isRepeating ? "3px solid #ffffff88" : "none", opacity: isDraggingThis ? 0.85 : 1,
+                          transition: isDraggingThis ? "none" : "top 0.15s, height 0.15s", userSelect: "none",
+                        }}
+                          onClick={(e) => { e.stopPropagation(); if (calDragging) return;
+                            const origId = evt._origId || evt.id;
+                            const origEvt = calEvents.find(ev => ev.id === origId) || evt;
+                            setCalSelectedEvent({ ...origEvt, _displayDate: ds });
+                            setCalEditMode(false);
+                          }}
+                          onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
+                            const origId = evt._origId || evt.id;
+                            if (evt._repeating) return; // can't drag repeated instances
+                            setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end });
+                          }}
+                          onTouchStart={(e) => {
+                            const origId = evt._origId || evt.id;
+                            if (evt._repeating) return;
+                            // Long press for drag on mobile
+                            const timer = setTimeout(() => {
+                              setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end });
+                            }, 400);
+                            e.currentTarget._dragTimer = timer;
+                          }}
+                          onTouchEnd={(e) => { clearTimeout(e.currentTarget._dragTimer); }}
+                        >
+                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating ? "\u21BB " : ""}{evt.title}</div>
+                          {heightPx > 24 && <div style={{ fontSize: 8, opacity: 0.8, fontWeight: 600 }}>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</div>}
                         </div>
                       );
                     });
@@ -965,6 +1030,95 @@ function DailyGrind() {
                 </div>
               </div>
 
+              {/* Event detail popup */}
+              {calSelectedEvent && !calEditMode && (() => {
+                const evt = calSelectedEvent;
+                const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "PM" : "AM"; return `${hr > 12 ? hr-12 : hr || 12}:${m} ${ampm}`; };
+                const dateObj = new Date(evt._displayDate + "T12:00");
+                const repeatLabel = evt.repeat === "weekly" ? "Weekly" : evt.repeat === "daily" ? "Daily" : evt.repeat === "weekdays" ? "Weekdays" : null;
+                return (
+                  <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+                    onClick={() => setCalSelectedEvent(null)}>
+                    <div style={{ background: "#fff", borderRadius: 14, maxWidth: 360, width: "100%", overflow: "hidden", boxShadow: "0 8px 32px #00000044" }}
+                      onClick={(e) => e.stopPropagation()}>
+                      {/* Color bar top */}
+                      <div style={{ height: 6, background: evt.color || "#4fc3f7" }} />
+                      {/* Action bar */}
+                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: "10px 14px 0" }}>
+                        <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventDesc(evt.desc || ""); }}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u270E"}</button>
+                        <button onClick={() => {
+                          if (evt.repeat) { if (confirm("Delete ALL repeating instances?")) { deleteCalEvent(evt.id, true); setCalSelectedEvent(null); } }
+                          else { deleteCalEvent(evt.id); setCalSelectedEvent(null); }
+                        }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
+                        <button onClick={() => setCalSelectedEvent(null)}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u2715"}</button>
+                      </div>
+                      {/* Content */}
+                      <div style={{ padding: "4px 20px 20px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                          <div style={{ width: 14, height: 14, borderRadius: 4, background: evt.color || "#4fc3f7", flexShrink: 0 }} />
+                          <h3 style={{ fontSize: 20, fontWeight: 600, color: "#1a1a2e", margin: 0 }}>{evt.title}</h3>
+                        </div>
+                        <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
+                          {dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} {"\u00B7"} {fmtTime(evt.start)} - {fmtTime(evt.end)}
+                        </div>
+                        {repeatLabel && <div style={{ fontSize: 12, color: "#7c3aed", marginBottom: 8 }}>{"\u21BB"} {repeatLabel}</div>}
+                        {evt.desc && (
+                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #eee" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                              <span style={{ fontSize: 14 }}>{"\u2630"}</span>
+                              <span style={{ fontSize: 12, color: "#888" }}>Description</span>
+                            </div>
+                            <div style={{ fontSize: 13, color: "#333", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{evt.desc}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Edit event modal */}
+              {calSelectedEvent && calEditMode && (
+                <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+                  onClick={() => { setCalSelectedEvent(null); setCalEditMode(false); }}>
+                  <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%" }}
+                    onClick={(e) => e.stopPropagation()}>
+                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 16 }}>EDIT EVENT</h3>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
+                    <input style={S.inp} value={calEventTitle} onChange={(e) => setCalEventTitle(e.target.value)} autoFocus />
+                    <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
+                        <input type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                        <input type="time" style={S.inp} value={calEventEnd} onChange={(e) => setCalEventEnd(e.target.value)} /></div>
+                    </div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
+                    <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"]].map(([v,l]) => (
+                        <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
+                      ))}
+                    </div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+                      {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
+                        <button key={c} onClick={() => setCalEventColor(c)} style={{ width: 28, height: 28, borderRadius: 14, background: c, border: calEventColor === c ? "3px solid #fff" : "2px solid transparent", cursor: "pointer" }} />
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
+                      <button onClick={() => {
+                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, desc: calEventDesc.trim() || undefined });
+                        setCalSelectedEvent(null); setCalEditMode(false);
+                      }} style={S.okBtn}>Save</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Add event modal */}
               {calAddEvent && (
                 <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
@@ -975,15 +1129,13 @@ function DailyGrind() {
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
                     <input style={S.inp} value={calEventTitle} onChange={(e) => setCalEventTitle(e.target.value)} placeholder="Event name" autoFocus />
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
-                        <input type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
-                        <input type="time" style={S.inp} value={calEventEnd} onChange={(e) => setCalEventEnd(e.target.value)} />
-                      </div>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
+                        <input type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                        <input type="time" style={S.inp} value={calEventEnd} onChange={(e) => setCalEventEnd(e.target.value)} /></div>
                     </div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
+                    <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                       {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"]].map(([v,l]) => (
@@ -1000,8 +1152,8 @@ function DailyGrind() {
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
                         if (calEventTitle.trim()) {
-                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat);
-                          setCalAddEvent(null); setCalEventRepeat("none");
+                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim());
+                          setCalAddEvent(null); setCalEventRepeat("none"); setCalEventDesc("");
                         }
                       }} style={S.okBtn}>Add Event</button>
                     </div>
