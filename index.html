@@ -294,6 +294,18 @@ function DailyGrind() {
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
+  // Load calendar events from cloud sync
+  useEffect(() => {
+    if (calEventsLoaded) return;
+    (async () => {
+      try {
+        const r = await window.storage.get("dg-cal-events");
+        if (r?.value) { setCalEvents(JSON.parse(r.value)); }
+      } catch(e) { console.warn("Cal sync load failed:", e); }
+      setCalEventsLoaded(true);
+    })();
+  }, [calEventsLoaded]);
+
   // One-time task migration from Google Tasks PDF
   const migrationRan = useRef(false);
   useEffect(() => {
@@ -535,18 +547,6 @@ function DailyGrind() {
   }, [stopwatchRunning]);
 
   if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 4 }}>LOADING...</span></div></div>;
-
-  // Load calendar events from cloud sync
-  useEffect(() => {
-    if (calEventsLoaded) return;
-    (async () => {
-      try {
-        const r = await window.storage.get("dg-cal-events");
-        if (r?.value) { setCalEvents(JSON.parse(r.value)); }
-      } catch(e) { console.warn("Cal sync load failed:", e); }
-      setCalEventsLoaded(true);
-    })();
-  }, [calEventsLoaded]);
 
   // Calendar helpers
   function saveCalEvents(evts) { setCalEvents(evts); window.storage.set("dg-cal-events", JSON.stringify(evts)).catch(console.error); }
