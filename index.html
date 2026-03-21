@@ -447,6 +447,8 @@ function DailyGrind() {
     const [showComment, setShowComment] = useState(false);
     const [commentText, setCommentText] = useState(todayNote);
     const [showDesc, setShowDesc] = useState(false);
+    const [showMonthly, setShowMonthly] = useState(false);
+    const [monthOffset, setMonthOffset] = useState(0);
 
     function pickStatus(st) {
       const ntl = { ...tl };
@@ -528,6 +530,64 @@ function DailyGrind() {
             {"\uD83D\uDCDD"} {todayNote}
           </div>
         )}
+        <div style={{ marginTop: 8, textAlign: "center" }}>
+          <button onClick={() => { setShowMonthly(!showMonthly); setMonthOffset(0); }} style={{ background: "none", border: "none", color: showMonthly ? "#7c3aed" : "#555566", fontSize: 14, cursor: "pointer", padding: "4px 8px", fontFamily: "inherit" }}>{showMonthly ? "\u25B2 Hide Calendar" : "\u25BC Monthly View"}</button>
+        </div>
+        {showMonthly && (() => {
+          const now = new Date();
+          const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+          const year = viewDate.getFullYear(), month = viewDate.getMonth();
+          const monthName = viewDate.toLocaleString("default", { month: "long", year: "numeric" });
+          const firstDay = (new Date(year, month, 1).getDay() + 6) % 7;
+          const daysInMonth = new Date(year, month + 1, 0).getDate();
+          const dayNames = ["Mo","Tu","We","Th","Fr","Sa","Su"];
+          const cells = [];
+          for (let i = 0; i < firstDay; i++) cells.push(null);
+          for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+          const todayDate = new Date();
+          let doneCount = 0, skipCount = 0, totalDays = 0;
+          for (let d = 1; d <= daysInMonth; d++) {
+            const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+            if (ds > today) break;
+            totalDays++;
+            const st = data.log[ds]?.[item.id];
+            if (st === "done") doneCount++;
+            else if (st === "skip") skipCount++;
+          }
+          return (
+            <div style={{ marginTop: 8, padding: "10px 4px", borderTop: "1px solid #2d2d3a" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <button onClick={() => setMonthOffset(monthOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"\u25C0"}</button>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#f0f0f4", letterSpacing: 1 }}>{monthName}</span>
+                <button onClick={() => setMonthOffset(Math.min(monthOffset + 1, 0))} disabled={monthOffset >= 0} style={{ background: "none", border: "none", color: monthOffset >= 0 ? "#333" : "#8b8b9e", fontSize: 18, cursor: monthOffset >= 0 ? "default" : "pointer", padding: "4px 10px" }}>{"\u25B6"}</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, textAlign: "center" }}>
+                {dayNames.map(dn => <div key={dn} style={{ fontSize: 9, color: "#555566", fontWeight: 700, padding: "2px 0" }}>{dn}</div>)}
+                {cells.map((d, i) => {
+                  if (d === null) return <div key={"e"+i} />;
+                  const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+                  const st = data.log[ds]?.[item.id];
+                  const nt = data.log[ds]?.[item.id + "_note"];
+                  const isFuture = ds > today;
+                  const isToday = ds === today;
+                  let bg = "#2d2d3a", clr = "#666";
+                  if (st === "done") { bg = "#4cd137"; clr = "#fff"; }
+                  else if (st === "skip") { bg = "#e84118"; clr = "#fff"; }
+                  else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
+                  else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
+                  return (
+                    <div key={d} style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: isToday ? "2px solid #c4b5fd" : "2px solid transparent", opacity: isFuture ? 0.3 : 1 }}>{d}</div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 10, fontSize: 10, color: "#8b8b9e" }}>
+                <span>{"\u2705"} {doneCount}/{totalDays}</span>
+                <span>{"\u274C"} {skipCount}/{totalDays}</span>
+                <span>{totalDays > 0 ? Math.round(doneCount/totalDays*100) : 0}% done</span>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   };
