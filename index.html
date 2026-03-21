@@ -295,8 +295,10 @@ function DailyGrind() {
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
   // One-time task migration from Google Tasks PDF
+  const migrationRan = useRef(false);
   useEffect(() => {
-    if (!data || localStorage.getItem("dg-tasks-migrated-v1")) return;
+    if (!data || loading || migrationRan.current || localStorage.getItem("dg-tasks-migrated-v1")) return;
+    migrationRan.current = true;
     const MIGRATED_TASKS = [
       "Set TikTok shop up on Instagram",
       "Buy a TikTok shop account",
@@ -392,10 +394,11 @@ function DailyGrind() {
     }));
     if (newTasks.length > 0) {
       const nd = { ...data, taskLists: data.taskLists.map(l => l.id === "tl_main" ? { ...l, items: [...l.items, ...newTasks] } : l) };
-      save(nd);
+      setData(nd);
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
     }
     localStorage.setItem("dg-tasks-migrated-v1", "true");
-  }, [data, save]);
+  }, [data, loading]);
 
   // Day rollover
   useEffect(() => {
