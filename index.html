@@ -178,7 +178,7 @@ function getStreak(id, log, today) {
 function getOverall(id, log) { const ds = Object.keys(log); if (!ds.length) return 0; return Math.round((ds.filter((d) => log[d]?.[id] === "done").length / ds.length) * 100); }
 const statusCycle = [undefined, "done", "skip", "neutral"];
 
-function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd }) {
+function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
@@ -206,6 +206,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd }) {
           <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
           <span style={S.tText}>{t.name}</span>
           {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
+          <button onClick={() => onSendToPomo(t.name)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#7c3aed", padding: "2px 6px", fontFamily: "inherit" }} title="Send to Pomodoro">{"\u2191"}</button>
           <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
         </div>
       ))}
@@ -915,7 +916,7 @@ function DailyGrind() {
         {page === "tasks" && (
           <div>
             {data.taskLists.map((list) => (
-              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} />
+              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
