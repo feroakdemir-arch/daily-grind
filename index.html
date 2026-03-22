@@ -197,7 +197,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd }) {
   return (
     <div style={S.taskList}>
       <div style={S.tlHead}>
-        <span style={S.tlTitle}>{list.title}</span>
+        <span style={S.tlTitle}>{list.title}{list.resetsDaily && <span style={{ fontSize: 9, color: "#7c3aed", marginLeft: 6, fontWeight: 700 }}>{"\u21BB"} Daily</span>}</span>
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
 
@@ -258,6 +258,7 @@ function DailyGrind() {
   const [winAnim, setWinAnim] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [showNewList, setShowNewList] = useState(false);
+  const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
   const [pomoRunning, setPomoRunning] = useState(false);
@@ -507,9 +508,9 @@ function DailyGrind() {
 
   function addNewList() {
     if (!newListName.trim()) return;
-    const list = { id: `tl_${Date.now()}`, title: newListName.trim(), items: [] };
+    const list = { id: `tl_${Date.now()}`, title: newListName.trim(), resetsDaily: newListRepeats, items: [] };
     save({ ...data, taskLists: [...data.taskLists, list] });
-    setNewListName(""); setShowNewList(false);
+    setNewListName(""); setShowNewList(false); setNewListRepeats(false);
   }
   function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save({ ...data, dailyGoal: v }); setGoalInput(String(v)); setView("main"); }
   function resetAll() { save(mkDefault()); setGoalInput("200"); setView("main"); setPage("habits"); }
@@ -917,11 +918,23 @@ function DailyGrind() {
               <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} />
             ))}
             {showNewList ? (
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <input style={S.inp} placeholder="List name" value={newListName} onChange={(e) => setNewListName(e.target.value)} autoFocus
-                  onKeyDown={(e) => { if (e.key === "Enter") addNewList(); }} />
-                <button onClick={addNewList} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Add</button>
-                <button onClick={() => { setShowNewList(false); setNewListName(""); }} style={{ ...S.cBtn, flex: "none", padding: "11px 16px" }}>&times;</button>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <button onClick={() => setNewListRepeats(false)}
+                    style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: !newListRepeats ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: !newListRepeats ? "#7c3aed22" : "#1a1a2e", color: !newListRepeats ? "#7c3aed" : "#8b8b9e", fontSize: 11, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>
+                    ONE-TIME
+                  </button>
+                  <button onClick={() => setNewListRepeats(true)}
+                    style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: newListRepeats ? "2px solid #00ff87" : "1px solid #2d2d3a", background: newListRepeats ? "#00ff8722" : "#1a1a2e", color: newListRepeats ? "#00ff87" : "#8b8b9e", fontSize: 11, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>
+                    {"\u21BB"} DAILY RESET
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input style={S.inp} placeholder="List name" value={newListName} onChange={(e) => setNewListName(e.target.value)} autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") addNewList(); }} />
+                  <button onClick={addNewList} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Add</button>
+                  <button onClick={() => { setShowNewList(false); setNewListName(""); setNewListRepeats(false); }} style={{ ...S.cBtn, flex: "none", padding: "11px 16px" }}>&times;</button>
+                </div>
               </div>
             ) : (
               <button onClick={() => setShowNewList(true)} style={{ ...S.addR, marginTop: 12 }}><span style={S.addI}>+</span> New task list</button>
