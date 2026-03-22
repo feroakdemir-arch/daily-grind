@@ -291,6 +291,10 @@ function DailyGrind() {
   const [calDragging, setCalDragging] = useState(null);
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
+  const pomoDeadlineRef = useRef(null);
+  const customDeadlineRef = useRef(null);
+  const stopwatchStartRef = useRef(null);
+  const stopwatchBaseRef = useRef(0);
   const today = getToday();
   const weekDates = getWeekDates();
 
@@ -517,35 +521,51 @@ function DailyGrind() {
     prevScoreRef.current = sc;
   }, [data]);
 
-  // Pomodoro timer
+  // Pomodoro timer (timestamp-based so it works in background tabs)
   useEffect(() => {
-    if (!pomoRunning) return;
+    if (!pomoRunning) { pomoDeadlineRef.current = null; return; }
+    if (!pomoDeadlineRef.current) {
+      pomoDeadlineRef.current = Date.now() + pomoSeconds * 1000;
+    }
     const i = setInterval(() => {
-      setPomoSeconds((s) => {
-        if (s <= 1) {
-          setPomoRunning(false);
-          if (!pomoIsBreak) { setPomoSessions((p) => p + 1); setPomoIsBreak(true); return pomoBreak * 60; }
-          else { setPomoIsBreak(false); return pomoWork * 60; }
-        }
-        return s - 1;
-      });
+      const remaining = Math.round((pomoDeadlineRef.current - Date.now()) / 1000);
+      if (remaining <= 0) {
+        pomoDeadlineRef.current = null;
+        setPomoRunning(false);
+        if (!pomoIsBreak) { setPomoSessions((p) => p + 1); setPomoIsBreak(true); setPomoSeconds(pomoBreak * 60); }
+        else { setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }
+      } else {
+        setPomoSeconds(remaining);
+      }
     }, 1000);
     return () => clearInterval(i);
   }, [pomoRunning, pomoIsBreak, pomoWork, pomoBreak]);
 
-  // Custom timer
+  // Custom timer (timestamp-based)
   useEffect(() => {
-    if (!customTimerRunning) return;
+    if (!customTimerRunning) { customDeadlineRef.current = null; return; }
+    if (!customDeadlineRef.current) {
+      customDeadlineRef.current = Date.now() + customTimerSec * 1000;
+    }
     const i = setInterval(() => {
-      setCustomTimerSec((s) => { if (s <= 1) { setCustomTimerRunning(false); return 0; } return s - 1; });
+      const remaining = Math.round((customDeadlineRef.current - Date.now()) / 1000);
+      if (remaining <= 0) { customDeadlineRef.current = null; setCustomTimerRunning(false); setCustomTimerSec(0); }
+      else { setCustomTimerSec(remaining); }
     }, 1000);
     return () => clearInterval(i);
   }, [customTimerRunning]);
 
-  // Stopwatch
+  // Stopwatch (timestamp-based)
   useEffect(() => {
-    if (!stopwatchRunning) return;
-    const i = setInterval(() => setStopwatchSec((s) => s + 1), 1000);
+    if (!stopwatchRunning) { stopwatchStartRef.current = null; return; }
+    if (!stopwatchStartRef.current) {
+      stopwatchStartRef.current = Date.now();
+      stopwatchBaseRef.current = stopwatchSec;
+    }
+    const i = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - stopwatchStartRef.current) / 1000);
+      setStopwatchSec(stopwatchBaseRef.current + elapsed);
+    }, 1000);
     return () => clearInterval(i);
   }, [stopwatchRunning]);
 
