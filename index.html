@@ -152,14 +152,23 @@ const DEFAULT_TASK_LISTS = [
 const mkDefault = () => ({
   habitSections: JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
   taskLists: JSON.parse(JSON.stringify(DEFAULT_TASK_LISTS)),
-  dailyGoal: 200, log: {}, streak: 0, lastCompletedDate: null, history: {},
+  dailyGoal: 200, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
 function localDateStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
-function getToday() { return localDateStr(new Date()); }
-function getYesterday() { const d = new Date(); d.setDate(d.getDate() - 1); return localDateStr(d); }
+function getToday(resetHour) {
+  const d = new Date();
+  if (resetHour && d.getHours() < resetHour) d.setDate(d.getDate() - 1);
+  return localDateStr(d);
+}
+function getYesterday(resetHour) {
+  const d = new Date();
+  if (resetHour && d.getHours() < resetHour) d.setDate(d.getDate() - 1);
+  d.setDate(d.getDate() - 1);
+  return localDateStr(d);
+}
 function getWeekDates() {
   const today = new Date(); const dow = today.getDay();
   const satOff = dow >= 6 ? dow - 6 : dow + 1;
@@ -297,7 +306,8 @@ function DailyGrind() {
   const customDeadlineRef = useRef(null);
   const stopwatchStartRef = useRef(null);
   const stopwatchBaseRef = useRef(0);
-  const today = getToday();
+  const resetHour = data?.dayResetHour || 0;
+  const today = getToday(resetHour);
   const weekDates = getWeekDates();
 
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
@@ -424,7 +434,8 @@ function DailyGrind() {
   // Day rollover
   useEffect(() => {
     if (!data) return;
-    const yday = getYesterday();
+    const rh = data.dayResetHour || 0;
+    const yday = getYesterday(rh);
     if (data.log[yday] && !data.history[yday]) {
       const yLog = data.log[yday];
       const hs = allHabits(data.habitSections).reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
@@ -1031,7 +1042,7 @@ function DailyGrind() {
           const calDates = getCalWeekDates(calWeekOffset);
           const hours = Array.from({ length: 18 }, (_, i) => i + 6); // 6 AM to 11 PM
           const HOUR_H = 60; // pixels per hour
-          const todayStr = getToday();
+          const todayStr = getToday(resetHour);
           const dayNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 
           function timeToMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
@@ -1490,6 +1501,20 @@ function DailyGrind() {
     return <FW><div style={S.fCard}><h2 style={S.fTitle}>SETTINGS</h2>
       <label style={S.lbl}>Daily Point Goal</label><input style={S.inp} type="number" value={goalInput} onChange={(e) => setGoalInput(e.target.value)} min="1" />
       <div style={S.fAct}><button onClick={() => setView("main")} style={S.cBtn}>Cancel</button><button onClick={saveGoal} style={S.okBtn}>Save</button></div>
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Day Resets At</label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[0,1,2,3,4,5,6].map(h => (
+            <button key={h} onClick={() => save({ ...data, dayResetHour: h })}
+              style={{ padding: "8px 14px", borderRadius: 8, border: (data.dayResetHour || 0) === h ? "2px solid #7c3aed" : "1px solid #2d2d3a",
+                background: (data.dayResetHour || 0) === h ? "#7c3aed22" : "#12122a", color: (data.dayResetHour || 0) === h ? "#7c3aed" : "#8b8b9e",
+                fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+              {h === 0 ? "Midnight" : `${h} AM`}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 6 }}>When the day flips over. Habits & daily tasks reset at this time.</div>
+      </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <label style={S.lbl}>Sync Code (same code on all devices to sync)</label>
         <input style={S.inp} type="text" value={syncCode} onChange={(e) => setSyncCode(e.target.value.trim())} placeholder="e.g. mycode123" />
