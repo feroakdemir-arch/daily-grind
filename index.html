@@ -451,6 +451,14 @@ function DailyGrind() {
       changed = true;
     }
 
+    // One-time force reset of all task done states (remove after deploy)
+    if (!data._forceReset_032326) {
+      updated.taskLists = updated.taskLists.map((l) => ({ ...l, items: l.items.map((t) => ({ ...t, done: false })) }));
+      updated._forceReset_032326 = true;
+      updated.lastTaskResetDate = today;
+      changed = true;
+    }
+
     // Reset daily task lists if the day changed
     if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
       updated.taskLists = updated.taskLists.map((l) => ({ ...l, items: l.items.map((t) => ({ ...t, done: false })) }));
