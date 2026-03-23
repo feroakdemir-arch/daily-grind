@@ -436,25 +436,33 @@ function DailyGrind() {
     if (!data) return;
     const rh = data.dayResetHour || 0;
     const yday = getYesterday(rh);
+    let updated = { ...data };
+    let changed = false;
+
+    // Archive yesterday's score to history
     if (data.log[yday] && !data.history[yday]) {
       const yLog = data.log[yday];
       const hs = allHabits(data.habitSections).reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
       const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + (t.done ? t.points : 0), 0);
       const totalScore = hs + ts;
       const won = totalScore >= data.dailyGoal;
-      const nh = { ...data.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
-      let ns = data.streak;
-      if (won) { const db = new Date(yday + "T12:00:00"); db.setDate(db.getDate() - 1); ns = (!data.lastCompletedDate || data.lastCompletedDate === localDateStr(db)) ? ns + 1 : 1; } else ns = 0;
-      const resetLists = data.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
-      save({ ...data, history: nh, streak: ns, lastCompletedDate: won ? yday : data.lastCompletedDate, taskLists: resetLists, lastTaskResetDate: today });
+      updated.history = { ...updated.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
+      if (won) { const db = new Date(yday + "T12:00:00"); db.setDate(db.getDate() - 1); updated.streak = (!data.lastCompletedDate || data.lastCompletedDate === localDateStr(db)) ? (data.streak || 0) + 1 : 1; updated.lastCompletedDate = yday; } else updated.streak = 0;
+      changed = true;
     }
-    if (data.lastTaskResetDate && data.lastTaskResetDate !== today && !data.history[yday]) {
-      const resetLists = data.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
-      save({ ...data, taskLists: resetLists, lastTaskResetDate: today });
+
+    // Reset daily task lists if the day changed
+    if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
+      updated.taskLists = updated.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
+      updated.lastTaskResetDate = today;
+      changed = true;
     }
     if (!data.lastTaskResetDate) {
-      save({ ...data, lastTaskResetDate: today });
+      updated.lastTaskResetDate = today;
+      changed = true;
     }
+
+    if (changed) save(updated);
   }, [data, save]);
 
   const getTL = () => data?.log[today] || {};
