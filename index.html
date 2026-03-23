@@ -177,7 +177,7 @@ function getWeekDates() {
 }
 function allHabits(secs) { return secs.flatMap((s) => s.items); }
 function habitScore(tl, secs) { return allHabits(secs).reduce((sc, i) => sc + (tl[i.id] === "done" ? i.points : 0), 0); }
-function taskScore(lists) { return lists.flatMap((l) => l.items).reduce((sc, t) => sc + (t.done ? t.points : 0), 0); }
+function taskScore(lists, today) { return lists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === today)) ? t.points : 0), 0); }
 function getStreak(id, log, today) {
   if (log[today]?.[id] !== "done") return 0; let s = 1;
   const d = new Date(today + "T12:00:00");
@@ -443,7 +443,7 @@ function DailyGrind() {
     if (data.log[yday] && !data.history[yday]) {
       const yLog = data.log[yday];
       const hs = allHabits(data.habitSections).reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
-      const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + (t.done ? t.points : 0), 0);
+      const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === yday)) ? t.points : 0), 0);
       const totalScore = hs + ts;
       const won = totalScore >= data.dailyGoal;
       updated.history = { ...updated.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
@@ -453,7 +453,7 @@ function DailyGrind() {
 
     // Reset daily task lists if the day changed
     if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
-      updated.taskLists = updated.taskLists.map((l) => l.resetsDaily ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) } : l);
+      updated.taskLists = updated.taskLists.map((l) => ({ ...l, items: l.items.map((t) => ({ ...t, done: false })) }));
       updated.lastTaskResetDate = today;
       changed = true;
     }
@@ -498,7 +498,7 @@ function DailyGrind() {
 
   const toggleTask = useCallback((listId, taskId) => {
     setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => t.id === taskId ? { ...t, done: !t.done } : t) } : l) };
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => t.id === taskId ? { ...t, done: !t.done, doneDate: !t.done ? getToday(prev.dayResetHour || 0) : undefined } : t) } : l) };
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
@@ -537,7 +537,7 @@ function DailyGrind() {
 
   useEffect(() => {
     if (!data) return;
-    const sc = habitScore(getTL(), data.habitSections) + taskScore(data.taskLists);
+    const sc = habitScore(getTL(), data.habitSections) + taskScore(data.taskLists, today);
     if (sc >= data.dailyGoal && prevScoreRef.current < data.dailyGoal && data.dailyGoal > 0) { setWinAnim(true); setTimeout(() => setWinAnim(false), 3000); }
     prevScoreRef.current = sc;
   }, [data]);
@@ -652,13 +652,13 @@ function DailyGrind() {
 
   const tl = getTL();
   const hScore = habitScore(tl, data.habitSections);
-  const tScore = taskScore(data.taskLists);
+  const tScore = taskScore(data.taskLists, today);
   const score = hScore + tScore;
   const prog = data.dailyGoal > 0 ? Math.min(1, score / data.dailyGoal) : 0;
   const won = score >= data.dailyGoal && data.dailyGoal > 0;
   const allH = allHabits(data.habitSections);
   const allT = data.taskLists.flatMap((l) => l.items);
-  const doneN = Object.values(tl).filter((v) => v === "done").length + allT.filter((t) => t.done).length;
+  const doneN = Object.values(tl).filter((v) => v === "done").length + allT.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).length;
   const totalN = allH.length + allT.length;
 
   const navIcons = {
@@ -897,10 +897,10 @@ function DailyGrind() {
                 ))}
               </div>
             )}
-            {allT.filter((t) => t.done).length > 0 && (
+            {allT.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).length > 0 && (
               <div style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 9, color: "#555566", letterSpacing: 2, marginBottom: 6 }}>TASKS</div>
-                {data.taskLists.flatMap((list) => list.items.filter((t) => t.done).map((t) => ({ ...t, listId: list.id, listTitle: list.title }))).map((t) => (
+                {data.taskLists.flatMap((list) => list.items.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).map((t) => ({ ...t, listId: list.id, listTitle: list.title }))).map((t) => (
                   <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #2d2d3a" }}>
                     <button onClick={(e) => { e.stopPropagation(); toggleTask(t.listId, t.id); }} style={{ width: 22, height: 22, borderRadius: 11, background: "#4cd137", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{"\u2713"}</button>
                     <span style={{ flex: 1, fontSize: 12, color: "#f0f0f4" }}>{t.name}</span>
