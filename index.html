@@ -469,7 +469,7 @@ function DailyGrind() {
 
   function toggleHabit(itemId) {
     const tl = getTL(); const cur = tl[itemId]; const next = statusCycle[(statusCycle.indexOf(cur) + 1) % statusCycle.length];
-    const ntl = { ...tl }; if (next === undefined) { delete ntl[itemId]; delete ntl[itemId + "_note"]; } else ntl[itemId] = next;
+    const ntl = { ...tl }; if (next === undefined) { delete ntl[itemId]; } else ntl[itemId] = next;
     save({ ...data, log: { ...data.log, [today]: ntl } });
   }
   function saveNote(itemId, note) {
@@ -689,10 +689,11 @@ function DailyGrind() {
     const [showDesc, setShowDesc] = useState(false);
     const [showMonthly, setShowMonthly] = useState(false);
     const [monthOffset, setMonthOffset] = useState(0);
+    const [selectedMonthDay, setSelectedMonthDay] = useState(null);
 
     function pickStatus(st) {
       const ntl = { ...tl };
-      if (st === undefined) { delete ntl[item.id]; delete ntl[item.id + "_note"]; }
+      if (st === undefined) { delete ntl[item.id]; }
       else ntl[item.id] = st;
       save({ ...data, log: { ...data.log, [today]: ntl } });
       setShowPicker(false); setShowComment(false);
@@ -816,7 +817,8 @@ function DailyGrind() {
                   else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
                   else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
                   return (
-                    <div key={d} style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: isToday ? "2px solid #c4b5fd" : "2px solid transparent", opacity: isFuture ? 0.3 : 1 }}>{d}</div>
+                    <div key={d} onClick={() => !isFuture && nt ? setSelectedMonthDay(selectedMonthDay === ds ? null : ds) : setSelectedMonthDay(null)}
+                      style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: nt && !isFuture ? "pointer" : "default" }}>{d}</div>
                   );
                 })}
               </div>
@@ -825,6 +827,19 @@ function DailyGrind() {
                 <span>{"\u274C"} {skipCount}/{totalDays}</span>
                 <span>{totalDays > 0 ? Math.round(doneCount/totalDays*100) : 0}% done</span>
               </div>
+              {selectedMonthDay && data.log[selectedMonthDay]?.[item.id + "_note"] && (() => {
+                const selDate = new Date(selectedMonthDay + "T12:00");
+                const selStatus = data.log[selectedMonthDay]?.[item.id];
+                return (
+                  <div style={{ marginTop: 10, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a" }}>
+                    <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {selStatus === "done" ? "\u2705" : selStatus === "skip" ? "\u274C" : selStatus === "neutral" ? "\u2796" : ""}</span>
+                      <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"\u2715"}</button>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{data.log[selectedMonthDay][item.id + "_note"]}</div>
+                  </div>
+                );
+              })()}
             </div>
           );
         })()}
