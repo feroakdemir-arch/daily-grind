@@ -61,6 +61,7 @@
       async get(key) {
         try {
           const raw = localStorage.getItem(key);
+          const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
           const localData = raw !== null ? { key, value: raw } : null;
 
           const syncCode = window._getSyncCode();
@@ -69,11 +70,20 @@
             try {
               const doc = await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).get();
               if (doc.exists) {
-                const fbValue = doc.data().value;
-                localStorage.setItem(key, fbValue);
-                return { key, value: fbValue };
+                const fbData = doc.data();
+                const fbValue = fbData.value;
+                const fbTs = fbData.localTs || 0;
+                // Only use cloud data if it's newer than local
+                if (fbTs > localTs) {
+                  localStorage.setItem(key, fbValue);
+                  localStorage.setItem(key + "_ts", String(fbTs));
+                  return { key, value: fbValue };
+                } else if (localTs > fbTs && localData) {
+                  // Local is newer, push to cloud
+                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                }
               } else if (localData) {
-                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
               }
             } catch (e) { console.warn("Firestore get failed:", e); }
           }
@@ -82,13 +92,16 @@
       },
       async set(key, value) {
         try {
+          const ts = Date.now();
           localStorage.setItem(key, value);
+          localStorage.setItem(key + "_ts", String(ts));
 
           const syncCode = window._getSyncCode();
           if (syncCode) {
             await _fbReady;
             fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({
               value: value,
+              localTs: ts,
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             }).catch((e) => console.warn("Firestore set failed:", e));
           }
@@ -512,14 +525,6 @@ function DailyGrind() {
       const won = totalScore >= data.dailyGoal;
       updated.history = { ...updated.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
       if (won) { const db = new Date(yday + "T12:00:00"); db.setDate(db.getDate() - 1); updated.streak = (!data.lastCompletedDate || data.lastCompletedDate === localDateStr(db)) ? (data.streak || 0) + 1 : 1; updated.lastCompletedDate = yday; } else updated.streak = 0;
-      changed = true;
-    }
-
-    // One-time force reset of all task done states (remove after deploy)
-    if (!data._forceReset_032326) {
-      updated.taskLists = updated.taskLists.map((l) => ({ ...l, items: l.items.map((t) => ({ ...t, done: false })) }));
-      updated._forceReset_032326 = true;
-      updated.lastTaskResetDate = today;
       changed = true;
     }
 
