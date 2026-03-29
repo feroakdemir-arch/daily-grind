@@ -375,6 +375,8 @@ function DailyGrind() {
   const weekDates = getWeekDates();
 
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
+  // Request notification permission on load
+  useEffect(() => { if ("Notification" in window && Notification.permission === "default") { Notification.requestPermission(); } }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
   // Load calendar events from cloud sync
