@@ -647,6 +647,18 @@ function DailyGrind() {
     return () => clearInterval(i);
   }, [pomoRunning, pomoIsBreak, pomoWork, pomoBreak]);
 
+  // Update browser tab title with Pomodoro timer
+  useEffect(() => {
+    if (pomoRunning) {
+      const m = Math.floor(pomoSeconds / 60);
+      const s = pomoSeconds % 60;
+      const label = pomoIsBreak ? "Break" : (pomoTask || "Focus");
+      document.title = `${m}:${s.toString().padStart(2, "0")} - ${label} | Daily Grind`;
+    } else {
+      document.title = "Daily Grind";
+    }
+  }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask]);
+
   // Custom timer (timestamp-based)
   useEffect(() => {
     if (!customTimerRunning) { customDeadlineRef.current = null; return; }
