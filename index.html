@@ -192,10 +192,10 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
   const inputRef = useRef(null);
-  const dragState = useRef(null);
-  const overIdxRef = useRef(null);
+  const dragRef = useRef(null);
   const [dragIdx, setDragIdx] = useState(null);
-  const [overIdx, setOverIdx] = useState(null);
+  const [dropIdx, setDropIdx] = useState(null);
+  const rowRects = useRef([]);
 
   const pending = list.items.filter((t) => !t.done);
   const completed = list.items.filter((t) => t.done);
@@ -210,36 +210,41 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
 
   function handleDragStart(e, idx) {
     e.preventDefault();
-    dragState.current = { idx };
-    overIdxRef.current = idx;
+    // Snapshot row positions at drag start (before any visual changes)
+    const rows = document.querySelectorAll(`[data-tasklist="${list.id}"] [data-taskrow]`);
+    const rects = [];
+    rows.forEach((row) => {
+      const r = row.getBoundingClientRect();
+      rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
+    });
+    rowRects.current = rects;
+    dragRef.current = { fromIdx: idx, toIdx: idx };
     setDragIdx(idx);
-    setOverIdx(idx);
+    setDropIdx(idx);
+
     const onMove = (ev) => {
       const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      const rows = document.querySelectorAll(`[data-tasklist="${list.id}"] [data-taskrow]`);
       let closest = idx;
       let minDist = Infinity;
-      rows.forEach((row) => {
-        const rect = row.getBoundingClientRect();
-        const mid = rect.top + rect.height / 2;
-        const dist = Math.abs(y - mid);
-        if (dist < minDist) { minDist = dist; closest = parseInt(row.dataset.taskrow); }
+      rowRects.current.forEach((r, i) => {
+        const dist = Math.abs(y - r.mid);
+        if (dist < minDist) { minDist = dist; closest = i; }
       });
-      overIdxRef.current = closest;
-      setOverIdx(closest);
+      dragRef.current.toIdx = closest;
+      setDropIdx(closest);
     };
     const onEnd = () => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onEnd);
       document.removeEventListener("touchmove", onMove);
       document.removeEventListener("touchend", onEnd);
-      const from = dragState.current?.idx;
-      const to = overIdxRef.current;
+      const from = dragRef.current.fromIdx;
+      const to = dragRef.current.toIdx;
       setDragIdx(null);
-      setOverIdx(null);
-      dragState.current = null;
-      overIdxRef.current = null;
-      if (from !== null && to !== null && from !== to) {
+      setDropIdx(null);
+      dragRef.current = null;
+      rowRects.current = [];
+      if (from !== to) {
         onReorder(list.id, getPendingRealIndex(from), getPendingRealIndex(to));
       }
     };
@@ -256,10 +261,6 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
-  const reorderedPending = dragIdx !== null && overIdx !== null && dragIdx !== overIdx
-    ? (() => { const arr = [...pending]; const [m] = arr.splice(dragIdx, 1); arr.splice(overIdx, 0, m); return arr; })()
-    : pending;
-
   return (
     <div style={S.taskList} data-tasklist={list.id}>
       <div style={S.tlHead}>
@@ -267,11 +268,11 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
 
-      {reorderedPending.map((t, i) => (
-        <div key={t.id} style={{ ...S.tRow, opacity: dragIdx !== null && t.id === pending[dragIdx]?.id ? 0.5 : 1, transition: "transform 0.15s ease" }} data-taskrow={i}>
+      {pending.map((t, i) => (
+        <div key={t.id} data-taskrow={i} style={{ ...S.tRow, opacity: dragIdx === i ? 0.4 : 1, borderTop: dropIdx === i && dragIdx !== null && dragIdx !== i && dragIdx > i ? "2px solid #7c3aed" : "none", borderBottom: dropIdx === i && dragIdx !== null && dragIdx !== i && dragIdx < i ? "2px solid #7c3aed" : "none" }}>
           <span
-            onPointerDown={(e) => handleDragStart(e, pending.findIndex(p => p.id === t.id))}
-            onTouchStart={(e) => handleDragStart(e, pending.findIndex(p => p.id === t.id))}
+            onPointerDown={(e) => handleDragStart(e, i)}
+            onTouchStart={(e) => handleDragStart(e, i)}
             style={{ cursor: "grab", color: "#555", fontSize: 16, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1 }}
             title="Drag to reorder"
           >{"\u2807"}</span>
