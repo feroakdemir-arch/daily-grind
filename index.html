@@ -193,6 +193,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
   const [showDone, setShowDone] = useState(false);
   const inputRef = useRef(null);
   const dragState = useRef(null);
+  const overIdxRef = useRef(null);
   const [dragIdx, setDragIdx] = useState(null);
   const [overIdx, setOverIdx] = useState(null);
 
@@ -209,7 +210,8 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
 
   function handleDragStart(e, idx) {
     e.preventDefault();
-    dragState.current = { idx, startY: e.touches ? e.touches[0].clientY : e.clientY };
+    dragState.current = { idx };
+    overIdxRef.current = idx;
     setDragIdx(idx);
     setOverIdx(idx);
     const onMove = (ev) => {
@@ -223,6 +225,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
         const dist = Math.abs(y - mid);
         if (dist < minDist) { minDist = dist; closest = parseInt(row.dataset.taskrow); }
       });
+      overIdxRef.current = closest;
       setOverIdx(closest);
     };
     const onEnd = () => {
@@ -231,11 +234,12 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
       document.removeEventListener("touchmove", onMove);
       document.removeEventListener("touchend", onEnd);
       const from = dragState.current?.idx;
-      const to = overIdx;
+      const to = overIdxRef.current;
       setDragIdx(null);
       setOverIdx(null);
       dragState.current = null;
-      if (from !== undefined && to !== undefined && from !== to) {
+      overIdxRef.current = null;
+      if (from !== null && to !== null && from !== to) {
         onReorder(list.id, getPendingRealIndex(from), getPendingRealIndex(to));
       }
     };
