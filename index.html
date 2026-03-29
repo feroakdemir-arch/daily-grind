@@ -647,17 +647,49 @@ function DailyGrind() {
     return () => clearInterval(i);
   }, [pomoRunning, pomoIsBreak, pomoWork, pomoBreak]);
 
-  // Update browser tab title with Pomodoro timer
+  // Update browser tab title + notification with Pomodoro timer
+  const pomoNotifRef = useRef(null);
   useEffect(() => {
+    const m = Math.floor(pomoSeconds / 60);
+    const s = pomoSeconds % 60;
+    const timeStr = `${m}:${s.toString().padStart(2, "0")}`;
+    const label = pomoIsBreak ? "Break" : (pomoTask || "Focus");
+
     if (pomoRunning) {
-      const m = Math.floor(pomoSeconds / 60);
-      const s = pomoSeconds % 60;
-      const label = pomoIsBreak ? "Break" : (pomoTask || "Focus");
-      document.title = `${m}:${s.toString().padStart(2, "0")} - ${label} | Daily Grind`;
+      document.title = `${timeStr} - ${label} | Daily Grind`;
+      // Update persistent notification with countdown
+      if ("Notification" in window && Notification.permission === "granted") {
+        try {
+          if (pomoNotifRef.current) { try { pomoNotifRef.current.close(); } catch(e) {} }
+          pomoNotifRef.current = new Notification(`${timeStr} - ${label}`, {
+            body: pomoIsBreak ? "Break time" : `Session #${(pomoSessions || 0) + 1}`,
+            tag: "pomo-timer",
+            renotify: true,
+            silent: true,
+            requireInteraction: true
+          });
+        } catch(e) {}
+      }
     } else {
       document.title = "Daily Grind";
+      if (pomoNotifRef.current) { try { pomoNotifRef.current.close(); } catch(e) {} pomoNotifRef.current = null; }
     }
-  }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask]);
+  }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask, pomoSessions]);
+
+  // Send alert notification when Pomodoro timer ends
+  const prevPomoRunning = useRef(pomoRunning);
+  useEffect(() => {
+    if (prevPomoRunning.current && !pomoRunning && "Notification" in window && Notification.permission === "granted") {
+      try {
+        new Notification(pomoIsBreak ? "Break time!" : "Focus time!", {
+          body: pomoIsBreak ? "Take a break, you earned it." : "Break's over, let's go!",
+          tag: "pomo-done",
+          requireInteraction: true
+        });
+      } catch(e) {}
+    }
+    prevPomoRunning.current = pomoRunning;
+  }, [pomoRunning, pomoIsBreak]);
 
   // Custom timer (timestamp-based)
   useEffect(() => {
@@ -1101,7 +1133,7 @@ function DailyGrind() {
                   </div>
                 </div>
                 <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 16 }}>
-                  <button onClick={() => setPomoRunning(!pomoRunning)} style={{ ...S.okBtn, flex: "none", padding: "12px 28px", fontSize: 13, borderRadius: 24 }}>
+                  <button onClick={() => { if (!pomoRunning && "Notification" in window && Notification.permission === "default") { Notification.requestPermission(); } setPomoRunning(!pomoRunning); }} style={{ ...S.okBtn, flex: "none", padding: "12px 28px", fontSize: 13, borderRadius: 24 }}>
                     {pomoRunning ? "\u23F8 Pause" : "\u25B6 Start"}
                   </button>
                   <button onClick={() => { setPomoRunning(false); setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }} style={{ ...S.cBtn, flex: "none", padding: "12px 20px", borderRadius: 24 }}>
