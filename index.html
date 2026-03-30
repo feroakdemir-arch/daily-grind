@@ -73,10 +73,10 @@
                 const fbData = doc.data();
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
-                // Only use cloud data if it's newer than local
-                if (fbTs > localTs) {
+                // Only use cloud data if it's newer than local, or if local has no data
+                if (fbTs > localTs || (!localData && fbValue)) {
                   localStorage.setItem(key, fbValue);
-                  localStorage.setItem(key + "_ts", String(fbTs));
+                  localStorage.setItem(key + "_ts", String(fbTs || Date.now()));
                   return { key, value: fbValue };
                 } else if (localTs > fbTs && localData) {
                   // Local is newer, push to cloud
@@ -360,9 +360,7 @@ function DailyGrind() {
   const [pomoTask, setPomoTask] = useState("");
   const [showScoreDetail, setShowScoreDetail] = useState(false);
   const [calWeekOffset, setCalWeekOffset] = useState(0);
-  const [calEvents, setCalEvents] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("dg-cal-events") || "[]"); } catch { return []; }
-  });
+  const [calEvents, setCalEvents] = useState([]);
   const [calEventsLoaded, setCalEventsLoaded] = useState(false);
   const [calView, setCalView] = useState("week");
   const [calAddEvent, setCalAddEvent] = useState(null);
@@ -390,14 +388,21 @@ function DailyGrind() {
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
-  // Load calendar events from cloud sync
+  // Load calendar events from cloud sync (single source of truth)
   useEffect(() => {
     if (calEventsLoaded) return;
     (async () => {
       try {
         const r = await window.storage.get("dg-cal-events");
         if (r?.value) { setCalEvents(JSON.parse(r.value)); }
-      } catch(e) { console.warn("Cal sync load failed:", e); }
+        else {
+          // Fallback: read raw localStorage if storage.get returned nothing
+          try { const raw = localStorage.getItem("dg-cal-events"); if (raw) setCalEvents(JSON.parse(raw)); } catch {}
+        }
+      } catch(e) {
+        console.warn("Cal sync load failed:", e);
+        try { const raw = localStorage.getItem("dg-cal-events"); if (raw) setCalEvents(JSON.parse(raw)); } catch {}
+      }
       setCalEventsLoaded(true);
     })();
   }, [calEventsLoaded]);
