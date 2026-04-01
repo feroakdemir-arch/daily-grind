@@ -74,13 +74,20 @@
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
                 // Only use cloud data if it's newer than local, or if local has no data
-                if (fbTs > localTs || (!localData && fbValue)) {
+                if (!localData && fbValue) {
+                  const nowTs = Date.now();
                   localStorage.setItem(key, fbValue);
-                  localStorage.setItem(key + "_ts", String(fbTs || Date.now()));
+                  localStorage.setItem(key + "_ts", String(fbTs || nowTs));
                   return { key, value: fbValue };
-                } else if (localTs > fbTs && localData) {
-                  // Local is newer, push to cloud
-                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                } else if (fbTs > localTs && fbTs > 0) {
+                  localStorage.setItem(key, fbValue);
+                  localStorage.setItem(key + "_ts", String(fbTs));
+                  return { key, value: fbValue };
+                } else if (localData) {
+                  // Local is same age or newer — push to cloud to establish timestamps
+                  const pushTs = localTs || Date.now();
+                  localStorage.setItem(key + "_ts", String(pushTs));
+                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
                 }
               } else if (localData) {
                 await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
