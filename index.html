@@ -102,6 +102,8 @@
           const ts = Date.now();
           localStorage.setItem(key, value);
           localStorage.setItem(key + "_ts", String(ts));
+          window._lastLocalTs = window._lastLocalTs || {};
+          window._lastLocalTs[key] = ts;
 
           const syncCode = window._getSyncCode();
           if (syncCode) {
@@ -114,6 +116,30 @@
           }
           return { key, value };
         } catch { return null; }
+      },
+      // Subscribe to real-time cloud updates for a key
+      subscribe(key, callback) {
+        const syncCode = window._getSyncCode();
+        if (!syncCode) return () => {};
+        let unsub = () => {};
+        _fbReady.then(() => {
+          unsub = fbDb.collection("sync").doc(syncCode).collection("data").doc(key)
+            .onSnapshot((doc) => {
+              if (!doc.exists) return;
+              const d = doc.data();
+              const fbTs = d.localTs || 0;
+              const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
+              // Ignore echoes of our own recent writes
+              const ourLastTs = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
+              if (fbTs === ourLastTs) return;
+              if (fbTs > localTs) {
+                localStorage.setItem(key, d.value);
+                localStorage.setItem(key + "_ts", String(fbTs));
+                try { callback(d.value); } catch(e) { console.warn(e); }
+              }
+            }, (err) => console.warn("Firestore subscribe failed:", err));
+        });
+        return () => { try { unsub(); } catch(e) {} };
       }
     };
   </script>
@@ -394,6 +420,29 @@ function DailyGrind() {
 
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
+
+  // Real-time cloud sync subscription for main data
+  useEffect(() => {
+    if (!window.storage.subscribe) return;
+    const unsub = window.storage.subscribe(STORAGE_KEY, (newValue) => {
+      try {
+        const parsed = JSON.parse(newValue);
+        setData(parsed);
+        setGoalInput(String(parsed.dailyGoal));
+      } catch(e) { console.warn("Live sync parse failed:", e); }
+    });
+    return unsub;
+  }, []);
+
+  // Real-time cloud sync subscription for calendar events
+  useEffect(() => {
+    if (!window.storage.subscribe) return;
+    const unsub = window.storage.subscribe("dg-cal-events", (newValue) => {
+      try { setCalEvents(JSON.parse(newValue)); }
+      catch(e) { console.warn("Cal live sync parse failed:", e); }
+    });
+    return unsub;
+  }, []);
 
   // Load calendar events from cloud sync (single source of truth)
   useEffect(() => {
