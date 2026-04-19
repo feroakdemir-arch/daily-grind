@@ -57,6 +57,7 @@
     };
 
     // Storage that syncs localStorage + Firestore via sync code
+    // Policy: when sync is enabled, CLOUD is the source of truth on page load.
     window.storage = {
       async get(key) {
         try {
@@ -73,24 +74,25 @@
                 const fbData = doc.data();
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
-                // Only use cloud data if it's newer than local, or if local has no data
-                if (!localData && fbValue) {
-                  const nowTs = Date.now();
-                  localStorage.setItem(key, fbValue);
-                  localStorage.setItem(key + "_ts", String(fbTs || nowTs));
-                  return { key, value: fbValue };
-                } else if (fbTs > localTs && fbTs > 0) {
-                  localStorage.setItem(key, fbValue);
-                  localStorage.setItem(key + "_ts", String(fbTs));
-                  return { key, value: fbValue };
-                } else if (localData) {
-                  // Local is same age or newer — push to cloud to establish timestamps
-                  const pushTs = localTs || Date.now();
-                  localStorage.setItem(key + "_ts", String(pushTs));
-                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                // Cloud is source of truth when sync is enabled.
+                // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
+                if (localTs > fbTs && localData) {
+                  // Local has unsynced changes — push to cloud
+                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                  return localData;
                 }
+                // Otherwise, cloud wins
+                const saveTs = fbTs || Date.now();
+                localStorage.setItem(key, fbValue);
+                localStorage.setItem(key + "_ts", String(saveTs));
+                window._lastLocalTs = window._lastLocalTs || {};
+                window._lastLocalTs[key] = saveTs;
+                return { key, value: fbValue };
               } else if (localData) {
-                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                // Cloud empty — seed it from local
+                const pushTs = localTs || Date.now();
+                localStorage.setItem(key + "_ts", String(pushTs));
+                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
               }
             } catch (e) { console.warn("Firestore get failed:", e); }
           }
@@ -1705,9 +1707,14 @@ function DailyGrind() {
         <label style={S.lbl}>Sync Code (same code on all devices to sync)</label>
         <input style={S.inp} type="text" value={syncCode} onChange={(e) => setSyncCode(e.target.value.trim())} placeholder="e.g. mycode123" />
         <div style={S.fAct}>
-          <button onClick={() => { window._setSyncCode(syncCode || null); alert(syncCode ? "Sync code set! Use the same code on your other devices." : "Sync disabled."); }} style={S.okBtn}>{syncCode ? "Enable Sync" : "Disable Sync"}</button>
-          {window._getSyncCode() && <button onClick={() => { window.storage.get("daily-grind-v13"); alert("Syncing from cloud..."); location.reload(); }} style={{ ...S.cBtn, marginLeft: 8 }}>Pull from Cloud</button>}
+          <button onClick={() => { window._setSyncCode(syncCode || null); alert(syncCode ? "Sync code set! Use the same code on your other devices." : "Sync disabled."); location.reload(); }} style={S.okBtn}>{syncCode ? "Enable Sync" : "Disable Sync"}</button>
+          {window._getSyncCode() && <button onClick={() => { alert("Pulling latest from cloud..."); location.reload(); }} style={{ ...S.cBtn, marginLeft: 8 }}>Pull from Cloud</button>}
         </div>
+        {window._getSyncCode() && (
+          <div style={{ marginTop: 12, fontSize: 10, color: "#4cd137", letterSpacing: 1.5 }}>
+            {"\u25CF"} LIVE SYNC ACTIVE — cloud is source of truth
+          </div>
+        )}
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
