@@ -380,6 +380,7 @@ function DailyGrind() {
   const [winAnim, setWinAnim] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [showNewList, setShowNewList] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
   const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
@@ -1203,19 +1204,38 @@ function DailyGrind() {
           );
         })}
 
-        {page === "habits" && Object.keys(data.history).length > 0 && (
-          <div style={{ marginBottom: 20 }}>
-            <div style={S.secH}><span style={S.secLbl}>LAST 7 DAYS</span></div>
-            <div style={{ display: "flex", gap: 6 }}>
-              {Object.entries(data.history).sort(([a], [b]) => b.localeCompare(a)).slice(0, 7).map(([d, inf]) => (
-                <div key={d} style={{ flex: 1, borderRadius: 8, border: `1px solid ${inf.won ? "#00ff8733" : "#ff475733"}`, background: inf.won ? "#00ff8716" : "#ff475716", padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, color: "#8b8b9e" }}>{new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "narrow" })}</span>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: inf.won ? "#00ff87" : "#ff4757" }}>{inf.score}</span>
-                </div>
-              ))}
+        {page === "habits" && Object.keys(data.history).length > 0 && (() => {
+          const allHistory = Object.entries(data.history).sort(([a], [b]) => b.localeCompare(a));
+          const totalDays = allHistory.length;
+          const wins = allHistory.filter(([, inf]) => inf.won).length;
+          const winPct = totalDays ? Math.round((wins / totalDays) * 100) : 0;
+          const avgScore = totalDays ? Math.round(allHistory.reduce((s, [, inf]) => s + (inf.score || 0), 0) / totalDays) : 0;
+          const shown = showAllHistory ? allHistory : allHistory.slice(0, 7);
+          return (
+            <div style={{ marginBottom: 20 }}>
+              <div style={S.secH}>
+                <span style={S.secLbl}>{showAllHistory ? "ALL HISTORY" : "LAST 7 DAYS"}</span>
+                <span style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 1, fontWeight: 700 }}>{showAllHistory ? `${totalDays} DAYS · ${wins} WINS (${winPct}%) · AVG ${avgScore}` : ""}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: showAllHistory ? "wrap" : "nowrap" }}>
+                {shown.map(([d, inf]) => {
+                  const dateObj = new Date(d + "T12:00:00");
+                  return (
+                    <div key={d} title={dateObj.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}
+                      style={{ flex: showAllHistory ? "0 0 calc(14.2857% - 6px)" : 1, minWidth: showAllHistory ? 44 : 0, borderRadius: 8, border: `1px solid ${inf.won ? "#00ff8733" : "#ff475733"}`, background: inf.won ? "#00ff8716" : "#ff475716", padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: "#8b8b9e" }}>{dateObj.toLocaleDateString("en-US", { weekday: "narrow" })}</span>
+                      {showAllHistory && <span style={{ fontSize: 8, color: "#666677", fontWeight: 600 }}>{dateObj.getMonth() + 1}/{dateObj.getDate()}</span>}
+                      <span style={{ fontSize: 13, fontWeight: 800, color: inf.won ? "#00ff87" : "#ff4757" }}>{inf.score}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={() => setShowAllHistory(!showAllHistory)} style={{ width: "100%", marginTop: 8, padding: "10px", background: "none", border: "none", color: "#7c3aed", fontSize: 11, fontWeight: 700, letterSpacing: 2, cursor: "pointer", fontFamily: "inherit" }}>
+                {showAllHistory ? "▲ SHOW LESS" : `▼ SHOW ALL HISTORY (${totalDays})`}
+              </button>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {page === "tasks" && (
           <div>
