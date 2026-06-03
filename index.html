@@ -404,6 +404,7 @@ function DailyGrind() {
   const [calEventEnd, setCalEventEnd] = useState("10:00");
   const [calEventColor, setCalEventColor] = useState("#4fc3f7");
   const [calEventRepeat, setCalEventRepeat] = useState("none");
+  const [calEventRepeatDays, setCalEventRepeatDays] = useState([]);
   const [calSelectedEvent, setCalSelectedEvent] = useState(null);
   const [calEditMode, setCalEditMode] = useState(false);
   const [calEventDesc, setCalEventDesc] = useState("");
@@ -759,9 +760,10 @@ function DailyGrind() {
 
   // Calendar helpers
   function saveCalEvents(evts) { setCalEvents(evts); window.storage.set("dg-cal-events", JSON.stringify(evts)).catch(console.error); }
-  function addCalEvent(dateStr, title, start, end, color, repeat, desc) {
+  function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
     const evt = { id: `ce_${Date.now()}`, date: dateStr, title, start, end, color: color || "#4fc3f7" };
     if (repeat && repeat !== "none") evt.repeat = repeat;
+    if (repeat === "custom" && repeatDays && repeatDays.length) evt.repeatDays = [...repeatDays].sort((a,b) => a-b);
     if (desc) evt.desc = desc;
     saveCalEvents([...calEvents, evt]);
   }
@@ -804,6 +806,7 @@ function DailyGrind() {
       }
       if (e.repeat === "daily") return true;
       if (e.repeat === "weekdays") return dayOfWeek >= 1 && dayOfWeek <= 5;
+      if (e.repeat === "custom") return Array.isArray(e.repeatDays) && e.repeatDays.includes(dayOfWeek);
       return false;
     }).map(e => ({ ...e, _repeating: true, _origId: e.id, id: e.id + "_" + dateStr }));
     return [...directEvents, ...repeatingEvents];
@@ -1503,7 +1506,8 @@ function DailyGrind() {
                 const evt = calSelectedEvent;
                 const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "PM" : "AM"; return `${hr > 12 ? hr-12 : hr || 12}:${m} ${ampm}`; };
                 const dateObj = new Date(evt._displayDate + "T12:00");
-                const repeatLabel = evt.repeat === "weekly" ? "Weekly" : evt.repeat === "daily" ? "Daily" : evt.repeat === "weekdays" ? "Weekdays" : null;
+                const dayShort = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+                const repeatLabel = evt.repeat === "weekly" ? "Weekly" : evt.repeat === "daily" ? "Daily" : evt.repeat === "weekdays" ? "Weekdays" : evt.repeat === "custom" && Array.isArray(evt.repeatDays) && evt.repeatDays.length ? evt.repeatDays.slice().sort((a,b) => a-b).map(d => dayShort[d]).join(", ") : null;
                 return (
                   <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
                     onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}>
@@ -1513,7 +1517,7 @@ function DailyGrind() {
                       <div style={{ height: 6, background: evt.color || "#4fc3f7" }} />
                       {/* Action bar */}
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: "10px 14px 0" }}>
-                        <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventDesc(evt.desc || ""); }}
+                        <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
@@ -1583,10 +1587,21 @@ function DailyGrind() {
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"]].map(([v,l]) => (
+                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"],["custom","Custom"]].map(([v,l]) => (
                         <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
                       ))}
                     </div>
+                    {calEventRepeat === "custom" && (
+                      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+                        {["S","M","T","W","T","F","S"].map((l, idx) => {
+                          const on = calEventRepeatDays.includes(idx);
+                          return (
+                            <button key={idx} onClick={() => setCalEventRepeatDays(on ? calEventRepeatDays.filter(d => d !== idx) : [...calEventRepeatDays, idx])}
+                              style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", border: on ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: on ? "#7c3aed22" : "#12122a", color: on ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
+                          );
+                        })}
+                      </div>
+                    )}
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
                       {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
@@ -1596,7 +1611,8 @@ function DailyGrind() {
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
-                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, desc: calEventDesc.trim() || undefined });
+                        const isCustom = calEventRepeat === "custom" && calEventRepeatDays.length > 0;
+                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined });
                         setCalSelectedEvent(null); setCalEditMode(false);
                       }} style={S.okBtn}>Save</button>
                     </div>
@@ -1623,10 +1639,21 @@ function DailyGrind() {
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"]].map(([v,l]) => (
+                      {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"],["custom","Custom"]].map(([v,l]) => (
                         <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
                       ))}
                     </div>
+                    {calEventRepeat === "custom" && (
+                      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+                        {["S","M","T","W","T","F","S"].map((l, idx) => {
+                          const on = calEventRepeatDays.includes(idx);
+                          return (
+                            <button key={idx} onClick={() => setCalEventRepeatDays(on ? calEventRepeatDays.filter(d => d !== idx) : [...calEventRepeatDays, idx])}
+                              style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", border: on ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: on ? "#7c3aed22" : "#12122a", color: on ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
+                          );
+                        })}
+                      </div>
+                    )}
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
                       {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
@@ -1637,8 +1664,8 @@ function DailyGrind() {
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
                         if (calEventTitle.trim()) {
-                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim());
-                          setCalAddEvent(null); setCalEventRepeat("none"); setCalEventDesc("");
+                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim(), calEventRepeatDays);
+                          setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc("");
                         }
                       }} style={S.okBtn}>Add Event</button>
                     </div>
