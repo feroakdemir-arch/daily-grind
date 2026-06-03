@@ -620,7 +620,7 @@ function DailyGrind() {
   function addHabit(secId) {
     if (!formName.trim()) return;
     const item = { id: `h_${Date.now()}`, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
-    save({ ...data, habitSections: data.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item].sort((a, b) => b.points - a.points) } : s) });
+    save({ ...data, habitSections: data.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item] } : s) });
     setFormName(""); setFormPoints("10"); setFormDesc(""); setView("main");
   }
   function deleteHabit(id) { save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) }); setView("main"); }
@@ -628,13 +628,23 @@ function DailyGrind() {
     if (!editItem || !formName.trim()) return;
     const u = { ...editItem, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
     const newLog = { ...data.log, [today]: { ...getTL(), [editItem.id + "_note"]: formComment.trim() } };
-    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i).sort((a, b) => b.points - a.points) })), log: newLog });
+    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i) })), log: newLog });
     setView("main"); setEditItem(null); setFormDesc(""); setFormComment("");
   }
   function moveHabitTo(tgt) {
     if (!editItem) return;
-    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem].sort((a, b) => b.points - a.points) : s.items.filter((i) => i.id !== editItem.id) })) });
+    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem] : s.items.filter((i) => i.id !== editItem.id) })) });
     setEditSection(tgt);
+  }
+  function reorderHabit(secId, fromIdx, toIdx) {
+    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+    save({ ...data, habitSections: data.habitSections.map((s) => {
+      if (s.id !== secId) return s;
+      const items = [...s.items];
+      const [moved] = items.splice(fromIdx, 1);
+      items.splice(toIdx, 0, moved);
+      return { ...s, items };
+    }) });
   }
 
   const toggleTask = useCallback((listId, taskId) => {
@@ -846,7 +856,7 @@ function DailyGrind() {
     </div>
   );
 
-  const HabitCard = ({ item, secId }) => {
+  const HabitCard = ({ item, secId, idx }) => {
     const streak = getStreak(item.id, data.log, today);
     const overall = getOverall(item.id, data.log);
     const todayStatus = tl[item.id];
@@ -859,6 +869,53 @@ function DailyGrind() {
     const [showMonthly, setShowMonthly] = useState(false);
     const [monthOffset, setMonthOffset] = useState(0);
     const [selectedMonthDay, setSelectedMonthDay] = useState(null);
+    const [hDragIdx, setHDragIdx] = useState(null);
+    const [hDropIdx, setHDropIdx] = useState(null);
+    const hDragRef = useRef(null);
+    const hRowRects = useRef([]);
+
+    function handleHabitDragStart(e) {
+      e.preventDefault();
+      const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
+      const rects = [];
+      rows.forEach((row) => {
+        const r = row.getBoundingClientRect();
+        rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
+      });
+      hRowRects.current = rects;
+      hDragRef.current = { fromIdx: idx, toIdx: idx };
+      setHDragIdx(idx);
+      setHDropIdx(idx);
+
+      const onMove = (ev) => {
+        const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        let closest = idx;
+        let minDist = Infinity;
+        hRowRects.current.forEach((r, i) => {
+          const dist = Math.abs(y - r.mid);
+          if (dist < minDist) { minDist = dist; closest = i; }
+        });
+        hDragRef.current.toIdx = closest;
+        setHDropIdx(closest);
+      };
+      const onEnd = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onEnd);
+        document.removeEventListener("touchmove", onMove);
+        document.removeEventListener("touchend", onEnd);
+        const from = hDragRef.current.fromIdx;
+        const to = hDragRef.current.toIdx;
+        setHDragIdx(null);
+        setHDropIdx(null);
+        hDragRef.current = null;
+        hRowRects.current = [];
+        if (from !== to) reorderHabit(secId, from, to);
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onEnd);
+      document.addEventListener("touchmove", onMove, { passive: false });
+      document.addEventListener("touchend", onEnd);
+    }
 
     function pickStatus(st) {
       const dtl = data.log[pickerDate] || {};
@@ -879,9 +936,18 @@ function DailyGrind() {
       setShowComment(false); setShowPicker(false);
     }
 
+    const isDragging = hDragIdx !== null;
+    const showTopMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx > idx;
+    const showBotMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx < idx;
     return (
-      <div style={S.card}>
+      <div data-habitrow={idx} style={{ ...S.card, opacity: hDragIdx === idx ? 0.4 : 1, borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop, borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom }}>
         <div style={{ display: "flex", alignItems: "flex-start" }}>
+          <span
+            onPointerDown={handleHabitDragStart}
+            onTouchStart={handleHabitDragStart}
+            style={{ cursor: "grab", color: "#555", fontSize: 18, padding: "2px 8px 2px 0", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "flex-start" }}
+            title="Drag to reorder"
+          >{"\u2807"}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -1105,7 +1171,7 @@ function DailyGrind() {
           const sp = sec.items.reduce((s, i) => s + (tl[i.id] === "done" ? i.points : 0), 0);
           const sm = sec.items.reduce((s, i) => s + i.points, 0);
           return (
-            <div key={sec.id} style={{ marginBottom: 20 }}>
+            <div key={sec.id} style={{ marginBottom: 20 }} data-habitsec={sec.id}>
               <div style={S.secH}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 14 }}>{sec.icon}</span>
@@ -1114,7 +1180,7 @@ function DailyGrind() {
                 </div>
                 <span style={S.secPt}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>
               </div>
-              {sec.items.map((item) => <HabitCard key={item.id} item={item} secId={sec.id} />)}
+              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} />)}
               <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
           );
