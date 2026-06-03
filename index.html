@@ -243,6 +243,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
   const dragRef = useRef(null);
   const [dragIdx, setDragIdx] = useState(null);
   const [dropIdx, setDropIdx] = useState(null);
+  const [dragOffset, setDragOffset] = useState(0);
   const rowRects = useRef([]);
 
   const pending = list.items.filter((t) => !t.done);
@@ -258,6 +259,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
 
   function handleDragStart(e, idx) {
     e.preventDefault();
+    const startY = e.touches ? e.touches[0].clientY : e.clientY;
     // Snapshot row positions at drag start (before any visual changes)
     const rows = document.querySelectorAll(`[data-tasklist="${list.id}"] [data-taskrow]`);
     const rects = [];
@@ -266,12 +268,14 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
       rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
     });
     rowRects.current = rects;
-    dragRef.current = { fromIdx: idx, toIdx: idx };
+    dragRef.current = { fromIdx: idx, toIdx: idx, startY };
     setDragIdx(idx);
     setDropIdx(idx);
+    setDragOffset(0);
 
     const onMove = (ev) => {
       const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      setDragOffset(y - startY);
       let closest = idx;
       let minDist = Infinity;
       rowRects.current.forEach((r, i) => {
@@ -290,6 +294,7 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
       const to = dragRef.current.toIdx;
       setDragIdx(null);
       setDropIdx(null);
+      setDragOffset(0);
       dragRef.current = null;
       rowRects.current = [];
       if (from !== to) {
@@ -316,8 +321,23 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
 
-      {pending.map((t, i) => (
-        <div key={t.id} data-taskrow={i} style={{ ...S.tRow, opacity: dragIdx === i ? 0.4 : 1, borderTop: dropIdx === i && dragIdx !== null && dragIdx !== i && dragIdx > i ? "2px solid #7c3aed" : "none", borderBottom: dropIdx === i && dragIdx !== null && dragIdx !== i && dragIdx < i ? "2px solid #7c3aed" : "none" }}>
+      {pending.map((t, i) => {
+        const isMe = dragIdx === i;
+        const isDragging = dragIdx !== null;
+        return (
+        <div key={t.id} data-taskrow={i} style={{
+          ...S.tRow,
+          borderTop: dropIdx === i && isDragging && dragIdx !== i && dragIdx > i ? "2px solid #7c3aed" : "none",
+          borderBottom: dropIdx === i && isDragging && dragIdx !== i && dragIdx < i ? "2px solid #7c3aed" : "none",
+          transform: isMe ? `translateY(${dragOffset}px) scale(1.02)` : "none",
+          transition: isMe ? "none" : "transform 0.15s",
+          boxShadow: isMe ? "0 10px 24px rgba(124,58,237,0.45)" : "none",
+          background: isMe ? "#1a1a2e" : (S.tRow.background || "transparent"),
+          zIndex: isMe ? 50 : "auto",
+          position: "relative",
+          opacity: isMe ? 0.95 : 1,
+          pointerEvents: isDragging && !isMe ? "none" : "auto",
+        }}>
           <span
             onPointerDown={(e) => handleDragStart(e, i)}
             onTouchStart={(e) => handleDragStart(e, i)}
@@ -330,7 +350,8 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
           <button onClick={() => onSendToPomo(t.name)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#7c3aed", padding: "2px 6px", fontFamily: "inherit" }} title="Send to Pomodoro">{"\u2191"}</button>
           <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
         </div>
-      ))}
+        );
+      })}
 
       <div style={S.tAddRow}>
         <span style={S.tAddIcon}>+</span>
