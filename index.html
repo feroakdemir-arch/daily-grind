@@ -901,16 +901,15 @@ function DailyGrind() {
               const nt = data.log[date]?.[item.id + "_note"];
               const isT = date === today, isF = date > today;
               let bg = "#2d2d3a", clr = "#aaaabb", bdr = "2px solid transparent", lbl = "";
-              if (st === "done") { bg = "#4cd137"; clr = "#fff"; }
-              else if (st === "skip") { bg = "#e84118"; clr = "#fff"; }
-              else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
+              if (st === "done") { bg = "#4cd137"; clr = "#fff"; lbl = "\u2713"; }
+              else if (st === "skip") { bg = "#e84118"; clr = "#fff"; lbl = "\u2717"; }
+              else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; lbl = "\u2014"; }
               if (nt && !st) { bg = "#4cd13744"; bdr = "2px solid #4cd137"; lbl = "\u00B7\u00B7\u00B7"; clr = "#4cd137"; }
               else if (nt && st) { bdr = `2px solid ${st === "done" ? "#4cd137" : st === "skip" ? "#e84118" : "#636e72"}`; }
               if (!st && !nt && !isF) { lbl = "\u00B7\u00B7\u00B7"; clr = "#5a5a6e"; }
               if (isT) {
                 bdr = "2px solid #c4b5fd";
-                lbl = st === "done" ? "\u2713" : st === "skip" ? "\u2717" : st === "neutral" ? "\u2014" : nt ? "\u00B7\u00B7\u00B7" : "\u00B7\u00B7\u00B7";
-                if (!st && !nt) clr = "#c4b5fd";
+                if (!st && !nt) { lbl = "\u00B7\u00B7\u00B7"; clr = "#c4b5fd"; }
               }
               return (
                 <div key={date} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flex: 1 }}>
