@@ -1701,20 +1701,20 @@ function DailyGrind() {
     </div>
   );
 
-  const FW = ({ children }) => <div style={S.shell}><div style={S.box}>{children}</div><Nav /></div>;
+  const FW = (children) => <div style={S.shell}><div style={S.box}>{children}</div><Nav /></div>;
 
   if (view === "addHabit") {
     const sec = data.habitSections.find((s) => s.id === editSection);
-    return <FW><div style={S.fCard}><h2 style={S.fTitle}>ADD TO {sec?.title}</h2>
+    return FW(<div style={S.fCard}><h2 style={S.fTitle}>ADD TO {sec?.title}</h2>
       <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
       <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
       <label style={S.lbl}>Description (optional)</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="e.g., Mon-Push, Tue-Rest, Wed-Pull..." rows={3} />
       <div style={S.fAct}><button onClick={() => { setView("main"); setFormDesc(""); }} style={S.cBtn}>Cancel</button><button onClick={() => addHabit(editSection)} style={S.okBtn}>Add</button></div>
-    </div></FW>;
+    </div>);
   }
 
   if (view === "editHabit" && editItem) {
-    return <FW><div style={S.fCard}><h2 style={S.fTitle}>EDIT HABIT</h2>
+    return FW(<div style={S.fCard}><h2 style={S.fTitle}>EDIT HABIT</h2>
       <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
       <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
       <label style={S.lbl}>Description</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="Add details, schedule, notes..." rows={4} />
@@ -1728,11 +1728,11 @@ function DailyGrind() {
         <button onClick={() => { setView("main"); setEditItem(null); }} style={S.cBtn}>Cancel</button>
         <button onClick={saveHabitEdit} style={S.okBtn}>Save</button>
       </div>
-    </div></FW>;
+    </div>);
   }
 
   if (view === "settings") {
-    return <FW><div style={S.fCard}><h2 style={S.fTitle}>SETTINGS</h2>
+    return FW(<div style={S.fCard}><h2 style={S.fTitle}>SETTINGS</h2>
       <label style={S.lbl}>Daily Point Goal</label><input style={S.inp} type="number" value={goalInput} onChange={(e) => setGoalInput(e.target.value)} min="1" />
       <div style={S.fAct}><button onClick={() => setView("main")} style={S.cBtn}>Cancel</button><button onClick={saveGoal} style={S.okBtn}>Save</button></div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
@@ -1765,7 +1765,7 @@ function DailyGrind() {
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
       </div>
-    </div></FW>;
+    </div>);
   }
   return null;
 }
