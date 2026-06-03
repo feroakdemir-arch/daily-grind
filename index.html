@@ -945,9 +945,9 @@ function DailyGrind() {
           <span
             onPointerDown={handleHabitDragStart}
             onTouchStart={handleHabitDragStart}
-            style={{ cursor: "grab", color: "#555", fontSize: 18, padding: "2px 8px 2px 0", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "flex-start" }}
+            style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 2px", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "center", fontWeight: 900, letterSpacing: -2 }}
             title="Drag to reorder"
-          >{"\u2807"}</span>
+          >{"\u22ee"}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
               <div style={{ flex: 1, minWidth: 0 }}>
