@@ -871,11 +871,13 @@ function DailyGrind() {
     const [selectedMonthDay, setSelectedMonthDay] = useState(null);
     const [hDragIdx, setHDragIdx] = useState(null);
     const [hDropIdx, setHDropIdx] = useState(null);
+    const [hDragOffset, setHDragOffset] = useState(0);
     const hDragRef = useRef(null);
     const hRowRects = useRef([]);
 
     function handleHabitDragStart(e) {
       e.preventDefault();
+      const startY = e.touches ? e.touches[0].clientY : e.clientY;
       const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
       const rects = [];
       rows.forEach((row) => {
@@ -883,12 +885,14 @@ function DailyGrind() {
         rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
       });
       hRowRects.current = rects;
-      hDragRef.current = { fromIdx: idx, toIdx: idx };
+      hDragRef.current = { fromIdx: idx, toIdx: idx, startY };
       setHDragIdx(idx);
       setHDropIdx(idx);
+      setHDragOffset(0);
 
       const onMove = (ev) => {
         const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        setHDragOffset(y - startY);
         let closest = idx;
         let minDist = Infinity;
         hRowRects.current.forEach((r, i) => {
@@ -907,6 +911,7 @@ function DailyGrind() {
         const to = hDragRef.current.toIdx;
         setHDragIdx(null);
         setHDropIdx(null);
+        setHDragOffset(0);
         hDragRef.current = null;
         hRowRects.current = [];
         if (from !== to) reorderHabit(secId, from, to);
@@ -937,10 +942,22 @@ function DailyGrind() {
     }
 
     const isDragging = hDragIdx !== null;
+    const isMe = hDragIdx === idx;
     const showTopMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx > idx;
     const showBotMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx < idx;
     return (
-      <div data-habitrow={idx} style={{ ...S.card, opacity: hDragIdx === idx ? 0.4 : 1, borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop, borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom }}>
+      <div data-habitrow={idx} style={{
+        ...S.card,
+        borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop,
+        borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom,
+        transform: isMe ? `translateY(${hDragOffset}px) scale(1.02)` : "none",
+        transition: isMe ? "none" : "transform 0.15s",
+        boxShadow: isMe ? "0 12px 30px rgba(124,58,237,0.45)" : "none",
+        zIndex: isMe ? 50 : "auto",
+        position: "relative",
+        opacity: isMe ? 0.92 : 1,
+        pointerEvents: isDragging && !isMe ? "none" : "auto",
+      }}>
         <div style={{ display: "flex", alignItems: "flex-start" }}>
           <span
             onPointerDown={handleHabitDragStart}
