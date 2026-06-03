@@ -235,7 +235,29 @@ function getStreak(id, log, today) {
 function getOverall(id, log) { const ds = Object.keys(log); if (!ds.length) return 0; return Math.round((ds.filter((d) => log[d]?.[id] === "done").length / ds.length) * 100); }
 const statusCycle = [undefined, "done", "skip", "neutral"];
 
-function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder }) {
+function deadlineChip(deadline) {
+  if (!deadline) return null;
+  const hasTime = deadline.includes("T");
+  const due = new Date(deadline + (hasTime ? "" : "T23:59:59"));
+  const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const dueStart = new Date(due); dueStart.setHours(0,0,0,0);
+  const diffDays = Math.round((dueStart - todayStart) / dayMs);
+  const fmtTime = (d) => { const h = d.getHours(); const m = d.getMinutes(); const ampm = h >= 12 ? "p" : "a"; const hr = h > 12 ? h-12 : h || 12; return `${hr}${m ? ":"+String(m).padStart(2,"0") : ""}${ampm}`; };
+  if (due < now) {
+    const daysLate = Math.max(1, Math.ceil((now - due) / dayMs));
+    return { text: `⚠ ${daysLate}d late`, color: "#ff4757", bg: "#ff475722", border: "#ff475755" };
+  }
+  if (diffDays === 0) {
+    return { text: hasTime ? `📅 Today ${fmtTime(due)}` : "📅 Today", color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
+  }
+  if (diffDays === 1) return { text: hasTime ? `📅 Tmrw ${fmtTime(due)}` : "📅 Tmrw", color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
+  if (diffDays < 7) return { text: `📅 ${due.toLocaleDateString("en-US", { weekday: "short" })}${hasTime ? " " + fmtTime(due) : ""}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
+  return { text: `📅 ${due.getMonth()+1}/${due.getDate()}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
+}
+
+function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
@@ -346,7 +368,9 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
           >{"\u2807"}</span>
           <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
           <span style={S.tText}>{t.name}</span>
+          {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ marginLeft: 6, padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
           {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
+          <button onClick={() => onEdit && onEdit(list.id, t)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#8b8b9e", padding: "2px 6px", fontFamily: "inherit" }} title="Edit task">{"\u270e"}</button>
           <button onClick={() => onSendToPomo(t.name)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#7c3aed", padding: "2px 6px", fontFamily: "inherit" }} title="Send to Pomodoro">{"\u2191"}</button>
           <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
         </div>
@@ -396,6 +420,11 @@ function DailyGrind() {
   const [formPoints, setFormPoints] = useState("10");
   const [formDesc, setFormDesc] = useState("");
   const [formComment, setFormComment] = useState("");
+  const [editTaskCtx, setEditTaskCtx] = useState(null); // { listId, itemId }
+  const [formTaskName, setFormTaskName] = useState("");
+  const [formTaskPoints, setFormTaskPoints] = useState("0");
+  const [formTaskDeadline, setFormTaskDeadline] = useState("");
+  const [formTaskTime, setFormTaskTime] = useState("");
   const [goalInput, setGoalInput] = useState("200");
   const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
   const [winAnim, setWinAnim] = useState(false);
@@ -704,6 +733,38 @@ function DailyGrind() {
       return nd;
     });
   }, []);
+  const openEditTask = useCallback((listId, task) => {
+    setEditTaskCtx({ listId, itemId: task.id });
+    setFormTaskName(task.name || "");
+    setFormTaskPoints(String(task.points || 0));
+    const dl = task.deadline || "";
+    if (dl.includes("T")) {
+      const [d, t] = dl.split("T");
+      setFormTaskDeadline(d);
+      setFormTaskTime(t.slice(0,5));
+    } else {
+      setFormTaskDeadline(dl);
+      setFormTaskTime("");
+    }
+    setView("editTask");
+  }, []);
+  function saveTaskEdit() {
+    if (!editTaskCtx || !formTaskName.trim()) return;
+    let deadline;
+    if (formTaskDeadline) {
+      deadline = formTaskTime ? `${formTaskDeadline}T${formTaskTime}` : formTaskDeadline;
+    }
+    save({ ...data, taskLists: data.taskLists.map((l) => l.id !== editTaskCtx.listId ? l : {
+      ...l,
+      items: l.items.map((i) => {
+        if (i.id !== editTaskCtx.itemId) return i;
+        const u = { ...i, name: formTaskName.trim(), points: Math.max(0, parseInt(formTaskPoints) || 0) };
+        if (deadline) u.deadline = deadline; else delete u.deadline;
+        return u;
+      })
+    }) });
+    setEditTaskCtx(null); setView("main");
+  }
   const deleteTaskList = useCallback((listId) => {
     setData((prev) => {
       const nd = { ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) };
@@ -1261,7 +1322,7 @@ function DailyGrind() {
         {page === "tasks" && (
           <div>
             {data.taskLists.map((list) => (
-              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} />
+              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
@@ -1851,6 +1912,37 @@ function DailyGrind() {
         <button onClick={() => deleteHabit(editItem.id)} style={S.dBtn}>Delete</button>
         <button onClick={() => { setView("main"); setEditItem(null); }} style={S.cBtn}>Cancel</button>
         <button onClick={saveHabitEdit} style={S.okBtn}>Save</button>
+      </div>
+    </div>);
+  }
+
+  if (view === "editTask" && editTaskCtx) {
+    const setQuick = (days) => {
+      const d = new Date(); d.setDate(d.getDate() + days);
+      const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      setFormTaskDeadline(iso);
+    };
+    return FW(<div style={S.fCard}><h2 style={S.fTitle}>EDIT TASK</h2>
+      <label style={S.lbl}>Name</label><input style={S.inp} value={formTaskName} onChange={(e) => setFormTaskName(e.target.value)} autoFocus />
+      <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formTaskPoints} onChange={(e) => setFormTaskPoints(e.target.value)} min="0" />
+      <label style={S.lbl}>Deadline</label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <button onClick={() => setQuick(0)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: "1px solid #2d2d3a", background: "#12122a", color: "#8b8b9e" }}>Today</button>
+        <button onClick={() => setQuick(1)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: "1px solid #2d2d3a", background: "#12122a", color: "#8b8b9e" }}>Tmrw</button>
+        <button onClick={() => setQuick(3)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: "1px solid #2d2d3a", background: "#12122a", color: "#8b8b9e" }}>3d</button>
+        <button onClick={() => setQuick(7)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: "1px solid #2d2d3a", background: "#12122a", color: "#8b8b9e" }}>1wk</button>
+        <button onClick={() => { setFormTaskDeadline(""); setFormTaskTime(""); }} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: "1px solid #2d2d3a", background: "#12122a", color: "#ff4757" }}>Clear</button>
+      </div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ flex: 1 }}><label style={{ ...S.lbl, marginTop: 0 }}>Date</label>
+          <input type="date" style={S.inp} value={formTaskDeadline} onChange={(e) => setFormTaskDeadline(e.target.value)} /></div>
+        <div style={{ flex: 1 }}><label style={{ ...S.lbl, marginTop: 0 }}>Time (optional)</label>
+          <input type="time" style={S.inp} value={formTaskTime} onChange={(e) => setFormTaskTime(e.target.value)} disabled={!formTaskDeadline} /></div>
+      </div>
+      <div style={S.fAct}>
+        <button onClick={() => { deleteTaskItem(editTaskCtx.listId, editTaskCtx.itemId); setEditTaskCtx(null); setView("main"); }} style={S.dBtn}>Delete</button>
+        <button onClick={() => { setEditTaskCtx(null); setView("main"); }} style={S.cBtn}>Cancel</button>
+        <button onClick={saveTaskEdit} style={S.okBtn}>Save</button>
       </div>
     </div>);
   }
