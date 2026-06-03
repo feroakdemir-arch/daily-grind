@@ -854,21 +854,28 @@ function DailyGrind() {
     const [showPicker, setShowPicker] = useState(false);
     const [showComment, setShowComment] = useState(false);
     const [commentText, setCommentText] = useState(todayNote);
+    const [pickerDate, setPickerDate] = useState(today);
     const [showDesc, setShowDesc] = useState(false);
     const [showMonthly, setShowMonthly] = useState(false);
     const [monthOffset, setMonthOffset] = useState(0);
     const [selectedMonthDay, setSelectedMonthDay] = useState(null);
 
     function pickStatus(st) {
-      const ntl = { ...tl };
+      const dtl = data.log[pickerDate] || {};
+      const ntl = { ...dtl };
       if (st === undefined) { delete ntl[item.id]; }
       else ntl[item.id] = st;
-      save({ ...data, log: { ...data.log, [today]: ntl } });
+      save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
       setShowPicker(false); setShowComment(false);
     }
 
     function saveComment() {
-      save({ ...data, log: { ...data.log, [today]: { ...tl, [item.id + "_note"]: commentText.trim() } } });
+      const dtl = data.log[pickerDate] || {};
+      const trimmed = commentText.trim();
+      const ntl = { ...dtl };
+      if (trimmed) ntl[item.id + "_note"] = trimmed;
+      else delete ntl[item.id + "_note"];
+      save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
       setShowComment(false); setShowPicker(false);
     }
 
@@ -905,9 +912,9 @@ function DailyGrind() {
               }
               return (
                 <div key={date} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flex: 1 }}>
-                  <button onClick={() => { if (isT) { setShowPicker(!showPicker); setShowComment(false); } }} disabled={!isT} style={{
+                  <button onClick={() => { if (isF) return; const sameDay = pickerDate === date; setPickerDate(date); setCommentText(data.log[date]?.[item.id + "_note"] || ""); setShowPicker(sameDay ? !showPicker : true); setShowComment(false); }} disabled={isF} style={{
                     width: 32, height: 32, borderRadius: 16, background: isF ? "#c0c0cc" : bg, color: clr, border: bdr,
-                    fontSize: 11, fontWeight: 800, cursor: isT ? "pointer" : "default", fontFamily: "inherit",
+                    fontSize: 11, fontWeight: 800, cursor: isF ? "default" : "pointer", fontFamily: "inherit",
                     display: "flex", alignItems: "center", justifyContent: "center", opacity: isF ? 0.2 : 1, transition: "all 0.15s", padding: 0,
                   }}>{lbl}</button>
                   <span style={{ fontSize: 8, color: isT ? "#7c3aed" : "#555566", fontWeight: isT ? 800 : 600 }}>{DAYS[i]}</span>
@@ -916,13 +923,23 @@ function DailyGrind() {
               );
             })}
           </div>
-          {showPicker && (
+          {showPicker && (() => {
+            const pickerNote = data.log[pickerDate]?.[item.id + "_note"] || "";
+            const isPast = pickerDate !== today;
+            const pickerDateObj = new Date(pickerDate + "T12:00");
+            return (
             <div style={S.pickerWrap}>
+              {isPast && (
+                <div style={{ textAlign: "center", fontSize: 9, color: "#c4b5fd", letterSpacing: 2, fontWeight: 700, marginBottom: 6 }}>
+                  EDITING {pickerDateObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
+                </div>
+              )}
               <div style={S.picker}>
                 <button onClick={() => pickStatus("done")} style={{ ...S.pickBtn, background: "#4cd137" }}>{"\u2713"}</button>
                 <button onClick={() => pickStatus("skip")} style={{ ...S.pickBtn, background: "#e84118" }}>{"\u2717"}</button>
                 <button onClick={() => pickStatus("neutral")} style={{ ...S.pickBtn, background: "#636e72" }}>{"\u2014"}</button>
-                <button onClick={() => { setShowComment(!showComment); setCommentText(todayNote); }} style={{ ...S.pickBtn, background: "#1a1a2e", color: "#f8f8fa", border: todayNote ? "3px solid #4cd137" : "none" }}>{"\u00B7\u00B7\u00B7"}</button>
+                <button onClick={() => pickStatus(undefined)} style={{ ...S.pickBtn, background: "#2d2d3a", color: "#8b8b9e" }}>{"\u00D7"}</button>
+                <button onClick={() => { setShowComment(!showComment); setCommentText(pickerNote); }} style={{ ...S.pickBtn, background: "#1a1a2e", color: "#f8f8fa", border: pickerNote ? "3px solid #4cd137" : "none" }}>{"\u00B7\u00B7\u00B7"}</button>
               </div>
               {showComment && (
                 <div style={S.commentRow}>
@@ -932,10 +949,11 @@ function DailyGrind() {
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
         </div>
         {todayNote && !showPicker && (
-          <div style={S.commentPreview} onClick={() => { setShowPicker(true); setShowComment(true); setCommentText(todayNote); }}>
+          <div style={S.commentPreview} onClick={() => { setPickerDate(today); setShowPicker(true); setShowComment(true); setCommentText(todayNote); }}>
             {"\uD83D\uDCDD"} {todayNote}
           </div>
         )}
