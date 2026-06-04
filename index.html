@@ -371,7 +371,6 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
           {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ marginLeft: 6, padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
           {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
           <button onClick={() => onEdit && onEdit(list.id, t)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#8b8b9e", padding: "2px 6px", fontFamily: "inherit" }} title="Edit task">{"\u270e"}</button>
-          <button onClick={() => onSendToPomo(t.name)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#7c3aed", padding: "2px 6px", fontFamily: "inherit" }} title="Send to Pomodoro">{"\u2191"}</button>
           <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
         </div>
         );
@@ -1963,6 +1962,10 @@ function DailyGrind() {
           );
         })}
       </div>
+      <button onClick={() => { setPomoTask(formTaskName.trim() || "Task"); setEditTaskCtx(null); setView("main"); setPage("timer"); }}
+        style={{ width: "100%", marginTop: 18, padding: "12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: 10, color: "#c4b5fd", fontSize: 11, fontWeight: 800, letterSpacing: 2, cursor: "pointer", fontFamily: "inherit" }}>
+        {"↑ SEND TO POMODORO"}
+      </button>
       <div style={S.fAct}>
         <button onClick={() => { deleteTaskItem(editTaskCtx.listId, editTaskCtx.itemId); setEditTaskCtx(null); setView("main"); }} style={S.dBtn}>Delete</button>
         <button onClick={() => { setEditTaskCtx(null); setView("main"); }} style={S.cBtn}>Cancel</button>
