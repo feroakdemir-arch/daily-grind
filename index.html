@@ -748,6 +748,18 @@ function DailyGrind() {
     }
     setView("editTask");
   }, []);
+  function moveTaskTo(targetListId) {
+    if (!editTaskCtx || targetListId === editTaskCtx.listId) return;
+    const srcList = data.taskLists.find((l) => l.id === editTaskCtx.listId);
+    const task = srcList?.items.find((i) => i.id === editTaskCtx.itemId);
+    if (!task) return;
+    save({ ...data, taskLists: data.taskLists.map((l) => {
+      if (l.id === editTaskCtx.listId) return { ...l, items: l.items.filter((i) => i.id !== editTaskCtx.itemId) };
+      if (l.id === targetListId) return { ...l, items: [...l.items, task] };
+      return l;
+    }) });
+    setEditTaskCtx({ listId: targetListId, itemId: editTaskCtx.itemId });
+  }
   function saveTaskEdit() {
     if (!editTaskCtx || !formTaskName.trim()) return;
     let deadline;
@@ -1938,6 +1950,18 @@ function DailyGrind() {
           <input type="date" style={S.inp} value={formTaskDeadline} onChange={(e) => setFormTaskDeadline(e.target.value)} /></div>
         <div style={{ flex: 1 }}><label style={{ ...S.lbl, marginTop: 0 }}>Time (optional)</label>
           <input type="time" style={S.inp} value={formTaskTime} onChange={(e) => setFormTaskTime(e.target.value)} disabled={!formTaskDeadline} /></div>
+      </div>
+      <label style={S.lbl}>Move to list</label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+        {data.taskLists.map((l) => {
+          const isCurrent = editTaskCtx.listId === l.id;
+          return (
+            <button key={l.id} onClick={() => moveTaskTo(l.id)}
+              style={{ padding: "7px 12px", background: isCurrent ? "#7c3aed33" : "#12122a", border: `1px solid ${isCurrent ? "#7c3aed" : "#2d2d3a"}`, borderRadius: 8, color: isCurrent ? "#7c3aed" : "#8b8b9e", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1 }}>
+              {l.title}{l.resetsDaily && <span style={{ marginLeft: 4, fontSize: 8 }}>{"↻"}</span>}
+            </button>
+          );
+        })}
       </div>
       <div style={S.fAct}>
         <button onClick={() => { deleteTaskItem(editTaskCtx.listId, editTaskCtx.itemId); setEditTaskCtx(null); setView("main"); }} style={S.dBtn}>Delete</button>
