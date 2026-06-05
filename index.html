@@ -257,7 +257,7 @@ function deadlineChip(deadline) {
   return { text: `📅 ${due.getMonth()+1}/${due.getDate()}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
 }
 
-function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit }) {
+function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
@@ -267,6 +267,52 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
   const [dropIdx, setDropIdx] = useState(null);
   const [dragOffset, setDragOffset] = useState(0);
   const rowRects = useRef([]);
+  const [listDragOffset, setListDragOffset] = useState(0);
+  const [listDragging, setListDragging] = useState(false);
+  const listDragRef = useRef(null);
+  const listRects = useRef([]);
+
+  function handleListDragStart(e) {
+    e.preventDefault();
+    if (typeof listIdx !== "number" || !onReorderList) return;
+    const startY = e.touches ? e.touches[0].clientY : e.clientY;
+    const cards = document.querySelectorAll(`[data-tasklists-container] [data-tasklistrow]`);
+    const rects = [];
+    cards.forEach((c) => { const r = c.getBoundingClientRect(); rects.push({ mid: r.top + r.height / 2 }); });
+    listRects.current = rects;
+    listDragRef.current = { fromIdx: listIdx, toIdx: listIdx, startY };
+    setListDragging(true);
+    setListDragOffset(0);
+
+    const onMove = (ev) => {
+      const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      setListDragOffset(y - startY);
+      let closest = listIdx;
+      let minDist = Infinity;
+      listRects.current.forEach((r, i) => {
+        const dist = Math.abs(y - r.mid);
+        if (dist < minDist) { minDist = dist; closest = i; }
+      });
+      listDragRef.current.toIdx = closest;
+    };
+    const onEnd = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onEnd);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", onEnd);
+      const from = listDragRef.current.fromIdx;
+      const to = listDragRef.current.toIdx;
+      setListDragging(false);
+      setListDragOffset(0);
+      listDragRef.current = null;
+      listRects.current = [];
+      if (from !== to) onReorderList(from, to);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onEnd);
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", onEnd);
+  }
 
   const pending = list.items.filter((t) => !t.done);
   const completed = list.items.filter((t) => t.done);
@@ -337,8 +383,22 @@ function TaskListCard({ list, onToggle, onDelete, onDeleteList, onAdd, onSendToP
   }
 
   return (
-    <div style={S.taskList} data-tasklist={list.id}>
+    <div data-tasklist={list.id} data-tasklistrow={listIdx} style={{
+      ...S.taskList,
+      transform: listDragging ? `translateY(${listDragOffset}px) scale(1.01)` : "none",
+      transition: listDragging ? "none" : "transform 0.15s",
+      boxShadow: listDragging ? "0 14px 32px rgba(124,58,237,0.45)" : (S.taskList.boxShadow || "none"),
+      zIndex: listDragging ? 50 : "auto",
+      position: "relative",
+      opacity: listDragging ? 0.95 : 1,
+    }}>
       <div style={S.tlHead}>
+        <span
+          onPointerDown={handleListDragStart}
+          onTouchStart={handleListDragStart}
+          style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900, letterSpacing: -2 }}
+          title="Drag to reorder list"
+        >{"\u22EE"}</span>
         <span style={S.tlTitle}>{list.title}{list.resetsDaily && <span style={{ fontSize: 9, color: "#7c3aed", marginLeft: 6, fontWeight: 700 }}>{"\u21BB"} Daily</span>}</span>
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
@@ -728,6 +788,17 @@ function DailyGrind() {
         items.splice(toIndex, 0, moved);
         return { ...l, items };
       }) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+  const reorderTaskList = useCallback((fromIdx, toIdx) => {
+    if (fromIdx === toIdx) return;
+    setData((prev) => {
+      const lists = [...prev.taskLists];
+      const [moved] = lists.splice(fromIdx, 1);
+      lists.splice(toIdx, 0, moved);
+      const nd = { ...prev, taskLists: lists };
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
@@ -1331,9 +1402,9 @@ function DailyGrind() {
         })()}
 
         {page === "tasks" && (
-          <div>
-            {data.taskLists.map((list) => (
-              <TaskListCard key={list.id} list={list} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} />
+          <div data-tasklists-container>
+            {data.taskLists.map((list, listIdx) => (
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
