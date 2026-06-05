@@ -690,11 +690,20 @@ function DailyGrind() {
     const yday = getYesterday(rh);
     let updated = { ...data };
     let changed = false;
+    const dayRolledOver = data.lastTaskResetDate && data.lastTaskResetDate !== today;
 
-    // Archive yesterday's score to history
-    if (data.log[yday] && !data.history[yday]) {
-      const yLog = data.log[yday];
-      const hs = allHabits(data.habitSections).reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
+    // On rollover (or first time we see this yday), auto-fail any unmarked habits from yesterday
+    if ((dayRolledOver || data.log[yday]) && !data.history[yday]) {
+      const habits = allHabits(data.habitSections);
+      const yLog = { ...(data.log[yday] || {}) };
+      let logChanged = false;
+      habits.forEach((h) => {
+        if (yLog[h.id] === undefined) { yLog[h.id] = "skip"; logChanged = true; }
+      });
+      if (logChanged) updated.log = { ...updated.log, [yday]: yLog };
+
+      // Archive yesterday's score to history (now using auto-skipped log)
+      const hs = habits.reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
       const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === yday)) ? t.points : 0), 0);
       const totalScore = hs + ts;
       const won = totalScore >= data.dailyGoal;
