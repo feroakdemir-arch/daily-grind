@@ -505,6 +505,7 @@ function DailyGrind() {
   const [pomoTask, setPomoTask] = useState("");
   const [showScoreDetail, setShowScoreDetail] = useState(false);
   const [calWeekOffset, setCalWeekOffset] = useState(0);
+  const [showCalSettings, setShowCalSettings] = useState(false);
   const [calEvents, setCalEvents] = useState([]);
   const [calEventsLoaded, setCalEventsLoaded] = useState(false);
   const [calView, setCalView] = useState("week");
@@ -1517,13 +1518,36 @@ function DailyGrind() {
 
         {page === "calendar" && (() => {
           const calDates = getCalWeekDates(calWeekOffset);
-          const hours = Array.from({ length: 18 }, (_, i) => i + 6); // 6 AM to 11 PM
+          const calStartHour = data.calStartHour ?? 6;
+          const calEndHour = data.calEndHour ?? 23;
+          const totalHours = calEndHour - calStartHour + 1;
+          const hours = Array.from({ length: totalHours }, (_, i) => i + calStartHour);
+          const startMinBase = calStartHour * 60;
           const HOUR_H = 60; // pixels per hour
           const todayStr = getToday(resetHour);
           const dayNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 
           function timeToMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
-          function fmtHour(h) { if (h === 0) return "12 AM"; if (h < 12) return h + " AM"; if (h === 12) return "12 PM"; return (h - 12) + " PM"; }
+          function fmtHour(h) { const hr = ((h % 24) + 24) % 24; if (hr === 0) return "12 AM"; if (hr < 12) return hr + " AM"; if (hr === 12) return "12 PM"; return (hr - 12) + " PM"; }
+          function shiftDateStr(ds, deltaDays) { const d = new Date(ds + "T12:00"); d.setDate(d.getDate() + deltaDays); return localDateStr(d); }
+          // Returns events that should display in this column. Each item gets _displayMinFromStart (px-y math input).
+          function getDisplayedEvents(ds) {
+            const normal = getEventsForDate(ds).map(e => {
+              const sm = timeToMin(e.start);
+              return { ...e, _startOffsetMin: sm - startMinBase };
+            });
+            if (calEndHour < 24) return normal;
+            // Pull next-day's events that fall in the post-midnight portion of this column
+            const nextDs = shiftDateStr(ds, 1);
+            const spillCutoffHour = calEndHour - 24 + 1; // hours 0..(spillCutoffHour-1) belong to prev column
+            const spill = getEventsForDate(nextDs)
+              .filter(e => parseInt(e.start.split(":")[0], 10) < spillCutoffHour)
+              .map(e => {
+                const sm = timeToMin(e.start) + 24 * 60;
+                return { ...e, _startOffsetMin: sm - startMinBase, _spilloverFromDate: nextDs };
+              });
+            return [...normal, ...spill];
+          }
 
           const weekStart = calDates[0];
           const weekEnd = calDates[6];
@@ -1540,7 +1564,10 @@ function DailyGrind() {
                   <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>{monthLabel}</div>
                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 2, padding: "4px 8px" }}>TODAY</button>
                 </div>
-                <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25B6"}</button>
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25B6"}</button>
+                  <button onClick={() => setShowCalSettings(true)} title="Calendar settings" style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"\u2699"}</button>
+                </div>
               </div>
 
               {/* Day headers */}
@@ -1566,7 +1593,7 @@ function DailyGrind() {
                     const rect = calGridRef.current.getBoundingClientRect();
                     const y = e.clientY - rect.top;
                     const x = e.clientX - rect.left;
-                    const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                    const totalMin = Math.round((y / HOUR_H) * 60) + startMinBase;
                     const snapped = Math.round(totalMin / 15) * 15;
                     const colW = (rect.width - 40) / 7;
                     const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
@@ -1578,10 +1605,12 @@ function DailyGrind() {
                     // Drag existing event
                     if (!calDragging) return;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
-                    const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
-                    const endMin = snapped + duration;
-                    const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    const newDate = localDateStr(calDates[dayIdx]);
+                    let sm = snapped, em = snapped + duration;
+                    let baseDate = calDates[dayIdx];
+                    if (sm >= 24 * 60) { sm -= 24 * 60; em -= 24 * 60; const nd = new Date(baseDate); nd.setDate(nd.getDate() + 1); baseDate = nd; }
+                    const newStart = `${String(Math.floor(sm/60)).padStart(2,"0")}:${String(sm%60).padStart(2,"0")}`;
+                    const newEnd = `${String(Math.floor(em/60)).padStart(2,"0")}:${String(em%60).padStart(2,"0")}`;
+                    const newDate = localDateStr(baseDate);
                     setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onMouseUp={() => {
@@ -1589,9 +1618,11 @@ function DailyGrind() {
                     if (calCreating) {
                       const dur = calCreating.endMin - calCreating.startMin;
                       if (dur >= 15) {
-                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
-                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
-                        setCalAddEvent(calCreating.date);
+                        let sMin = calCreating.startMin, eMin = calCreating.endMin, targetDate = calCreating.date;
+                        if (sMin >= 24 * 60) { sMin -= 24 * 60; eMin -= 24 * 60; targetDate = shiftDateStr(targetDate, 1); }
+                        const startStr = `${String(Math.floor(sMin/60)).padStart(2,"0")}:${String(sMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(eMin/60)).padStart(2,"0")}:${String(eMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
                         setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
@@ -1612,9 +1643,11 @@ function DailyGrind() {
                     if (calCreating) {
                       const dur = calCreating.endMin - calCreating.startMin;
                       if (dur >= 15) {
-                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
-                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
-                        setCalAddEvent(calCreating.date);
+                        let sMin = calCreating.startMin, eMin = calCreating.endMin, targetDate = calCreating.date;
+                        if (sMin >= 24 * 60) { sMin -= 24 * 60; eMin -= 24 * 60; targetDate = shiftDateStr(targetDate, 1); }
+                        const startStr = `${String(Math.floor(sMin/60)).padStart(2,"0")}:${String(sMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(eMin/60)).padStart(2,"0")}:${String(eMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
                         setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
@@ -1637,7 +1670,7 @@ function DailyGrind() {
                     const rect = calGridRef.current.getBoundingClientRect();
                     const y = touch.clientY - rect.top;
                     const x = touch.clientX - rect.left;
-                    const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                    const totalMin = Math.round((y / HOUR_H) * 60) + startMinBase;
                     const snapped = Math.round(totalMin / 15) * 15;
                     const colW = (rect.width - 40) / 7;
                     const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
@@ -1647,19 +1680,23 @@ function DailyGrind() {
                     }
                     if (!calDragging) return;
                     const duration = timeToMin(calDragging.origEnd) - timeToMin(calDragging.origStart);
-                    const newStart = `${String(Math.floor(snapped/60)).padStart(2,"0")}:${String(snapped%60).padStart(2,"0")}`;
-                    const endMin = snapped + duration;
-                    const newEnd = `${String(Math.floor(endMin/60)).padStart(2,"0")}:${String(endMin%60).padStart(2,"0")}`;
-                    const newDate = localDateStr(calDates[dayIdx]);
+                    let sm = snapped, em = snapped + duration;
+                    let baseDate = calDates[dayIdx];
+                    if (sm >= 24 * 60) { sm -= 24 * 60; em -= 24 * 60; const nd = new Date(baseDate); nd.setDate(nd.getDate() + 1); baseDate = nd; }
+                    const newStart = `${String(Math.floor(sm/60)).padStart(2,"0")}:${String(sm%60).padStart(2,"0")}`;
+                    const newEnd = `${String(Math.floor(em/60)).padStart(2,"0")}:${String(em%60).padStart(2,"0")}`;
+                    const newDate = localDateStr(baseDate);
                     setCalDragging({ ...calDragging, newStart, newEnd, newDate, moved: true });
                   }}
                   onTouchEnd={() => {
                     if (calCreating) {
                       const dur = calCreating.endMin - calCreating.startMin;
                       if (dur >= 15) {
-                        const startStr = `${String(Math.floor(calCreating.startMin/60)).padStart(2,"0")}:${String(calCreating.startMin%60).padStart(2,"0")}`;
-                        const endStr = `${String(Math.floor(calCreating.endMin/60)).padStart(2,"0")}:${String(calCreating.endMin%60).padStart(2,"0")}`;
-                        setCalAddEvent(calCreating.date);
+                        let sMin = calCreating.startMin, eMin = calCreating.endMin, targetDate = calCreating.date;
+                        if (sMin >= 24 * 60) { sMin -= 24 * 60; eMin -= 24 * 60; targetDate = shiftDateStr(targetDate, 1); }
+                        const startStr = `${String(Math.floor(sMin/60)).padStart(2,"0")}:${String(sMin%60).padStart(2,"0")}`;
+                        const endStr = `${String(Math.floor(eMin/60)).padStart(2,"0")}:${String(eMin%60).padStart(2,"0")}`;
+                        setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
                         setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
@@ -1687,7 +1724,7 @@ function DailyGrind() {
                             e.preventDefault();
                             const rect = calGridRef.current.getBoundingClientRect();
                             const y = e.clientY - rect.top;
-                            const totalMin = Math.round((y / HOUR_H) * 60) + 360;
+                            const totalMin = Math.round((y / HOUR_H) * 60) + startMinBase;
                             const snapped = Math.round(totalMin / 15) * 15;
                             setCalCreating({ date: localDateStr(d), startMin: snapped, endMin: snapped + 15, di });
                           }} />
@@ -1697,7 +1734,7 @@ function DailyGrind() {
 
                   {/* Drag-to-create preview */}
                   {calCreating && (() => {
-                    const topPx = ((calCreating.startMin - 360) / 60) * HOUR_H;
+                    const topPx = ((calCreating.startMin - startMinBase) / 60) * HOUR_H;
                     const heightPx = Math.max(((calCreating.endMin - calCreating.startMin) / 60) * HOUR_H, 15);
                     const fmtT = (m) => { const hr = Math.floor(m/60); const mn = m%60; const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${String(mn).padStart(2,"0")}${ampm}`; };
                     return (
@@ -1715,7 +1752,7 @@ function DailyGrind() {
                   {/* Events overlay */}
                   {calDates.map((d, di) => {
                     const ds = localDateStr(d);
-                    const dayEvents = getEventsForDate(ds);
+                    const dayEvents = getDisplayedEvents(ds);
                     return dayEvents.map(evt => {
                       const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
                       if (isDraggingThis && calDragging.newDate && calDragging.newDate !== ds) return null; // hide from original column
@@ -1723,7 +1760,8 @@ function DailyGrind() {
                       const displayEnd = isDraggingThis && calDragging.newEnd ? calDragging.newEnd : evt.end;
                       const startMin = timeToMin(displayStart);
                       const endMin = timeToMin(displayEnd);
-                      const topPx = ((startMin - 360) / 60) * HOUR_H;
+                      const spillShift = evt._spilloverFromDate ? 24 * 60 : 0;
+                      const topPx = ((startMin + spillShift - startMinBase) / 60) * HOUR_H;
                       const heightPx = Math.max(((endMin - startMin) / 60) * HOUR_H, 20);
                       const fmtTime = (t) => { const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "pm" : "am"; return `${hr > 12 ? hr-12 : hr || 12}:${m}${ampm}`; };
                       const isRepeating = evt._repeating || evt.repeat;
@@ -1746,7 +1784,7 @@ function DailyGrind() {
                             if (calDragging && calDragging.moved) return; // don't open popup after drag
                             const origId = evt._origId || evt.id;
                             const origEvt = calEvents.find(ev => ev.id === origId) || evt;
-                            setCalSelectedEvent({ ...origEvt, _displayDate: ds });
+                            setCalSelectedEvent({ ...origEvt, _displayDate: evt._spilloverFromDate || ds });
                             setCalEditMode(false);
                           }}
                           onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
@@ -1774,9 +1812,14 @@ function DailyGrind() {
                   {/* Current time indicator */}
                   {calWeekOffset === 0 && (() => {
                     const now = new Date();
-                    const nowDay = (now.getDay() + 6) % 7;
-                    const nowMin = now.getHours() * 60 + now.getMinutes();
-                    const topPx = ((nowMin - 360) / 60) * HOUR_H;
+                    let nowDay = (now.getDay() + 6) % 7;
+                    let nowMin = now.getHours() * 60 + now.getMinutes();
+                    // If current time is in the post-midnight spillover window, show it in the previous day's column
+                    if (calEndHour >= 24 && now.getHours() < calEndHour - 24 + 1) {
+                      nowMin += 24 * 60;
+                      nowDay = (nowDay + 6) % 7;
+                    }
+                    const topPx = ((nowMin - startMinBase) / 60) * HOUR_H;
                     if (topPx < 0 || topPx > hours.length * HOUR_H) return null;
                     return (
                       <div style={{ position: "absolute", left: `calc(40px + ${nowDay} * ((100% - 40px) / 7))`, width: `calc((100% - 40px) / 7)`, top: topPx, height: 2, background: "#e84118", zIndex: 20, pointerEvents: "none" }}>
@@ -1954,6 +1997,41 @@ function DailyGrind() {
                           setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc("");
                         }
                       }} style={S.okBtn}>Add Event</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Calendar settings modal */}
+              {showCalSettings && (
+                <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+                  onClick={() => setShowCalSettings(false)}>
+                  <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 360, width: "100%" }}
+                    onClick={(e) => e.stopPropagation()}>
+                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 6 }}>CALENDAR SETTINGS</h3>
+                    <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 16, lineHeight: 1.5 }}>Adjust when your day starts and how late it runs. Hours past midnight will appear at the bottom of the same day's column — so 1 AM stays inside your day.</div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY STARTS AT</label>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                      {[4,5,6,7,8,9,10].map(h => (
+                        <button key={h} onClick={() => save({ ...data, calStartHour: h })}
+                          style={{ padding: "8px 12px", borderRadius: 8, border: calStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calStartHour === h ? "#7c3aed22" : "#12122a", color: calStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          {fmtHour(h)}
+                        </button>
+                      ))}
+                    </div>
+                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY ENDS AT</label>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                      {[21,22,23,24,25,26,27,28].map(h => (
+                        <button key={h} onClick={() => save({ ...data, calEndHour: h })}
+                          style={{ padding: "8px 12px", borderRadius: 8, border: calEndHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEndHour === h ? "#7c3aed22" : "#12122a", color: calEndHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          {fmtHour(h)}{h >= 24 ? " +1" : ""}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#7c3aed", marginBottom: 16, lineHeight: 1.4 }}>Currently showing {fmtHour(calStartHour)} → {fmtHour(calEndHour)}{calEndHour >= 24 ? " (next morning)" : ""} · {totalHours}h</div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => save({ ...data, calStartHour: 6, calEndHour: 23 })} style={S.cBtn}>Reset Default</button>
+                      <button onClick={() => setShowCalSettings(false)} style={S.okBtn}>Done</button>
                     </div>
                   </div>
                 </div>
