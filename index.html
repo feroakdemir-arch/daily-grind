@@ -223,6 +223,40 @@ function getWeekDates() {
   const sat = new Date(today); sat.setDate(today.getDate() - satOff);
   return Array.from({ length: 7 }, (_, i) => { const d = new Date(sat); d.setDate(sat.getDate() + i); return localDateStr(d); });
 }
+function playPomoChime(workEnded) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    if (ctx.state === "suspended") { try { ctx.resume(); } catch (e) {} }
+    const beep = (freq, startOffset, duration, gain) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      const t0 = ctx.currentTime + startOffset;
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t0); osc.stop(t0 + duration + 0.05);
+    };
+    // Work-end: rising C-E-G arpeggio. Break-end: descending G-E-C. Each repeated for a richer ring.
+    if (workEnded) {
+      beep(523, 0,    0.28, 0.35); // C5
+      beep(659, 0.22, 0.28, 0.35); // E5
+      beep(784, 0.44, 0.55, 0.4);  // G5
+      beep(523, 0.95, 0.20, 0.25);
+      beep(784, 1.15, 0.45, 0.3);
+    } else {
+      beep(784, 0,    0.28, 0.35); // G5
+      beep(659, 0.22, 0.28, 0.35); // E5
+      beep(523, 0.44, 0.55, 0.4);  // C5
+    }
+    setTimeout(() => { try { ctx.close(); } catch (e) {} }, 2000);
+  } catch (e) { console.warn("pomo chime failed", e); }
+}
+
 function allHabits(secs) { return secs.flatMap((s) => s.items); }
 function habitScore(tl, secs) { return allHabits(secs).reduce((sc, i) => sc + (tl[i.id] === "done" ? i.points : 0), 0); }
 function taskScore(lists, today) { return lists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === today)) ? t.points : 0), 0); }
@@ -892,6 +926,8 @@ function DailyGrind() {
       if (remaining <= 0) {
         pomoDeadlineRef.current = null;
         setPomoRunning(false);
+        playPomoChime(!pomoIsBreak);
+        try { navigator.vibrate && navigator.vibrate([300, 120, 300, 120, 300]); } catch (e) {}
         if (!pomoIsBreak) { setPomoSessions((p) => p + 1); setPomoIsBreak(true); setPomoSeconds(pomoBreak * 60); }
         else { setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }
       } else {
