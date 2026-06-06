@@ -561,6 +561,8 @@ function DailyGrind() {
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
   const pomoDeadlineRef = useRef(null);
+  const pomoAlarmRef = useRef(null);
+  const [pomoAlarmRinging, setPomoAlarmRinging] = useState(false);
   const customDeadlineRef = useRef(null);
   const stopwatchStartRef = useRef(null);
   const stopwatchBaseRef = useRef(0);
@@ -917,6 +919,22 @@ function DailyGrind() {
     prevScoreRef.current = sc;
   }, [data]);
 
+  function startPomoAlarm(workEnded) {
+    if (pomoAlarmRef.current) { clearInterval(pomoAlarmRef.current); pomoAlarmRef.current = null; }
+    setPomoAlarmRinging(true);
+    playPomoChime(workEnded);
+    try { navigator.vibrate && navigator.vibrate([300, 120, 300, 120, 300]); } catch (e) {}
+    pomoAlarmRef.current = setInterval(() => {
+      playPomoChime(workEnded);
+      try { navigator.vibrate && navigator.vibrate([300, 120, 300, 120, 300]); } catch (e) {}
+    }, 2500);
+  }
+  function stopPomoAlarm() {
+    if (pomoAlarmRef.current) { clearInterval(pomoAlarmRef.current); pomoAlarmRef.current = null; }
+    try { navigator.vibrate && navigator.vibrate(0); } catch (e) {}
+    setPomoAlarmRinging(false);
+  }
+
   // Pomodoro timer (timestamp-based so it works in background tabs)
   useEffect(() => {
     if (!pomoRunning) { pomoDeadlineRef.current = null; return; }
@@ -928,8 +946,7 @@ function DailyGrind() {
       if (remaining <= 0) {
         pomoDeadlineRef.current = null;
         setPomoRunning(false);
-        playPomoChime(!pomoIsBreak);
-        try { navigator.vibrate && navigator.vibrate([300, 120, 300, 120, 300]); } catch (e) {}
+        startPomoAlarm(!pomoIsBreak);
         if (!pomoIsBreak) { setPomoSessions((p) => p + 1); setPomoIsBreak(true); setPomoSeconds(pomoBreak * 60); }
         else { setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }
       } else {
@@ -1505,11 +1522,16 @@ function DailyGrind() {
                     <span style={{ fontSize: 10, color: "#8b8b9e", marginTop: 4 }}>Session #{pomoSessions + 1}</span>
                   </div>
                 </div>
+                {pomoAlarmRinging && (
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 3, color: "#ff4757", marginBottom: 10, textAlign: "center" }}>
+                    {"\uD83D\uDD14"} RINGING \u2014 TAP START OR RESET TO STOP
+                  </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 16 }}>
-                  <button onClick={() => setPomoRunning(!pomoRunning)} style={{ ...S.okBtn, flex: "none", padding: "12px 28px", fontSize: 13, borderRadius: 24 }}>
-                    {pomoRunning ? "\u23F8 Pause" : "\u25B6 Start"}
+                  <button onClick={() => { stopPomoAlarm(); setPomoRunning(!pomoRunning); }} style={{ ...S.okBtn, flex: "none", padding: "12px 28px", fontSize: 13, borderRadius: 24, boxShadow: pomoAlarmRinging ? "0 0 0 4px #ff475766" : "none" }}>
+                    {pomoAlarmRinging ? "\u25B6 Start" : (pomoRunning ? "\u23F8 Pause" : "\u25B6 Start")}
                   </button>
-                  <button onClick={() => { setPomoRunning(false); setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }} style={{ ...S.cBtn, flex: "none", padding: "12px 20px", borderRadius: 24 }}>
+                  <button onClick={() => { stopPomoAlarm(); setPomoRunning(false); setPomoIsBreak(false); setPomoSeconds(pomoWork * 60); }} style={{ ...S.cBtn, flex: "none", padding: "12px 20px", borderRadius: 24 }}>
                     {"\u21BA"} Reset
                   </button>
                 </div>
