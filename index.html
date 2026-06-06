@@ -217,10 +217,11 @@ function getYesterday(resetHour) {
   d.setDate(d.getDate() - 1);
   return localDateStr(d);
 }
-function getWeekDates() {
-  const today = new Date(); const dow = today.getDay();
+function getWeekDates(effectiveToday) {
+  const base = effectiveToday ? new Date(effectiveToday + "T12:00:00") : new Date();
+  const dow = base.getDay();
   const satOff = dow >= 6 ? dow - 6 : dow + 1;
-  const sat = new Date(today); sat.setDate(today.getDate() - satOff);
+  const sat = new Date(base); sat.setDate(base.getDate() - satOff);
   return Array.from({ length: 7 }, (_, i) => { const d = new Date(sat); d.setDate(sat.getDate() + i); return localDateStr(d); });
 }
 function playPomoChime(workEnded) {
@@ -568,7 +569,7 @@ function DailyGrind() {
   const stopwatchBaseRef = useRef(0);
   const resetHour = data?.dayResetHour || 0;
   const today = getToday(resetHour);
-  const weekDates = getWeekDates();
+  const weekDates = getWeekDates(today);
 
   useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else setData(mkDefault()); } catch(e) { setData(mkDefault()); } setLoading(false); })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
