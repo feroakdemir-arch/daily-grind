@@ -1740,6 +1740,7 @@ function DailyGrind() {
                   }}
                   onTouchMove={(e) => {
                     if (!calGridRef.current) return;
+                    if (!calCreating && !calDragging) return; // allow normal scroll when not dragging
                     e.preventDefault();
                     const touch = e.touches[0];
                     const rect = calGridRef.current.getBoundingClientRect();
@@ -1870,12 +1871,29 @@ function DailyGrind() {
                           onTouchStart={(e) => {
                             const origId = evt._origId || evt.id;
                             if (evt._repeating) return;
+                            const sx = e.touches[0].clientX;
+                            const sy = e.touches[0].clientY;
+                            const target = e.currentTarget;
+                            target._dragStartX = sx;
+                            target._dragStartY = sy;
                             const timer = setTimeout(() => {
                               setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end, moved: false });
-                            }, 400);
-                            e.currentTarget._dragTimer = timer;
+                              try { navigator.vibrate && navigator.vibrate(35); } catch (er) {}
+                            }, 550);
+                            target._dragTimer = timer;
                           }}
-                          onTouchEnd={(e) => { clearTimeout(e.currentTarget._dragTimer); }}
+                          onTouchMove={(e) => {
+                            const t = e.currentTarget;
+                            if (!t._dragTimer) return;
+                            const dx = Math.abs(e.touches[0].clientX - t._dragStartX);
+                            const dy = Math.abs(e.touches[0].clientY - t._dragStartY);
+                            if (dx > 8 || dy > 8) {
+                              clearTimeout(t._dragTimer);
+                              t._dragTimer = null;
+                            }
+                          }}
+                          onTouchEnd={(e) => { if (e.currentTarget._dragTimer) { clearTimeout(e.currentTarget._dragTimer); e.currentTarget._dragTimer = null; } }}
+                          onTouchCancel={(e) => { if (e.currentTarget._dragTimer) { clearTimeout(e.currentTarget._dragTimer); e.currentTarget._dragTimer = null; } }}
                         >
                           <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating ? "\u21BB " : ""}{evt.title}</div>
                           {heightPx > 24 && <div style={{ fontSize: 8, opacity: 0.8, fontWeight: 600 }}>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</div>}
