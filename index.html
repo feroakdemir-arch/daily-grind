@@ -527,6 +527,8 @@ function DailyGrind() {
   const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
+  const [pomoWorkInput, setPomoWorkInput] = useState("25");
+  const [pomoBreakInput, setPomoBreakInput] = useState("5");
   const [pomoRunning, setPomoRunning] = useState(false);
   const [pomoSeconds, setPomoSeconds] = useState(25 * 60);
   const [pomoIsBreak, setPomoIsBreak] = useState(false);
@@ -1514,12 +1516,18 @@ function DailyGrind() {
                 <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
                   <div style={{ textAlign: "center" }}>
                     <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>WORK</label>
-                    <input type="number" value={pomoWork} onChange={(e) => { const v = Math.max(1, parseInt(e.target.value) || 25); setPomWork(v); if (!pomoRunning && !pomoIsBreak) setPomoSeconds(v * 60); }}
+                    <input type="number" value={pomoWorkInput}
+                      onChange={(e) => setPomoWorkInput(e.target.value)}
+                      onBlur={() => { const v = Math.max(1, parseInt(pomoWorkInput) || 25); setPomWork(v); setPomoWorkInput(String(v)); if (!pomoRunning && !pomoIsBreak) setPomoSeconds(v * 60); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
                       style={{ ...S.inp, width: 60, textAlign: "center", padding: "6px", fontSize: 13, marginTop: 4 }} />
                   </div>
                   <div style={{ textAlign: "center" }}>
                     <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>BREAK</label>
-                    <input type="number" value={pomoBreak} onChange={(e) => { const v = Math.max(1, parseInt(e.target.value) || 5); setPomBreak(v); if (!pomoRunning && pomoIsBreak) setPomoSeconds(v * 60); }}
+                    <input type="number" value={pomoBreakInput}
+                      onChange={(e) => setPomoBreakInput(e.target.value)}
+                      onBlur={() => { const v = Math.max(1, parseInt(pomoBreakInput) || 5); setPomBreak(v); setPomoBreakInput(String(v)); if (!pomoRunning && pomoIsBreak) setPomoSeconds(v * 60); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
                       style={{ ...S.inp, width: 60, textAlign: "center", padding: "6px", fontSize: 13, marginTop: 4 }} />
                   </div>
                 </div>
