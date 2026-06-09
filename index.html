@@ -224,6 +224,29 @@ function getWeekDates(effectiveToday) {
   const sat = new Date(base); sat.setDate(base.getDate() - satOff);
   return Array.from({ length: 7 }, (_, i) => { const d = new Date(sat); d.setDate(sat.getDate() + i); return localDateStr(d); });
 }
+function startDragAutoScroll(getY, onScroll) {
+  const EDGE = 100;     // px from viewport edge that triggers scroll
+  const MAX_SPEED = 12; // px per tick at full edge
+  const interval = setInterval(() => {
+    const y = getY();
+    if (y == null) return;
+    const vh = window.innerHeight;
+    let speed = 0;
+    if (y < EDGE) {
+      const factor = Math.max(0, (EDGE - y) / EDGE);
+      speed = -Math.max(1, Math.ceil(factor * MAX_SPEED));
+    } else if (y > vh - EDGE) {
+      const factor = Math.max(0, (y - (vh - EDGE)) / EDGE);
+      speed = Math.max(1, Math.ceil(factor * MAX_SPEED));
+    }
+    if (speed !== 0) {
+      window.scrollBy(0, speed);
+      if (onScroll) onScroll();
+    }
+  }, 16);
+  return () => clearInterval(interval);
+}
+
 function playPomoChime(workEnded) {
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -311,26 +334,36 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
     e.preventDefault();
     if (typeof listIdx !== "number" || !onReorderList) return;
     const startY = e.touches ? e.touches[0].clientY : e.clientY;
+    const startScrollY = window.scrollY;
+    let currentY = startY;
     const cards = document.querySelectorAll(`[data-tasklists-container] [data-tasklistrow]`);
     const rects = [];
-    cards.forEach((c) => { const r = c.getBoundingClientRect(); rects.push({ mid: r.top + r.height / 2 }); });
+    cards.forEach((c) => { const r = c.getBoundingClientRect(); rects.push({ mid: r.top + r.height / 2 + window.scrollY }); });
     listRects.current = rects;
     listDragRef.current = { fromIdx: listIdx, toIdx: listIdx, startY };
     setListDragging(true);
     setListDragOffset(0);
 
-    const onMove = (ev) => {
-      const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      setListDragOffset(y - startY);
+    const applyMove = () => {
+      const scrollDelta = window.scrollY - startScrollY;
+      setListDragOffset(currentY - startY + scrollDelta);
+      const compareY = currentY + window.scrollY;
       let closest = listIdx;
       let minDist = Infinity;
       listRects.current.forEach((r, i) => {
-        const dist = Math.abs(y - r.mid);
+        const dist = Math.abs(compareY - r.mid);
         if (dist < minDist) { minDist = dist; closest = i; }
       });
       listDragRef.current.toIdx = closest;
     };
+    const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
+
+    const onMove = (ev) => {
+      currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      applyMove();
+    };
     const onEnd = () => {
+      stopAutoScroll();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onEnd);
       document.removeEventListener("touchmove", onMove);
@@ -363,12 +396,14 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
   function handleDragStart(e, idx) {
     e.preventDefault();
     const startY = e.touches ? e.touches[0].clientY : e.clientY;
-    // Snapshot row positions at drag start (before any visual changes)
+    const startScrollY = window.scrollY;
+    let currentY = startY;
+    // Snapshot row positions at drag start, in document coords
     const rows = document.querySelectorAll(`[data-tasklist="${list.id}"] [data-taskrow]`);
     const rects = [];
     rows.forEach((row) => {
       const r = row.getBoundingClientRect();
-      rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
+      rects.push({ mid: r.top + r.height / 2 + window.scrollY });
     });
     rowRects.current = rects;
     dragRef.current = { fromIdx: idx, toIdx: idx, startY };
@@ -376,19 +411,27 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
     setDropIdx(idx);
     setDragOffset(0);
 
-    const onMove = (ev) => {
-      const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      setDragOffset(y - startY);
+    const applyMove = () => {
+      const scrollDelta = window.scrollY - startScrollY;
+      setDragOffset(currentY - startY + scrollDelta);
+      const compareY = currentY + window.scrollY;
       let closest = idx;
       let minDist = Infinity;
       rowRects.current.forEach((r, i) => {
-        const dist = Math.abs(y - r.mid);
+        const dist = Math.abs(compareY - r.mid);
         if (dist < minDist) { minDist = dist; closest = i; }
       });
       dragRef.current.toIdx = closest;
       setDropIdx(closest);
     };
+    const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
+
+    const onMove = (ev) => {
+      currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      applyMove();
+    };
     const onEnd = () => {
+      stopAutoScroll();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onEnd);
       document.removeEventListener("touchmove", onMove);
@@ -1109,11 +1152,14 @@ function DailyGrind() {
     function handleHabitDragStart(e) {
       e.preventDefault();
       const startY = e.touches ? e.touches[0].clientY : e.clientY;
+      const startScrollY = window.scrollY;
+      let currentY = startY;
       const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
       const rects = [];
       rows.forEach((row) => {
         const r = row.getBoundingClientRect();
-        rects.push({ top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 });
+        const docMid = r.top + r.height / 2 + window.scrollY;
+        rects.push({ mid: docMid });
       });
       hRowRects.current = rects;
       hDragRef.current = { fromIdx: idx, toIdx: idx, startY };
@@ -1121,19 +1167,27 @@ function DailyGrind() {
       setHDropIdx(idx);
       setHDragOffset(0);
 
-      const onMove = (ev) => {
-        const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-        setHDragOffset(y - startY);
+      const applyMove = () => {
+        const scrollDelta = window.scrollY - startScrollY;
+        setHDragOffset(currentY - startY + scrollDelta);
+        const compareY = currentY + window.scrollY;
         let closest = idx;
         let minDist = Infinity;
         hRowRects.current.forEach((r, i) => {
-          const dist = Math.abs(y - r.mid);
+          const dist = Math.abs(compareY - r.mid);
           if (dist < minDist) { minDist = dist; closest = i; }
         });
         hDragRef.current.toIdx = closest;
         setHDropIdx(closest);
       };
+      const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
+
+      const onMove = (ev) => {
+        currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        applyMove();
+      };
       const onEnd = () => {
+        stopAutoScroll();
         document.removeEventListener("pointermove", onMove);
         document.removeEventListener("pointerup", onEnd);
         document.removeEventListener("touchmove", onMove);
