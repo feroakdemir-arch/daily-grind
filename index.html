@@ -1054,7 +1054,15 @@ function DailyGrind() {
   function editCalEvent(id, updates) {
     saveCalEvents(calEvents.map(e => e.id === id ? { ...e, ...updates } : e));
   }
-  function deleteCalEvent(id, deleteAll, exceptionDate) {
+  function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
+    if (untilDate) {
+      const evt = calEvents.find(e => e.id === id);
+      if (!evt) return;
+      // If truncating from the very first occurrence, that's equivalent to deleting the whole series.
+      if (untilDate <= evt.date) { saveCalEvents(calEvents.filter(e => e.id !== id)); return; }
+      saveCalEvents(calEvents.map(e => e.id === id ? { ...e, untilDate } : e));
+      return;
+    }
     if (exceptionDate) {
       // Add exception date to skip this one instance
       saveCalEvents(calEvents.map(e => {
@@ -1082,6 +1090,7 @@ function DailyGrind() {
     const repeatingEvents = calEvents.filter(e => {
       if (!e.repeat) return false;
       if (e.exceptions && e.exceptions.includes(dateStr)) return false;
+      if (e.untilDate && dateStr >= e.untilDate) return false; // series truncated at this date
       const eDate = new Date(e.date + "T12:00");
       if (eDate > d) return false; // don't show before the original date
       if (e.date === dateStr) return false; // already in directEvents
@@ -2024,14 +2033,18 @@ function DailyGrind() {
                         )}
                         {calDeleteConfirm && (
                           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #eee", display: "flex", flexDirection: "column", gap: 8 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 2 }}>Delete this event?</div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 2 }}>Delete recurring event</div>
                             <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #e0e0e0", background: "#fff", cursor: "pointer", fontSize: 13, color: "#333", textAlign: "left" }}>
-                              {"\uD83D\uDDD1"} Delete only this one
+                              {"\uD83D\uDDD1"} This event
+                            </button>
+                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, undefined, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ffe0b2", background: "#fff8e1", cursor: "pointer", fontSize: 13, color: "#9a6300", textAlign: "left" }}>
+                              {"\uD83D\uDDD1"} This and following events
                             </button>
                             <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, true); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ffcdd2", background: "#ffebee", cursor: "pointer", fontSize: 13, color: "#c62828", textAlign: "left" }}>
-                              {"\uD83D\uDDD1"} Delete all repeating instances
+                              {"\uD83D\uDDD1"} All events
                             </button>
                             <button onClick={() => setCalDeleteConfirm(false)}
                               style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "none", cursor: "pointer", fontSize: 12, color: "#888", textAlign: "center" }}>
