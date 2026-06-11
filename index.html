@@ -501,9 +501,9 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
           <span
             onPointerDown={(e) => handleDragStart(e, i)}
             onTouchStart={(e) => handleDragStart(e, i)}
-            style={{ cursor: "grab", color: "#555", fontSize: 16, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1 }}
+            style={{ cursor: "grab", color: "#8b8b9e", fontSize: 18, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900 }}
             title="Drag to reorder"
-          >{"\u2807"}</span>
+          >{"\u22ee"}</span>
           <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
           <span style={S.tText}>{t.name}</span>
           {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ marginLeft: 6, padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
@@ -542,6 +542,271 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, setHabitDrag, reorderHabit, openEditHabit }) {
+  const streak = getStreak(item.id, data.log, today);
+  const overall = getOverall(item.id, data.log);
+  const todayNote = tl[item.id + "_note"] || "";
+  const [showPicker, setShowPicker] = useState(false);
+  const [showComment, setShowComment] = useState(false);
+  const [commentText, setCommentText] = useState(todayNote);
+  const [pickerDate, setPickerDate] = useState(today);
+  const [showDesc, setShowDesc] = useState(false);
+  const [showMonthly, setShowMonthly] = useState(false);
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [selectedMonthDay, setSelectedMonthDay] = useState(null);
+
+  function handleHabitDragStart(e) {
+    e.preventDefault();
+    const startY = e.touches ? e.touches[0].clientY : e.clientY;
+    const startScrollY = window.scrollY;
+    let currentY = startY;
+    let toIdx = idx;
+    const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
+    const rects = [];
+    rows.forEach((row) => {
+      const r = row.getBoundingClientRect();
+      rects.push({ mid: r.top + r.height / 2 + window.scrollY });
+    });
+    setHabitDrag({ secId, dragIdx: idx, dropIdx: idx, offset: 0 });
+
+    const applyMove = () => {
+      const scrollDelta = window.scrollY - startScrollY;
+      const compareY = currentY + window.scrollY;
+      let closest = idx;
+      let minDist = Infinity;
+      rects.forEach((r, i) => {
+        const dist = Math.abs(compareY - r.mid);
+        if (dist < minDist) { minDist = dist; closest = i; }
+      });
+      toIdx = closest;
+      setHabitDrag({ secId, dragIdx: idx, dropIdx: closest, offset: currentY - startY + scrollDelta });
+    };
+    const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
+
+    const onMove = (ev) => {
+      currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      applyMove();
+    };
+    const onEnd = () => {
+      stopAutoScroll();
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onEnd);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", onEnd);
+      setHabitDrag(null);
+      if (toIdx !== idx) reorderHabit(secId, idx, toIdx);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onEnd);
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", onEnd);
+  }
+
+  function pickStatus(st) {
+    const dtl = data.log[pickerDate] || {};
+    const ntl = { ...dtl };
+    if (st === undefined) { delete ntl[item.id]; }
+    else ntl[item.id] = st;
+    const nd = { ...data, log: { ...data.log, [pickerDate]: ntl } };
+    // Keep that day's archived history score in sync when editing the past
+    const entry = data.history[pickerDate];
+    if (entry && pickerDate !== today) {
+      const habits = allHabits(data.habitSections);
+      const hsBefore = habits.reduce((sc, h) => sc + (dtl[h.id] === "done" ? h.points : 0), 0);
+      const ts = entry.ts !== undefined ? entry.ts : Math.max(0, (entry.score || 0) - hsBefore);
+      const hsAfter = habits.reduce((sc, h) => sc + (ntl[h.id] === "done" ? h.points : 0), 0);
+      const score = hsAfter + ts;
+      nd.history = { ...data.history, [pickerDate]: { ...entry, score, won: score >= (entry.goal || data.dailyGoal), ts } };
+    }
+    save(nd);
+    setShowPicker(false); setShowComment(false);
+  }
+
+  function saveComment() {
+    const dtl = data.log[pickerDate] || {};
+    const trimmed = commentText.trim();
+    const ntl = { ...dtl };
+    if (trimmed) ntl[item.id + "_note"] = trimmed;
+    else delete ntl[item.id + "_note"];
+    save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
+    setShowComment(false); setShowPicker(false);
+  }
+
+  const drag = habitDrag && habitDrag.secId === secId ? habitDrag : null;
+  const isMe = !!drag && drag.dragIdx === idx;
+  const showTopMark = !!drag && drag.dropIdx === idx && drag.dragIdx !== idx && drag.dragIdx > idx;
+  const showBotMark = !!drag && drag.dropIdx === idx && drag.dragIdx !== idx && drag.dragIdx < idx;
+  return (
+    <div data-habitrow={idx} style={{
+      ...S.card,
+      borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop,
+      borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom,
+      transform: isMe ? `translateY(${drag.offset}px) scale(1.02)` : "none",
+      transition: isMe ? "none" : "transform 0.15s",
+      boxShadow: isMe ? "0 12px 30px rgba(124,58,237,0.45)" : "none",
+      zIndex: isMe ? 50 : "auto",
+      position: "relative",
+      opacity: isMe ? 0.92 : 1,
+      pointerEvents: drag && !isMe ? "none" : "auto",
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start" }}>
+        <span
+          onPointerDown={handleHabitDragStart}
+          onTouchStart={handleHabitDragStart}
+          style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 2px", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "center", fontWeight: 900, letterSpacing: -2 }}
+          title="Drag to reorder"
+        >{"⋮"}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={S.cardHead} onClick={() => openEditHabit(item, secId)}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <span style={S.cardName}>{item.name}</span>
+            </div>
+            <span style={S.cardPts}>+{item.points}</span>
+          </div>
+          <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
+        </div>
+        {item.desc && <button onClick={() => setShowDesc(!showDesc)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 2px 4px 8px", marginTop: 2, transition: "transform 0.2s", transform: showDesc ? "rotate(180deg)" : "rotate(0deg)" }}>{"▾"}</button>}
+      </div>
+      {item.desc && showDesc && <div style={S.cardDesc}>{item.desc}</div>}
+      <div style={{ position: "relative" }}>
+        <div style={S.week}>
+          {weekDates.map((date, i) => {
+            const st = data.log[date]?.[item.id];
+            const nt = data.log[date]?.[item.id + "_note"];
+            const isT = date === today, isF = date > today;
+            let bg = "#2d2d3a", clr = "#aaaabb", bdr = "2px solid transparent", lbl = "";
+            if (st === "done") { bg = "#4cd137"; clr = "#fff"; lbl = "✓"; }
+            else if (st === "skip") { bg = "#e84118"; clr = "#fff"; lbl = "✗"; }
+            else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; lbl = "—"; }
+            if (nt && !st) { bg = "#4cd13744"; bdr = "2px solid #4cd137"; lbl = "···"; clr = "#4cd137"; }
+            else if (nt && st) { bdr = `2px solid ${st === "done" ? "#4cd137" : st === "skip" ? "#e84118" : "#636e72"}`; }
+            if (!st && !nt && !isF) { lbl = "···"; clr = "#5a5a6e"; }
+            if (isT) {
+              bdr = "2px solid #c4b5fd";
+              if (!st && !nt) { lbl = "···"; clr = "#c4b5fd"; }
+            }
+            return (
+              <div key={date} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flex: 1 }}>
+                <button onClick={() => { if (isF) return; const sameDay = pickerDate === date; setPickerDate(date); setCommentText(data.log[date]?.[item.id + "_note"] || ""); setShowPicker(sameDay ? !showPicker : true); setShowComment(false); }} disabled={isF} style={{
+                  width: 32, height: 32, borderRadius: 16, background: isF ? "#c0c0cc" : bg, color: clr, border: bdr,
+                  fontSize: 11, fontWeight: 800, cursor: isF ? "default" : "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", justifyContent: "center", opacity: isF ? 0.2 : 1, transition: "all 0.15s", padding: 0,
+                }}>{lbl}</button>
+                <span style={{ fontSize: 8, color: isT ? "#7c3aed" : "#555566", fontWeight: isT ? 800 : 600 }}>{DAYS[i]}</span>
+                {isT && <span style={{ fontSize: 6, color: "#8b8b9e", letterSpacing: 1, marginTop: -2, fontWeight: 700 }}>TODAY</span>}
+              </div>
+            );
+          })}
+        </div>
+        {showPicker && (() => {
+          const pickerNote = data.log[pickerDate]?.[item.id + "_note"] || "";
+          const isPast = pickerDate !== today;
+          const pickerDateObj = new Date(pickerDate + "T12:00");
+          return (
+          <div style={S.pickerWrap}>
+            {isPast && (
+              <div style={{ textAlign: "center", fontSize: 9, color: "#c4b5fd", letterSpacing: 2, fontWeight: 700, marginBottom: 6 }}>
+                EDITING {pickerDateObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
+              </div>
+            )}
+            <div style={S.picker}>
+              <button onClick={() => pickStatus("done")} style={{ ...S.pickBtn, background: "#4cd137" }}>{"✓"}</button>
+              <button onClick={() => pickStatus("skip")} style={{ ...S.pickBtn, background: "#e84118" }}>{"✗"}</button>
+              <button onClick={() => pickStatus("neutral")} style={{ ...S.pickBtn, background: "#636e72" }}>{"—"}</button>
+              <button onClick={() => pickStatus(undefined)} style={{ ...S.pickBtn, background: "#2d2d3a", color: "#8b8b9e" }}>{"×"}</button>
+              <button onClick={() => { setShowComment(!showComment); setCommentText(pickerNote); }} style={{ ...S.pickBtn, background: "#1a1a2e", color: "#f8f8fa", border: pickerNote ? "3px solid #4cd137" : "none" }}>{"···"}</button>
+            </div>
+            {showComment && (
+              <div style={S.commentRow}>
+                <input style={S.commentInp} placeholder="Write a comment..." value={commentText} onChange={(e) => setCommentText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveComment(); }} autoFocus />
+                <button onClick={saveComment} style={S.commentSave}>{"✓"}</button>
+              </div>
+            )}
+          </div>
+          );
+        })()}
+      </div>
+      {todayNote && !showPicker && (
+        <div style={S.commentPreview} onClick={() => { setPickerDate(today); setShowPicker(true); setShowComment(true); setCommentText(todayNote); }}>
+          {"📝"} {todayNote}
+        </div>
+      )}
+      <div style={{ marginTop: 8, textAlign: "center" }}>
+        <button onClick={() => { setShowMonthly(!showMonthly); setMonthOffset(0); }} style={{ background: "none", border: "none", color: showMonthly ? "#7c3aed" : "#555566", fontSize: 14, cursor: "pointer", padding: "4px 8px", fontFamily: "inherit" }}>{showMonthly ? "▲ Hide Calendar" : "▼ Monthly View"}</button>
+      </div>
+      {showMonthly && (() => {
+        const now = new Date();
+        const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+        const year = viewDate.getFullYear(), month = viewDate.getMonth();
+        const monthName = viewDate.toLocaleString("default", { month: "long", year: "numeric" });
+        const firstDay = (new Date(year, month, 1).getDay() + 6) % 7;
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        const dayNames = ["Mo","Tu","We","Th","Fr","Sa","Su"];
+        const cells = [];
+        for (let i = 0; i < firstDay; i++) cells.push(null);
+        for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+        let doneCount = 0, skipCount = 0, totalDays = 0;
+        for (let d = 1; d <= daysInMonth; d++) {
+          const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+          if (ds > today) break;
+          totalDays++;
+          const st = data.log[ds]?.[item.id];
+          if (st === "done") doneCount++;
+          else if (st === "skip") skipCount++;
+        }
+        return (
+          <div style={{ marginTop: 8, padding: "10px 4px", borderTop: "1px solid #2d2d3a" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <button onClick={() => setMonthOffset(monthOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"◀"}</button>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#f0f0f4", letterSpacing: 1 }}>{monthName}</span>
+              <button onClick={() => setMonthOffset(Math.min(monthOffset + 1, 0))} disabled={monthOffset >= 0} style={{ background: "none", border: "none", color: monthOffset >= 0 ? "#333" : "#8b8b9e", fontSize: 18, cursor: monthOffset >= 0 ? "default" : "pointer", padding: "4px 10px" }}>{"▶"}</button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, textAlign: "center" }}>
+              {dayNames.map(dn => <div key={dn} style={{ fontSize: 9, color: "#555566", fontWeight: 700, padding: "2px 0" }}>{dn}</div>)}
+              {cells.map((d, i) => {
+                if (d === null) return <div key={"e"+i} />;
+                const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+                const st = data.log[ds]?.[item.id];
+                const nt = data.log[ds]?.[item.id + "_note"];
+                const isFuture = ds > today;
+                const isToday = ds === today;
+                let bg = "#2d2d3a", clr = "#666";
+                if (st === "done") { bg = "#4cd137"; clr = "#fff"; }
+                else if (st === "skip") { bg = "#e84118"; clr = "#fff"; }
+                else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
+                else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
+                return (
+                  <div key={d} onClick={() => !isFuture && nt ? setSelectedMonthDay(selectedMonthDay === ds ? null : ds) : setSelectedMonthDay(null)}
+                    style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: nt && !isFuture ? "pointer" : "default" }}>{d}</div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 10, fontSize: 10, color: "#8b8b9e" }}>
+              <span>{"✅"} {doneCount}/{totalDays}</span>
+              <span>{"❌"} {skipCount}/{totalDays}</span>
+              <span>{totalDays > 0 ? Math.round(doneCount/totalDays*100) : 0}% done</span>
+            </div>
+            {selectedMonthDay && data.log[selectedMonthDay]?.[item.id + "_note"] && (() => {
+              const selDate = new Date(selectedMonthDay + "T12:00");
+              const selStatus = data.log[selectedMonthDay]?.[item.id];
+              return (
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a" }}>
+                  <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {selStatus === "done" ? "✅" : selStatus === "skip" ? "❌" : selStatus === "neutral" ? "➖" : ""}</span>
+                    <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"✕"}</button>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{data.log[selectedMonthDay][item.id + "_note"]}</div>
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -602,6 +867,7 @@ function DailyGrind() {
   const [calCreating, setCalCreating] = useState(null); // {date, startMin, endMin}
   const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
   const [calDragging, setCalDragging] = useState(null);
+  const [habitDrag, setHabitDrag] = useState(null); // shared {secId, dragIdx, dropIdx, offset} so all cards see the drag
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
   const pomoDeadlineRef = useRef(null);
@@ -772,31 +1038,48 @@ function DailyGrind() {
     const yday = getYesterday(rh);
     let updated = { ...data };
     let changed = false;
-    const dayRolledOver = data.lastTaskResetDate && data.lastTaskResetDate !== today;
 
-    // On rollover (or first time we see this yday), auto-fail any unmarked habits from yesterday
-    if ((dayRolledOver || data.log[yday]) && !data.history[yday]) {
+    // Archive every past day missing a history entry (covers multi-day gaps, not just yesterday).
+    // Unmarked habits on those days are auto-stamped as "skip" (red ✗).
+    let startDs = null;
+    if (data.lastTaskResetDate && data.lastTaskResetDate < today) startDs = data.lastTaskResetDate;
+    if (data.log[yday] && !data.history[yday] && (!startDs || yday < startDs)) startDs = yday;
+    if (startDs) {
       const habits = allHabits(data.habitSections);
-      const yLog = { ...(data.log[yday] || {}) };
-      let logChanged = false;
-      habits.forEach((h) => {
-        if (yLog[h.id] === undefined) { yLog[h.id] = "skip"; logChanged = true; }
-      });
-      if (logChanged) updated.log = { ...updated.log, [yday]: yLog };
-
-      // Archive yesterday's score to history (now using auto-skipped log)
-      const hs = habits.reduce((sc, i) => sc + (yLog[i.id] === "done" ? i.points : 0), 0);
-      const ts = data.taskLists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === yday)) ? t.points : 0), 0);
-      const totalScore = hs + ts;
-      const won = totalScore >= data.dailyGoal;
-      updated.history = { ...updated.history, [yday]: { score: totalScore, goal: data.dailyGoal, won } };
-      if (won) { const db = new Date(yday + "T12:00:00"); db.setDate(db.getDate() - 1); updated.streak = (!data.lastCompletedDate || data.lastCompletedDate === localDateStr(db)) ? (data.streak || 0) + 1 : 1; updated.lastCompletedDate = yday; } else updated.streak = 0;
-      changed = true;
+      const allTasks = data.taskLists.flatMap((l) => l.items);
+      const newLog = { ...updated.log };
+      const newHistory = { ...updated.history };
+      let streak = data.streak || 0;
+      let lastCompleted = data.lastCompletedDate;
+      const cur = new Date(startDs + "T12:00:00");
+      let guard = 0;
+      while (localDateStr(cur) < today && guard++ < 366) {
+        const ds = localDateStr(cur);
+        if (!newHistory[ds]) {
+          const dl = { ...(newLog[ds] || {}) };
+          habits.forEach((h) => { if (dl[h.id] === undefined) dl[h.id] = "skip"; });
+          newLog[ds] = dl;
+          const hs = habits.reduce((sc, i) => sc + (dl[i.id] === "done" ? i.points : 0), 0);
+          const ts = allTasks.reduce((sc, t) => sc + ((t.done && (t.doneDate ? t.doneDate === ds : ds === yday)) ? t.points : 0), 0);
+          const totalScore = hs + ts;
+          const won = totalScore >= data.dailyGoal;
+          newHistory[ds] = { score: totalScore, goal: data.dailyGoal, won, ts };
+          if (won) { const pv = new Date(cur); pv.setDate(pv.getDate() - 1); streak = (!lastCompleted || lastCompleted === localDateStr(pv)) ? streak + 1 : 1; lastCompleted = ds; }
+          else streak = 0;
+          changed = true;
+        }
+        cur.setDate(cur.getDate() + 1);
+      }
+      if (changed) { updated.log = newLog; updated.history = newHistory; updated.streak = streak; updated.lastCompletedDate = lastCompleted; }
     }
 
-    // Reset daily task lists if the day changed
+    // Reset daily task lists if the day changed — ONLY lists marked resetsDaily.
+    // Non-daily lists keep their completed items; legacy done-tasks without a
+    // doneDate get stamped with yesterday so they stop counting toward today.
     if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
-      updated.taskLists = updated.taskLists.map((l) => ({ ...l, items: l.items.map((t) => ({ ...t, done: false })) }));
+      updated.taskLists = updated.taskLists.map((l) => l.resetsDaily
+        ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) }
+        : { ...l, items: l.items.map((t) => (t.done && !t.doneDate) ? { ...t, doneDate: yday } : t) });
       updated.lastTaskResetDate = today;
       changed = true;
     }
@@ -847,6 +1130,12 @@ function DailyGrind() {
       items.splice(toIdx, 0, moved);
       return { ...s, items };
     }) });
+  }
+  function openEditHabit(item, secId) {
+    setEditItem(item); setEditSection(secId);
+    setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || "");
+    setFormComment((data.log[today] || {})[item.id + "_note"] || "");
+    setView("editHabit");
   }
 
   const toggleTask = useCallback((listId, taskId) => {
@@ -1002,7 +1291,9 @@ function DailyGrind() {
 
   // Update browser tab title with Pomodoro timer
   useEffect(() => {
-    if (pomoRunning) {
+    if (pomoAlarmRinging) {
+      document.title = "🔔 TIME'S UP | Daily Grind";
+    } else if (pomoRunning) {
       const m = Math.floor(pomoSeconds / 60);
       const s = pomoSeconds % 60;
       const label = pomoIsBreak ? "Break" : (pomoTask || "Focus");
@@ -1010,7 +1301,7 @@ function DailyGrind() {
     } else {
       document.title = "Daily Grind";
     }
-  }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask]);
+  }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask, pomoAlarmRinging]);
 
   // Custom timer (timestamp-based)
   useEffect(() => {
@@ -1139,277 +1430,6 @@ function DailyGrind() {
     </div>
   );
 
-  const HabitCard = ({ item, secId, idx }) => {
-    const streak = getStreak(item.id, data.log, today);
-    const overall = getOverall(item.id, data.log);
-    const todayStatus = tl[item.id];
-    const todayNote = tl[item.id + "_note"] || "";
-    const [showPicker, setShowPicker] = useState(false);
-    const [showComment, setShowComment] = useState(false);
-    const [commentText, setCommentText] = useState(todayNote);
-    const [pickerDate, setPickerDate] = useState(today);
-    const [showDesc, setShowDesc] = useState(false);
-    const [showMonthly, setShowMonthly] = useState(false);
-    const [monthOffset, setMonthOffset] = useState(0);
-    const [selectedMonthDay, setSelectedMonthDay] = useState(null);
-    const [hDragIdx, setHDragIdx] = useState(null);
-    const [hDropIdx, setHDropIdx] = useState(null);
-    const [hDragOffset, setHDragOffset] = useState(0);
-    const hDragRef = useRef(null);
-    const hRowRects = useRef([]);
-
-    function handleHabitDragStart(e) {
-      e.preventDefault();
-      const startY = e.touches ? e.touches[0].clientY : e.clientY;
-      const startScrollY = window.scrollY;
-      let currentY = startY;
-      const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
-      const rects = [];
-      rows.forEach((row) => {
-        const r = row.getBoundingClientRect();
-        const docMid = r.top + r.height / 2 + window.scrollY;
-        rects.push({ mid: docMid });
-      });
-      hRowRects.current = rects;
-      hDragRef.current = { fromIdx: idx, toIdx: idx, startY };
-      setHDragIdx(idx);
-      setHDropIdx(idx);
-      setHDragOffset(0);
-
-      const applyMove = () => {
-        const scrollDelta = window.scrollY - startScrollY;
-        setHDragOffset(currentY - startY + scrollDelta);
-        const compareY = currentY + window.scrollY;
-        let closest = idx;
-        let minDist = Infinity;
-        hRowRects.current.forEach((r, i) => {
-          const dist = Math.abs(compareY - r.mid);
-          if (dist < minDist) { minDist = dist; closest = i; }
-        });
-        hDragRef.current.toIdx = closest;
-        setHDropIdx(closest);
-      };
-      const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
-
-      const onMove = (ev) => {
-        currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
-        applyMove();
-      };
-      const onEnd = () => {
-        stopAutoScroll();
-        document.removeEventListener("pointermove", onMove);
-        document.removeEventListener("pointerup", onEnd);
-        document.removeEventListener("touchmove", onMove);
-        document.removeEventListener("touchend", onEnd);
-        const from = hDragRef.current.fromIdx;
-        const to = hDragRef.current.toIdx;
-        setHDragIdx(null);
-        setHDropIdx(null);
-        setHDragOffset(0);
-        hDragRef.current = null;
-        hRowRects.current = [];
-        if (from !== to) reorderHabit(secId, from, to);
-      };
-      document.addEventListener("pointermove", onMove);
-      document.addEventListener("pointerup", onEnd);
-      document.addEventListener("touchmove", onMove, { passive: false });
-      document.addEventListener("touchend", onEnd);
-    }
-
-    function pickStatus(st) {
-      const dtl = data.log[pickerDate] || {};
-      const ntl = { ...dtl };
-      if (st === undefined) { delete ntl[item.id]; }
-      else ntl[item.id] = st;
-      save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
-      setShowPicker(false); setShowComment(false);
-    }
-
-    function saveComment() {
-      const dtl = data.log[pickerDate] || {};
-      const trimmed = commentText.trim();
-      const ntl = { ...dtl };
-      if (trimmed) ntl[item.id + "_note"] = trimmed;
-      else delete ntl[item.id + "_note"];
-      save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
-      setShowComment(false); setShowPicker(false);
-    }
-
-    const isDragging = hDragIdx !== null;
-    const isMe = hDragIdx === idx;
-    const showTopMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx > idx;
-    const showBotMark = isDragging && hDropIdx === idx && hDragIdx !== idx && hDragIdx < idx;
-    return (
-      <div data-habitrow={idx} style={{
-        ...S.card,
-        borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop,
-        borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom,
-        transform: isMe ? `translateY(${hDragOffset}px) scale(1.02)` : "none",
-        transition: isMe ? "none" : "transform 0.15s",
-        boxShadow: isMe ? "0 12px 30px rgba(124,58,237,0.45)" : "none",
-        zIndex: isMe ? 50 : "auto",
-        position: "relative",
-        opacity: isMe ? 0.92 : 1,
-        pointerEvents: isDragging && !isMe ? "none" : "auto",
-      }}>
-        <div style={{ display: "flex", alignItems: "flex-start" }}>
-          <span
-            onPointerDown={handleHabitDragStart}
-            onTouchStart={handleHabitDragStart}
-            style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 2px", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "center", fontWeight: 900, letterSpacing: -2 }}
-            title="Drag to reorder"
-          >{"\u22ee"}</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={S.cardHead} onClick={() => { setEditItem(item); setEditSection(secId); setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormComment(tl[item.id + "_note"] || ""); setView("editHabit"); }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <span style={S.cardName}>{item.name}</span>
-              </div>
-              <span style={S.cardPts}>+{item.points}</span>
-            </div>
-            <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
-          </div>
-          {item.desc && <button onClick={() => setShowDesc(!showDesc)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 2px 4px 8px", marginTop: 2, transition: "transform 0.2s", transform: showDesc ? "rotate(180deg)" : "rotate(0deg)" }}>{"\u25BE"}</button>}
-        </div>
-        {item.desc && showDesc && <div style={S.cardDesc}>{item.desc}</div>}
-        <div style={{ position: "relative" }}>
-          <div style={S.week}>
-            {weekDates.map((date, i) => {
-              const st = data.log[date]?.[item.id];
-              const nt = data.log[date]?.[item.id + "_note"];
-              const isT = date === today, isF = date > today;
-              let bg = "#2d2d3a", clr = "#aaaabb", bdr = "2px solid transparent", lbl = "";
-              if (st === "done") { bg = "#4cd137"; clr = "#fff"; lbl = "\u2713"; }
-              else if (st === "skip") { bg = "#e84118"; clr = "#fff"; lbl = "\u2717"; }
-              else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; lbl = "\u2014"; }
-              if (nt && !st) { bg = "#4cd13744"; bdr = "2px solid #4cd137"; lbl = "\u00B7\u00B7\u00B7"; clr = "#4cd137"; }
-              else if (nt && st) { bdr = `2px solid ${st === "done" ? "#4cd137" : st === "skip" ? "#e84118" : "#636e72"}`; }
-              if (!st && !nt && !isF) { lbl = "\u00B7\u00B7\u00B7"; clr = "#5a5a6e"; }
-              if (isT) {
-                bdr = "2px solid #c4b5fd";
-                if (!st && !nt) { lbl = "\u00B7\u00B7\u00B7"; clr = "#c4b5fd"; }
-              }
-              return (
-                <div key={date} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flex: 1 }}>
-                  <button onClick={() => { if (isF) return; const sameDay = pickerDate === date; setPickerDate(date); setCommentText(data.log[date]?.[item.id + "_note"] || ""); setShowPicker(sameDay ? !showPicker : true); setShowComment(false); }} disabled={isF} style={{
-                    width: 32, height: 32, borderRadius: 16, background: isF ? "#c0c0cc" : bg, color: clr, border: bdr,
-                    fontSize: 11, fontWeight: 800, cursor: isF ? "default" : "pointer", fontFamily: "inherit",
-                    display: "flex", alignItems: "center", justifyContent: "center", opacity: isF ? 0.2 : 1, transition: "all 0.15s", padding: 0,
-                  }}>{lbl}</button>
-                  <span style={{ fontSize: 8, color: isT ? "#7c3aed" : "#555566", fontWeight: isT ? 800 : 600 }}>{DAYS[i]}</span>
-                  {isT && <span style={{ fontSize: 6, color: "#8b8b9e", letterSpacing: 1, marginTop: -2, fontWeight: 700 }}>TODAY</span>}
-                </div>
-              );
-            })}
-          </div>
-          {showPicker && (() => {
-            const pickerNote = data.log[pickerDate]?.[item.id + "_note"] || "";
-            const isPast = pickerDate !== today;
-            const pickerDateObj = new Date(pickerDate + "T12:00");
-            return (
-            <div style={S.pickerWrap}>
-              {isPast && (
-                <div style={{ textAlign: "center", fontSize: 9, color: "#c4b5fd", letterSpacing: 2, fontWeight: 700, marginBottom: 6 }}>
-                  EDITING {pickerDateObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
-                </div>
-              )}
-              <div style={S.picker}>
-                <button onClick={() => pickStatus("done")} style={{ ...S.pickBtn, background: "#4cd137" }}>{"\u2713"}</button>
-                <button onClick={() => pickStatus("skip")} style={{ ...S.pickBtn, background: "#e84118" }}>{"\u2717"}</button>
-                <button onClick={() => pickStatus("neutral")} style={{ ...S.pickBtn, background: "#636e72" }}>{"\u2014"}</button>
-                <button onClick={() => pickStatus(undefined)} style={{ ...S.pickBtn, background: "#2d2d3a", color: "#8b8b9e" }}>{"\u00D7"}</button>
-                <button onClick={() => { setShowComment(!showComment); setCommentText(pickerNote); }} style={{ ...S.pickBtn, background: "#1a1a2e", color: "#f8f8fa", border: pickerNote ? "3px solid #4cd137" : "none" }}>{"\u00B7\u00B7\u00B7"}</button>
-              </div>
-              {showComment && (
-                <div style={S.commentRow}>
-                  <input style={S.commentInp} placeholder="Write a comment..." value={commentText} onChange={(e) => setCommentText(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") saveComment(); }} autoFocus />
-                  <button onClick={saveComment} style={S.commentSave}>{"\u2713"}</button>
-                </div>
-              )}
-            </div>
-            );
-          })()}
-        </div>
-        {todayNote && !showPicker && (
-          <div style={S.commentPreview} onClick={() => { setPickerDate(today); setShowPicker(true); setShowComment(true); setCommentText(todayNote); }}>
-            {"\uD83D\uDCDD"} {todayNote}
-          </div>
-        )}
-        <div style={{ marginTop: 8, textAlign: "center" }}>
-          <button onClick={() => { setShowMonthly(!showMonthly); setMonthOffset(0); }} style={{ background: "none", border: "none", color: showMonthly ? "#7c3aed" : "#555566", fontSize: 14, cursor: "pointer", padding: "4px 8px", fontFamily: "inherit" }}>{showMonthly ? "\u25B2 Hide Calendar" : "\u25BC Monthly View"}</button>
-        </div>
-        {showMonthly && (() => {
-          const now = new Date();
-          const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
-          const year = viewDate.getFullYear(), month = viewDate.getMonth();
-          const monthName = viewDate.toLocaleString("default", { month: "long", year: "numeric" });
-          const firstDay = (new Date(year, month, 1).getDay() + 6) % 7;
-          const daysInMonth = new Date(year, month + 1, 0).getDate();
-          const dayNames = ["Mo","Tu","We","Th","Fr","Sa","Su"];
-          const cells = [];
-          for (let i = 0; i < firstDay; i++) cells.push(null);
-          for (let d = 1; d <= daysInMonth; d++) cells.push(d);
-          const todayDate = new Date();
-          let doneCount = 0, skipCount = 0, totalDays = 0;
-          for (let d = 1; d <= daysInMonth; d++) {
-            const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-            if (ds > today) break;
-            totalDays++;
-            const st = data.log[ds]?.[item.id];
-            if (st === "done") doneCount++;
-            else if (st === "skip") skipCount++;
-          }
-          return (
-            <div style={{ marginTop: 8, padding: "10px 4px", borderTop: "1px solid #2d2d3a" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <button onClick={() => setMonthOffset(monthOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"\u25C0"}</button>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#f0f0f4", letterSpacing: 1 }}>{monthName}</span>
-                <button onClick={() => setMonthOffset(Math.min(monthOffset + 1, 0))} disabled={monthOffset >= 0} style={{ background: "none", border: "none", color: monthOffset >= 0 ? "#333" : "#8b8b9e", fontSize: 18, cursor: monthOffset >= 0 ? "default" : "pointer", padding: "4px 10px" }}>{"\u25B6"}</button>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, textAlign: "center" }}>
-                {dayNames.map(dn => <div key={dn} style={{ fontSize: 9, color: "#555566", fontWeight: 700, padding: "2px 0" }}>{dn}</div>)}
-                {cells.map((d, i) => {
-                  if (d === null) return <div key={"e"+i} />;
-                  const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-                  const st = data.log[ds]?.[item.id];
-                  const nt = data.log[ds]?.[item.id + "_note"];
-                  const isFuture = ds > today;
-                  const isToday = ds === today;
-                  let bg = "#2d2d3a", clr = "#666";
-                  if (st === "done") { bg = "#4cd137"; clr = "#fff"; }
-                  else if (st === "skip") { bg = "#e84118"; clr = "#fff"; }
-                  else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
-                  else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
-                  return (
-                    <div key={d} onClick={() => !isFuture && nt ? setSelectedMonthDay(selectedMonthDay === ds ? null : ds) : setSelectedMonthDay(null)}
-                      style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: nt && !isFuture ? "pointer" : "default" }}>{d}</div>
-                  );
-                })}
-              </div>
-              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 10, fontSize: 10, color: "#8b8b9e" }}>
-                <span>{"\u2705"} {doneCount}/{totalDays}</span>
-                <span>{"\u274C"} {skipCount}/{totalDays}</span>
-                <span>{totalDays > 0 ? Math.round(doneCount/totalDays*100) : 0}% done</span>
-              </div>
-              {selectedMonthDay && data.log[selectedMonthDay]?.[item.id + "_note"] && (() => {
-                const selDate = new Date(selectedMonthDay + "T12:00");
-                const selStatus = data.log[selectedMonthDay]?.[item.id];
-                return (
-                  <div style={{ marginTop: 10, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a" }}>
-                    <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {selStatus === "done" ? "\u2705" : selStatus === "skip" ? "\u274C" : selStatus === "neutral" ? "\u2796" : ""}</span>
-                      <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"\u2715"}</button>
-                    </div>
-                    <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{data.log[selectedMonthDay][item.id + "_note"]}</div>
-                  </div>
-                );
-              })()}
-            </div>
-          );
-        })()}
-      </div>
-    );
-  };
 
   // MAIN
   if (view === "main") return (
@@ -1491,7 +1511,7 @@ function DailyGrind() {
                 </div>
                 <span style={S.secPt}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>
               </div>
-              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} />)}
+              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} />)}
               <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
           );
