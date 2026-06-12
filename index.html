@@ -45,16 +45,32 @@
     const fbAuth = firebase.auth();
     const fbDb = firebase.firestore();
 
-    // Sign in anonymously
+    // Auth: prefer a real signed-in account; fall back to anonymous.
+    window._user = null;
     let _fbReady = new Promise((resolve) => {
-      fbAuth.signInAnonymously().then(() => {
-        console.log("Firebase auth ready");
-        resolve(true);
-      }).catch((err) => {
-        console.warn("Firebase auth failed:", err);
-        resolve(false);
+      let resolved = false;
+      fbAuth.onAuthStateChanged((user) => {
+        if (user) {
+          window._user = user.isAnonymous ? null : user;
+          if (window._user) localStorage.setItem("dg-was-signed-in", "1");
+          if (!resolved) { resolved = true; resolve(true); }
+        } else {
+          fbAuth.signInAnonymously().catch((err) => {
+            console.warn("Firebase auth failed:", err);
+            if (!resolved) { resolved = true; resolve(false); }
+          });
+        }
       });
     });
+    window._signInWithGoogle = async () => {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      const res = await fbAuth.signInWithPopup(provider);
+      return res.user;
+    };
+    window._signOut = async () => {
+      localStorage.removeItem("dg-was-signed-in");
+      await fbAuth.signOut();
+    };
 
     // Sync code - stored in localStorage, shared across devices
     const SYNC_CODE_KEY = "daily-grind-sync-code";
@@ -64,8 +80,20 @@
       else localStorage.removeItem(SYNC_CODE_KEY);
     };
 
-    // Storage that syncs localStorage + Firestore via sync code
-    // Policy: when sync is enabled, CLOUD is the source of truth on page load.
+    // Where cloud data lives: a signed-in account beats a sync code.
+    // Accounts: users/{uid}/data/{key}. Sync codes (legacy): sync/{code}/data/{key}.
+    function _docRef(key) {
+      if (window._user) return fbDb.collection("users").doc(window._user.uid).collection("data").doc(key);
+      const syncCode = window._getSyncCode();
+      if (syncCode) return fbDb.collection("sync").doc(syncCode).collection("data").doc(key);
+      return null;
+    }
+    function _cloudPossible() {
+      return !!(window._getSyncCode() || localStorage.getItem("dg-was-signed-in"));
+    }
+
+    // Storage that syncs localStorage + Firestore.
+    // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
     window.storage = {
       async get(key) {
         try {
@@ -73,11 +101,11 @@
           const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
           const localData = raw !== null ? { key, value: raw } : null;
 
-          const syncCode = window._getSyncCode();
-          if (syncCode) {
+          if (_cloudPossible()) {
             await _fbReady;
-            try {
-              const doc = await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).get();
+            const ref = _docRef(key);
+            if (ref) try {
+              const doc = await ref.get();
               if (doc.exists) {
                 const fbData = doc.data();
                 const fbValue = fbData.value;
@@ -86,7 +114,7 @@
                 // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
                 if (localTs > fbTs && localData) {
                   // Local has unsynced changes — push to cloud
-                  fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                  ref.set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
                   return localData;
                 }
                 // Otherwise, cloud wins
@@ -97,10 +125,11 @@
                 window._lastLocalTs[key] = saveTs;
                 return { key, value: fbValue };
               } else if (localData) {
-                // Cloud empty — seed it from local
+                // Cloud empty — seed it from local (this is also how data
+                // migrates into a fresh account on first sign-in)
                 const pushTs = localTs || Date.now();
                 localStorage.setItem(key + "_ts", String(pushTs));
-                await fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                await ref.set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
               }
             } catch (e) { console.warn("Firestore get failed:", e); }
           }
@@ -115,10 +144,10 @@
           window._lastLocalTs = window._lastLocalTs || {};
           window._lastLocalTs[key] = ts;
 
-          const syncCode = window._getSyncCode();
-          if (syncCode) {
+          if (_cloudPossible()) {
             await _fbReady;
-            fbDb.collection("sync").doc(syncCode).collection("data").doc(key).set({
+            const ref = _docRef(key);
+            if (ref) ref.set({
               value: value,
               localTs: ts,
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -129,12 +158,13 @@
       },
       // Subscribe to real-time cloud updates for a key
       subscribe(key, callback) {
-        const syncCode = window._getSyncCode();
-        if (!syncCode) return () => {};
         let unsub = () => {};
+        let cancelled = false;
         _fbReady.then(() => {
-          unsub = fbDb.collection("sync").doc(syncCode).collection("data").doc(key)
-            .onSnapshot((doc) => {
+          if (cancelled) return;
+          const ref = _docRef(key);
+          if (!ref) return;
+          unsub = ref.onSnapshot((doc) => {
               if (!doc.exists) return;
               const d = doc.data();
               const fbTs = d.localTs || 0;
@@ -149,7 +179,7 @@
               }
             }, (err) => console.warn("Firestore subscribe failed:", err));
         });
-        return () => { try { unsub(); } catch(e) {} };
+        return () => { cancelled = true; try { unsub(); } catch(e) {} };
       }
     };
   </script>
@@ -2364,7 +2394,39 @@ function DailyGrind() {
         <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 6 }}>When the day flips over. Habits & daily tasks reset at this time.</div>
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <label style={S.lbl}>Sync Code (same code on all devices to sync)</label>
+        <label style={S.lbl}>Account</label>
+        {window._user ? (
+          <div>
+            <div style={{ fontSize: 12, color: "#4cd137", marginBottom: 8 }}>Signed in as {window._user.email || window._user.displayName || "your account"}</div>
+            <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 12, lineHeight: 1.5 }}>Your data is saved to your account and syncs on every device you sign in on.</div>
+            <div style={S.fAct}>
+              <button onClick={() => { alert("Pulling latest from cloud..."); location.reload(); }} style={S.cBtn}>Pull from Cloud</button>
+              <button onClick={async () => { await window._signOut(); location.reload(); }} style={S.dBtn}>Sign out</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 12, lineHeight: 1.5 }}>Sign in to save your data to a personal account that syncs on all your devices. (Replaces sync codes.)</div>
+            <button onClick={async () => {
+              try {
+                await window._signInWithGoogle();
+                location.reload();
+              } catch (e) {
+                const code = e && e.code;
+                if (code === "auth/operation-not-allowed") alert("Google sign-in isn't switched on yet.\n\nFirebase console: Authentication, Sign-in method, enable Google.");
+                else if (code === "auth/unauthorized-domain") alert("This domain isn't authorized yet.\n\nFirebase console: Authentication, Settings, Authorized domains, add feroakdemir-arch.github.io");
+                else if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") { /* user changed their mind */ }
+                else alert("Sign-in failed: " + ((e && e.message) || e));
+              }
+            }} style={{ ...S.okBtn, background: "#fff", color: "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+              <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.3 6.1 29.4 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.3 6.1 29.4 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.3 0 10.1-2 13.7-5.3l-6.3-5.4C29.3 34.9 26.8 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4 5.6l6.3 5.4C41.4 35.4 44 30.1 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>
+              Continue with Google
+            </button>
+          </div>
+        )}
+      </div>
+      {!window._user && <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Sync Code (legacy: same code on all devices to sync)</label>
         <input style={S.inp} type="text" value={syncCode} onChange={(e) => setSyncCode(e.target.value.trim())} placeholder="e.g. mycode123" />
         <div style={S.fAct}>
           <button onClick={() => { window._setSyncCode(syncCode || null); alert(syncCode ? "Sync code set! Use the same code on your other devices." : "Sync disabled."); location.reload(); }} style={S.okBtn}>{syncCode ? "Enable Sync" : "Disable Sync"}</button>
@@ -2375,7 +2437,7 @@ function DailyGrind() {
             {"\u25CF"} LIVE SYNC ACTIVE — cloud is source of truth
           </div>
         )}
-      </div>
+      </div>}
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
       </div>
