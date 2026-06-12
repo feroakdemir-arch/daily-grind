@@ -319,17 +319,23 @@ function playPomoChime(workEnded) {
   } catch (e) { console.warn("pomo chime failed", e); }
 }
 
-// --- Level system: lifetime points → level. Early levels come fast, later ones earn respect.
-// Level n → n+1 costs 100*(n+1) pts, so: L2 at 200, L3 at 500, L5 at 1400, L10 at 5400, L20 at 20900.
+// --- Level system: XP → level. XP is GOAL-NORMALIZED so levels are fair across players:
+// hitting your daily goal = 100 XP no matter what your point values are; partial days earn
+// partial XP; overachieving caps at 150 XP/day. Inflating task points can't inflate your level.
+// Curve: level n → n+1 costs 50*(n+1) XP, so L2 = first won day, L5 ≈ a week, L10 ≈ a month.
 const RANKS = [[1, "ROOKIE"], [5, "GRINDER"], [10, "OPERATOR"], [15, "MACHINE"], [20, "RELENTLESS"], [30, "UNSTOPPABLE"], [40, "LEGEND"], [50, "GOAT"]];
-function levelFromPoints(pts) {
-  let level = 1, need = 200, cum = 0;
-  while (pts >= cum + need && level < 99) { cum += need; level++; need = 100 * (level + 1); }
-  return { level, intoLevel: Math.max(0, pts - cum), needed: need };
+function dayXP(score, goal) {
+  const g = Math.max(1, goal || 200);
+  return Math.round(Math.min(Math.max(0, score) / g, 1.5) * 100);
+}
+function levelFromPoints(xp) {
+  let level = 1, need = 100, cum = 0;
+  while (xp >= cum + need && level < 99) { cum += need; level++; need = 50 * (level + 1); }
+  return { level, intoLevel: Math.max(0, xp - cum), needed: need };
 }
 function rankForLevel(level) { let r = RANKS[0][1]; for (const [l, name] of RANKS) { if (level >= l) r = name; } return r; }
 function lifetimePoints(data, todayScore) {
-  return Object.values(data.history || {}).reduce((s, h) => s + (h.score || 0), 0) + Math.max(0, todayScore);
+  return Object.values(data.history || {}).reduce((s, h) => s + dayXP(h.score || 0, h.goal), 0) + dayXP(todayScore, data.dailyGoal);
 }
 
 function allHabits(secs) { return secs.flatMap((s) => s.items); }
@@ -1498,7 +1504,7 @@ function DailyGrind() {
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
       <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : S.box}>
         {page !== "calendar" && winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
-        {page !== "calendar" && levelUpAnim && !winAnim && <div style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b22 0%,#f5f5f7ee 60%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#d97706", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime pts</div></div>}
+        {page !== "calendar" && levelUpAnim && !winAnim && <div style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b22 0%,#f5f5f7ee 60%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#d97706", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
 
         {page !== "calendar" && <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
@@ -1527,13 +1533,13 @@ function DailyGrind() {
             {won ? "TARGET HIT" : `${data.dailyGoal - score} to go`}
             {(hScore > 0 || tScore > 0) ? ` \u00B7 H:${hScore} \u00B7 T:${tScore}` : ""}
           </div>
-          <div title={`${lifePts.toLocaleString()} lifetime points`} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
+          <div title={`${lifePts.toLocaleString()} lifetime XP — hitting your daily goal earns ~100 XP, no matter your point values`} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
             <span style={{ fontSize: 12, fontWeight: 900, color: "#ffd43b", letterSpacing: 1, whiteSpace: "nowrap" }}>LVL {lvl.level}</span>
             <span style={{ fontSize: 8, fontWeight: 800, color: "#8b8b9e", letterSpacing: 2, whiteSpace: "nowrap" }}>{rankForLevel(lvl.level)}</span>
             <div style={{ flex: 1, height: 4, background: "#2d2d3a", borderRadius: 2, overflow: "hidden" }}>
               <div style={{ width: `${Math.min(100, (lvl.intoLevel / lvl.needed) * 100)}%`, height: "100%", background: "linear-gradient(90deg,#ffd43b,#ff922b)", borderRadius: 2, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" }} />
             </div>
-            <span style={{ fontSize: 9, color: "#555566", whiteSpace: "nowrap" }}>{lvl.intoLevel}/{lvl.needed}</span>
+            <span style={{ fontSize: 9, color: "#555566", whiteSpace: "nowrap" }}>{lvl.intoLevel}/{lvl.needed} XP</span>
           </div>
         </div>
 
