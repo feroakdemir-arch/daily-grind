@@ -209,23 +209,11 @@ const STORAGE_KEY = "daily-grind-v13";
 const DAYS = ["Sa", "Su", "Mo", "Tu", "We", "Th", "Fr"];
 
 const DEFAULT_HABIT_SECTIONS = [
-  { id: "morning", title: "MORNING ROUTINE", icon: "☀", items: [
-    { id: "h_wake", name: "Wake up on time", points: 10 },
-    { id: "h_bed", name: "Make your bed", points: 5 },
-    { id: "h_move", name: "Morning workout / stretch", points: 15 },
-  ]},
+  { id: "morning", title: "MORNING ROUTINE", icon: "☀", items: [] },
   { id: "allday", title: "ALL DAY", icon: "⚡", items: [
-    { id: "h_deep", name: "Deep work session", points: 25 },
-    { id: "h_read", name: "Read 10 pages", points: 10 },
-    { id: "h_water", name: "Drink 3L of water", points: 10 },
-    { id: "h_exercise", name: "Exercise", points: 20 },
-    { id: "h_nojunk", name: "No junk food", points: 10 },
+    { id: "h_water", name: "Drink water (example — tap to edit, + to add your own)", points: 10 },
   ]},
-  { id: "night", title: "NIGHT ROUTINE", icon: "☾", items: [
-    { id: "h_plan", name: "Plan tomorrow", points: 10 },
-    { id: "h_nophone", name: "No phone in bed", points: 10 },
-    { id: "h_sleep", name: "Sleep on time", points: 10 },
-  ]},
+  { id: "night", title: "NIGHT ROUTINE", icon: "☾", items: [] },
 ];
 
 const DEFAULT_TASK_LISTS = [
