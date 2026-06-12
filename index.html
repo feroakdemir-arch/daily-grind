@@ -91,6 +91,13 @@
     function _cloudPossible() {
       return !!(window._getSyncCode() || localStorage.getItem("dg-was-signed-in"));
     }
+    // Who the data on THIS device belongs to. On a shared computer, signing into a
+    // different account must never import the previous person's local data.
+    function _identity() {
+      if (window._user) return "uid:" + window._user.uid;
+      const c = window._getSyncCode();
+      return c ? "sync:" + c : "anon";
+    }
 
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
@@ -121,15 +128,26 @@
                 const saveTs = fbTs || Date.now();
                 localStorage.setItem(key, fbValue);
                 localStorage.setItem(key + "_ts", String(saveTs));
+                localStorage.setItem("dg-owner", _identity());
                 window._lastLocalTs = window._lastLocalTs || {};
                 window._lastLocalTs[key] = saveTs;
                 return { key, value: fbValue };
               } else if (localData) {
                 // Cloud empty — seed it from local (this is also how data
-                // migrates into a fresh account on first sign-in)
+                // migrates into a fresh account on first sign-in).
+                // EXCEPT: if the local data belongs to a DIFFERENT signed-in
+                // account, start this account clean instead of importing it.
+                const owner = localStorage.getItem("dg-owner");
+                const ident = _identity();
+                if (owner && owner.indexOf("uid:") === 0 && owner !== ident) {
+                  localStorage.removeItem(key);
+                  localStorage.removeItem(key + "_ts");
+                  return null;
+                }
                 const pushTs = localTs || Date.now();
                 localStorage.setItem(key + "_ts", String(pushTs));
                 await ref.set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                localStorage.setItem("dg-owner", ident);
               }
             } catch (e) { console.warn("Firestore get failed:", e); }
           }
@@ -146,6 +164,7 @@
 
           if (_cloudPossible()) {
             await _fbReady;
+            localStorage.setItem("dg-owner", _identity());
             const ref = _docRef(key);
             if (ref) ref.set({
               value: value,
@@ -190,55 +209,34 @@ const STORAGE_KEY = "daily-grind-v13";
 const DAYS = ["Sa", "Su", "Mo", "Tu", "We", "Th", "Fr"];
 
 const DEFAULT_HABIT_SECTIONS = [
-  { id: "morning", title: "MORNING ROUTINE", icon: "\u2600", items: [
-    { id: "h21", name: "Fast everyday", points: 12 },
-    { id: "h30", name: "Wake up at 8:45 am", points: 4 },
-    { id: "h23", name: "Take pills", points: 4 },
-    { id: "h29", name: "Delete apps", points: 4 },
-    { id: "h22", name: "Calendarize and fill tasks", points: 3 },
-    { id: "h24", name: "Tehhajud 5 AM", points: 3 },
-    { id: "h28", name: "Weight tracker first thing", points: 3 },
-    { id: "h25", name: "Clean room", points: 3 },
-    { id: "h26", name: "Fill water bottle", points: 2 },
-    { id: "h27", name: "Read goals everyday and dua", points: 2 },
+  { id: "morning", title: "MORNING ROUTINE", icon: "☀", items: [
+    { id: "h_wake", name: "Wake up on time", points: 10 },
+    { id: "h_bed", name: "Make your bed", points: 5 },
+    { id: "h_move", name: "Morning workout / stretch", points: 15 },
   ]},
-  { id: "allday", title: "ALL DAY", icon: "\u26A1", items: [
-    { id: "h4", name: "First vid", points: 30 },
-    { id: "h5", name: "2nd vid", points: 30 },
-    { id: "h7", name: "Personal brand vid", points: 20 },
-    { id: "h6", name: "3rd vid", points: 20 },
-    { id: "h16", name: "Meal 10 pages", points: 12 },
-    { id: "h17", name: "Quran 2 pages", points: 10 },
-    { id: "h18", name: "10 pages Islamic book", points: 10 },
-    { id: "h19", name: "Course 30 mins", points: 10 },
-    { id: "h20", name: "Serra time 1:15 hour", points: 10 },
-    { id: "h10", name: "Diet and diet tracking", points: 8 },
-    { id: "h12", name: "Lift/combat", points: 8, desc: "Monday- push and abs\nTuesday-rest/makeup\nWednesday- Pull and forearms\nThursday-rest/makeup\nFriday- lower body and abs\nSaturday=upper body +forearms\nSunday= rest" },
-    { id: "h13", name: "500 calories/jitz", points: 8 },
-    { id: "h11", name: "3 liters of water", points: 5 },
-    { id: "h15", name: "Tesbihat", points: 5 },
-    { id: "h9", name: "No distracted out of pomodoro", points: 5 },
-    { id: "h8", name: "No swearing", points: 4 },
-    { id: "h14", name: "Call anne ve baba", points: 3 },
+  { id: "allday", title: "ALL DAY", icon: "⚡", items: [
+    { id: "h_deep", name: "Deep work session", points: 25 },
+    { id: "h_read", name: "Read 10 pages", points: 10 },
+    { id: "h_water", name: "Drink 3L of water", points: 10 },
+    { id: "h_exercise", name: "Exercise", points: 20 },
+    { id: "h_nojunk", name: "No junk food", points: 10 },
   ]},
-  { id: "night", title: "NIGHT ROUTINE", icon: "\u263E", items: [
-    { id: "h1", name: "No prune no seconds", points: 12 },
-    { id: "h3", name: "Stretching", points: 6 },
-    { id: "h2", name: "White strips", points: 3 },
+  { id: "night", title: "NIGHT ROUTINE", icon: "☾", items: [
+    { id: "h_plan", name: "Plan tomorrow", points: 10 },
+    { id: "h_nophone", name: "No phone in bed", points: 10 },
+    { id: "h_sleep", name: "Sleep on time", points: 10 },
   ]},
 ];
 
 const DEFAULT_TASK_LISTS = [
   { id: "tl_main", title: "Main Tasks / Goals", resetsDaily: false, items: [] },
-  { id: "tl_prebars", title: "Prebars", resetsDaily: false, items: [] },
   { id: "tl_today", title: "Today's Tasks", resetsDaily: true, items: [] },
-  { id: "tl_hw", title: "HW", resetsDaily: false, items: [] },
 ];
 
 const mkDefault = () => ({
   habitSections: JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
   taskLists: JSON.parse(JSON.stringify(DEFAULT_TASK_LISTS)),
-  dailyGoal: 200, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
+  dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
 function localDateStr(d) {
@@ -983,112 +981,6 @@ function DailyGrind() {
       setCalEventsLoaded(true);
     })();
   }, [calEventsLoaded]);
-
-  // One-time task migration from Google Tasks PDF
-  const migrationRan = useRef(false);
-  useEffect(() => {
-    if (!data || !data.taskLists || loading || migrationRan.current || localStorage.getItem("dg-tasks-migrated-v1")) return;
-    migrationRan.current = true;
-    const MIGRATED_TASKS = [
-      "Set TikTok shop up on Instagram",
-      "Buy a TikTok shop account",
-      "Zach D style TikTok shop",
-      "Find chosen niche for shop",
-      "Sign up for TikTok shop course",
-      "Read TikTok shop rules",
-      "Check out TikTok shop dude saved on TT",
-      "Should I disclose commercial content for extra reach",
-      "Figure out ad budget strategy (viral vs paid)",
-      "Why can't I get spotlight creator",
-      "How does Solo consistently get picked up",
-      "Should I keep posting vids for GMV Max",
-      "How does GMV Max work - conversion vs retention",
-      "Check out new products for GMV Max",
-      "Should I private old vids to stop violations",
-      "Fix violations - adjust scripts for Claude",
-      "How to make great short form video",
-      "Learn how to be the goat of hooks",
-      "How do curiosity loops work",
-      "Learn about product virality",
-      "Create cart preview - TikTok interface before posting",
-      "Study audience and feed to Claude",
-      "Better research - sign up to DailyVirals",
-      "Great content example FYP TT",
-      "List saved TikTok favorites",
-      "Become a product selection monster",
-      "What is UGC",
-      "Learn YT Shorts selling",
-      "Recreate nano to Kling workflow",
-      "Try AI Kling 3.0 replacement videos",
-      "Kling generator for Claude Chrome",
-      "Try Higgsfield motion graphics + automation",
-      "ChatGPT to Higgsfield workflow automation",
-      "Figure out how to create AI vid",
-      "Can I recreate vid and switch characters",
-      "Video workflow - 10 vids/day (skeleton, face AI, reaction)",
-      "Try motion graphics IRL",
-      "How to keep voice same throughout videos",
-      "Video idea finder (in downloads)",
-      "Music player for vids",
-      "Get Claude to edit for me",
-      "Learn GitHub",
-      "What is Claude Code / how to use it properly",
-      "What is Claude Dispatch",
-      "What is Claude Projects",
-      "Learn Claude Cowork",
-      "What is Remote Claude Control",
-      "Claude Code subscription - tokens & $200 request",
-      "Learn Claude best performers content evolution",
-      "Search up Practically AI for Claude tips",
-      "How to do Claude connectors",
-      "Finish Anthropic courses",
-      "Try automating, if not buy Claude Max",
-      "Learn OpenClaw",
-      "What is Notebook LM",
-      "Learn Python",
-      "What is an accelerator",
-      "CS or engineering decision",
-      "Should I do engineering for physical products",
-      "How to test if a company will work",
-      "Finance - banking, real estate, investing, VC",
-      "Study ecommerce",
-      "Redo Amazon stuff",
-      "Learn Kalodata - find viral products",
-      "How to get app onto app store",
-      "How to build an app",
-      "Checkout fake doctor thing on TikTok",
-      "Clean room very well",
-      "Do the nomination thing with Abdulrahman",
-      "Ask Yaser to bring his switch to the event",
-      "Lock in for Eid",
-      "Set up alarms (both phones)",
-      "Do the acct project before Thursday",
-      "4 citings out of books and print it out",
-      "Summarize the voice recording",
-      "Watch Matrix",
-      "Diet plan",
-      "Learn about what to do for rooms",
-      "Locking down on habits",
-      "Check test dates",
-      "And the reaction to my vid",
-      "Side control to mount",
-      "Kimura and darce finishes from side control",
-      "Triangle defense",
-      "Finish automation videos from Nate on YT (5 hrs)",
-      "Simpletistics check out",
-      "Checkout that fake doctor thing on TikTok",
-    ];
-    const existingNames = new Set(data.taskLists.find(l => l.id === "tl_main")?.items.map(t => t.name.toLowerCase()) || []);
-    const newTasks = MIGRATED_TASKS.filter(t => !existingNames.has(t.toLowerCase())).map((name, i) => ({
-      id: `t_mig_${Date.now()}_${i}`, name, points: 10, done: false
-    }));
-    if (newTasks.length > 0) {
-      const nd = { ...data, taskLists: data.taskLists.map(l => l.id === "tl_main" ? { ...l, items: [...l.items, ...newTasks] } : l) };
-      setData(nd);
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-    }
-    localStorage.setItem("dg-tasks-migrated-v1", "true");
-  }, [data, loading]);
 
   // Day rollover
   useEffect(() => {
