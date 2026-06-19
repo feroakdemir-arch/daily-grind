@@ -652,24 +652,25 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
     document.addEventListener("touchend", onEnd);
   }
 
-  function pickStatus(st) {
-    const dtl = data.log[pickerDate] || {};
+  function pickStatus(st, dateOverride) {
+    const targetDate = dateOverride || pickerDate;
+    const dtl = data.log[targetDate] || {};
     const ntl = { ...dtl };
     if (st === undefined) { delete ntl[item.id]; }
     else ntl[item.id] = st;
-    const nd = { ...data, log: { ...data.log, [pickerDate]: ntl } };
+    const nd = { ...data, log: { ...data.log, [targetDate]: ntl } };
     // Keep that day's archived history score in sync when editing the past
-    const entry = data.history[pickerDate];
-    if (entry && pickerDate !== today) {
+    const entry = data.history[targetDate];
+    if (entry && targetDate !== today) {
       const habits = allHabits(data.habitSections);
       const hsBefore = habits.reduce((sc, h) => sc + (dtl[h.id] === "done" ? h.points : 0), 0);
       const ts = entry.ts !== undefined ? entry.ts : Math.max(0, (entry.score || 0) - hsBefore);
       const hsAfter = habits.reduce((sc, h) => sc + (ntl[h.id] === "done" ? h.points : 0), 0);
       const score = hsAfter + ts;
-      nd.history = { ...data.history, [pickerDate]: { ...entry, score, won: score >= (entry.goal || data.dailyGoal), ts } };
+      nd.history = { ...data.history, [targetDate]: { ...entry, score, won: score >= (entry.goal || data.dailyGoal), ts } };
     }
     save(nd);
-    setShowPicker(false); setShowComment(false);
+    if (!dateOverride) { setShowPicker(false); setShowComment(false); }
   }
 
   function saveComment() {
@@ -827,8 +828,8 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
                 else if (st === "neutral") { bg = "#636e72"; clr = "#fff"; }
                 else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
                 return (
-                  <div key={d} onClick={() => !isFuture && nt ? setSelectedMonthDay(selectedMonthDay === ds ? null : ds) : setSelectedMonthDay(null)}
-                    style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: nt && !isFuture ? "pointer" : "default" }}>{d}</div>
+                  <div key={d} onClick={() => { if (isFuture) return; setSelectedMonthDay(selectedMonthDay === ds ? null : ds); }}
+                    style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: isFuture ? "default" : "pointer" }}>{d}</div>
                 );
               })}
             </div>
@@ -837,16 +838,25 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
               <span>{"❌"} {skipCount}/{totalDays}</span>
               <span>{totalDays > 0 ? Math.round(doneCount/totalDays*100) : 0}% done</span>
             </div>
-            {selectedMonthDay && data.log[selectedMonthDay]?.[item.id + "_note"] && (() => {
+            {selectedMonthDay && (() => {
               const selDate = new Date(selectedMonthDay + "T12:00");
               const selStatus = data.log[selectedMonthDay]?.[item.id];
+              const selNote = data.log[selectedMonthDay]?.[item.id + "_note"];
               return (
-                <div style={{ marginTop: 10, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a" }}>
-                  <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} {selStatus === "done" ? "✅" : selStatus === "skip" ? "❌" : selStatus === "neutral" ? "➖" : ""}</span>
+                <div style={{ marginTop: 10, padding: "12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a" }}>
+                  <div style={{ fontSize: 10, color: "#c4b5fd", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", letterSpacing: 1, fontWeight: 700 }}>
+                    <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}</span>
                     <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"✕"}</button>
                   </div>
-                  <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{data.log[selectedMonthDay][item.id + "_note"]}</div>
+                  <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                    {[["done","#4cd137","✓"],["skip","#e84118","✗"],["neutral","#636e72","—"]].map(([val,col,sym]) => (
+                      <button key={val} onClick={() => pickStatus(val, selectedMonthDay)}
+                        style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: selStatus === val ? "2px solid #fff" : "2px solid transparent", background: col, color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{sym}</button>
+                    ))}
+                    <button onClick={() => pickStatus(undefined, selectedMonthDay)}
+                      style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: !selStatus ? "2px solid #fff" : "2px solid #2d2d3a", background: "#2d2d3a", color: "#8b8b9e", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{"×"}</button>
+                  </div>
+                  {selNote && <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid #2d2d3a" }}>{"📝"} {selNote}</div>}
                 </div>
               );
             })()}
