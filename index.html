@@ -361,10 +361,17 @@ function deadlineChip(deadline) {
   return { text: `📅 ${due.getMonth()+1}/${due.getDate()}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
 }
 
-function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList }) {
+function fmtDoneDate(d) {
+  if (!d) return "";
+  try { return new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+  catch (e) { return ""; }
+}
+
+function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList, onDeleteCompleted }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [completedShown, setCompletedShown] = useState(10);
   const inputRef = useRef(null);
   const dragRef = useRef(null);
   const [dragIdx, setDragIdx] = useState(null);
@@ -429,7 +436,12 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
   }
 
   const pending = list.items.filter((t) => !t.done);
-  const completed = list.items.filter((t) => t.done);
+  // Completed = live done tasks (can be un-checked) + archived history from past
+  // daily resets (read-only). Merged + sorted newest-first, paginated 10 at a time.
+  const completedLive = list.items.filter((t) => t.done).map((t) => ({ key: t.id, taskId: t.id, name: t.name, points: t.points, date: t.doneDate, live: true }));
+  const completedArchived = (list.completedLog || []).map((e) => ({ key: e.id, name: e.name, points: e.points, date: e.date, live: false }));
+  const completedAll = [...completedLive, ...completedArchived].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const completedView = completedAll.slice(0, completedShown);
 
   function getPendingRealIndex(pendingIdx) {
     let count = 0;
@@ -570,22 +582,31 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
           onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }} />
       </div>
 
-      {completed.length > 0 && (
+      {completedAll.length > 0 && (
         <>
           <button onClick={() => setShowDone(!showDone)} style={S.compToggle}>
             <span style={{ marginRight: 6 }}>{showDone ? "\u25BE" : "\u25B8"}</span>
-            Completed ({completed.length})
+            Completed ({completedAll.length})
           </button>
-          {showDone && completed.map((t) => (
-            <div key={t.id} style={{ ...S.tRow, opacity: 0.4 }}>
-              <button onClick={() => onToggle(list.id, t.id)} style={{ ...S.tCircle, background: "#4cd137", borderColor: "#4cd137" }}>
+          {showDone && completedView.map((c) => (
+            <div key={c.key} style={{ ...S.tRow, opacity: 0.55, alignItems: "flex-start" }}>
+              <button onClick={() => { if (c.live) onToggle(list.id, c.taskId); }} title={c.live ? "Tap to un-complete" : "Completed (history)"}
+                style={{ ...S.tCircle, background: "#4cd137", borderColor: "#4cd137", cursor: c.live ? "pointer" : "default", marginTop: 2 }}>
                 <span style={{ fontSize: 10, color: "#fff" }}>{"\u2713"}</span>
               </button>
-              <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e" }}>{t.name}</span>
-              {t.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be" }}>+{t.points}</span>}
-              <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e", display: "block" }}>{c.name}</span>
+                {c.date && <span style={{ fontSize: 9, color: "#555566", letterSpacing: 0.5 }}>Completed: {fmtDoneDate(c.date)}</span>}
+              </div>
+              {c.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be", marginTop: 2 }}>+{c.points}</span>}
+              <button onClick={() => { if (c.live) onDelete(list.id, c.taskId); else onDeleteCompleted(list.id, c.key); }} style={{ ...S.tX, marginTop: 2 }}>&times;</button>
             </div>
           ))}
+          {showDone && completedAll.length > completedShown && (
+            <button onClick={() => setCompletedShown(completedShown + 10)} style={{ ...S.compToggle, color: "#7c3aed", fontWeight: 700, justifyContent: "center", width: "100%" }}>
+              {"\u21BB"} Load more ({completedAll.length - completedShown} more)
+            </button>
+          )}
         </>
       )}
     </div>
@@ -1042,9 +1063,17 @@ function DailyGrind() {
     // Non-daily lists keep their completed items; legacy done-tasks without a
     // doneDate get stamped with yesterday so they stop counting toward today.
     if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
-      updated.taskLists = updated.taskLists.map((l) => l.resetsDaily
-        ? { ...l, items: l.items.map((t) => ({ ...t, done: false })) }
-        : { ...l, items: l.items.map((t) => (t.done && !t.doneDate) ? { ...t, doneDate: yday } : t) });
+      updated.taskLists = updated.taskLists.map((l) => {
+        if (l.resetsDaily) {
+          // Archive each completed daily task into history, then reset for the new day.
+          const archived = l.items.filter((t) => t.done).map((t) => ({
+            id: `c_${t.id}_${t.doneDate || yday}`, name: t.name, points: t.points, date: t.doneDate || yday,
+          }));
+          return { ...l, completedLog: [...archived, ...(l.completedLog || [])], items: l.items.map((t) => ({ ...t, done: false, doneDate: undefined })) };
+        }
+        // Non-daily: keep completed items in place; stamp legacy done tasks with a date.
+        return { ...l, items: l.items.map((t) => (t.done && !t.doneDate) ? { ...t, doneDate: yday } : t) };
+      });
       updated.lastTaskResetDate = today;
       changed = true;
     }
@@ -1113,6 +1142,13 @@ function DailyGrind() {
   const deleteTaskItem = useCallback((listId, taskId) => {
     setData((prev) => {
       const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+  }, []);
+  const deleteCompletedEntry = useCallback((listId, entryId) => {
+    setData((prev) => {
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) };
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
@@ -1569,7 +1605,7 @@ function DailyGrind() {
         {page === "tasks" && (
           <div data-tasklists-container>
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
