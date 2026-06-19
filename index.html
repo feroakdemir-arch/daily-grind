@@ -797,6 +797,18 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
         const cells = [];
         for (let i = 0; i < firstDay; i++) cells.push(null);
         for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+        while (cells.length % 7 !== 0) cells.push(null);
+        // Drop trailing weeks that are entirely empty or all in the future, so the
+        // grid ends at the current week and the editor sits right under it.
+        while (cells.length > 7) {
+          const lastWeek = cells.slice(-7);
+          const allFutureOrEmpty = lastWeek.every(d => {
+            if (d === null) return true;
+            const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+            return ds > today;
+          });
+          if (allFutureOrEmpty) cells.length -= 7; else break;
+        }
         let doneCount = 0, skipCount = 0, totalDays = 0;
         for (let d = 1; d <= daysInMonth; d++) {
           const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
@@ -808,13 +820,13 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
         }
         return (
           <div style={{ marginTop: 8, padding: "10px 4px", borderTop: "1px solid #2d2d3a" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", maxWidth: 340, margin: "0 auto 10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", margin: "0 auto 10px" }}>
               <button onClick={() => setMonthOffset(monthOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"◀"}</button>
               <span style={{ fontSize: 13, fontWeight: 700, color: "#f0f0f4", letterSpacing: 1 }}>{monthName}</span>
               <button onClick={() => setMonthOffset(Math.min(monthOffset + 1, 0))} disabled={monthOffset >= 0} style={{ background: "none", border: "none", color: monthOffset >= 0 ? "#333" : "#8b8b9e", fontSize: 18, cursor: monthOffset >= 0 ? "default" : "pointer", padding: "4px 10px" }}>{"▶"}</button>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, textAlign: "center", width: "100%", maxWidth: 340, margin: "0 auto" }}>
-              {dayNames.map(dn => <div key={dn} style={{ fontSize: 9, color: "#555566", fontWeight: 700, padding: "2px 0" }}>{dn}</div>)}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, textAlign: "center", width: "100%" }}>
+              {dayNames.map(dn => <div key={dn} style={{ fontSize: 10, color: "#555566", fontWeight: 700, padding: "2px 0" }}>{dn}</div>)}
               {cells.map((d, i) => {
                 if (d === null) return <div key={"e"+i} />;
                 const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
@@ -829,7 +841,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
                 else if (nt) { bg = "#4cd13744"; clr = "#4cd137"; }
                 return (
                   <div key={d} onClick={() => { if (isFuture) return; setSelectedMonthDay(selectedMonthDay === ds ? null : ds); }}
-                    style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: isFuture ? "default" : "pointer" }}>{d}</div>
+                    style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: isFuture ? "#1a1a2e" : bg, color: isFuture ? "#333" : clr, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: isToday ? 900 : 600, border: selectedMonthDay === ds ? "2px solid #ffd43b" : isToday ? "2px solid #c4b5fd" : nt && !isFuture ? "2px dotted #a78bfa55" : "2px solid transparent", opacity: isFuture ? 0.3 : 1, cursor: isFuture ? "default" : "pointer" }}>{d}</div>
                 );
               })}
             </div>
@@ -838,7 +850,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
               const selStatus = data.log[selectedMonthDay]?.[item.id];
               const selNote = data.log[selectedMonthDay]?.[item.id + "_note"];
               return (
-                <div style={{ marginTop: 8, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a", width: "100%", maxWidth: 340, marginLeft: "auto", marginRight: "auto" }}>
+                <div style={{ marginTop: 6, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a", width: "100%" }}>
                   <div style={{ fontSize: 10, color: "#c4b5fd", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", letterSpacing: 1, fontWeight: 700 }}>
                     <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}</span>
                     <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"✕"}</button>
