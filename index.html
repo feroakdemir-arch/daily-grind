@@ -848,13 +848,13 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
                     <span>{selDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}</span>
                     <button onClick={() => setSelectedMonthDay(null)} style={{ background: "none", border: "none", color: "#8b8b9e", cursor: "pointer", fontSize: 14 }}>{"✕"}</button>
                   </div>
-                  <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                  <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
                     {[["done","#4cd137","✓"],["skip","#e84118","✗"],["neutral","#636e72","—"]].map(([val,col,sym]) => (
                       <button key={val} onClick={() => pickStatus(val, selectedMonthDay)}
-                        style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: selStatus === val ? "2px solid #fff" : "2px solid transparent", background: col, color: "#fff", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{sym}</button>
+                        style={{ width: 52, height: 44, borderRadius: 10, border: selStatus === val ? "3px solid #fff" : "2px solid transparent", background: col, color: "#fff", fontSize: 18, fontWeight: 900, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}>{sym}</button>
                     ))}
                     <button onClick={() => pickStatus(undefined, selectedMonthDay)}
-                      style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: !selStatus ? "2px solid #fff" : "2px solid #2d2d3a", background: "#2d2d3a", color: "#8b8b9e", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{"×"}</button>
+                      style={{ width: 52, height: 44, borderRadius: 10, border: !selStatus ? "3px solid #fff" : "2px solid #2d2d3a", background: "#2d2d3a", color: "#8b8b9e", fontSize: 18, fontWeight: 900, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}>{"×"}</button>
                   </div>
                   {selNote && <div style={{ fontSize: 12, color: "#f0f0f4", lineHeight: 1.5, whiteSpace: "pre-wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid #2d2d3a" }}>{"📝"} {selNote}</div>}
                 </div>
