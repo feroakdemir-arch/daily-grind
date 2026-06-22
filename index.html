@@ -101,6 +101,28 @@
       const c = window._getSyncCode();
       return c ? "sync:" + c : "anon";
     }
+    // "Richness" of a daily-grind-v13 blob — how much real content it holds.
+    // The empty starter scores ~1; a real account scores many. Used so the
+    // empty starter can never overwrite real data (and a real backup can
+    // always restore over an empty starter), regardless of timestamps.
+    function _mainRichness(val) {
+      try {
+        const d = JSON.parse(val);
+        const habits = (d.habitSections || []).reduce((s, sec) => s + ((sec.items || []).length), 0);
+        const tasks = (d.taskLists || []).reduce((s, l) => s + ((l.items || []).length) + ((l.completedLog || []).length), 0);
+        const hist = d.history ? Object.keys(d.history).length : 0;
+        const logs = d.log ? Object.keys(d.log).length : 0;
+        return habits + tasks + hist + logs;
+      } catch (e) { return null; }
+    }
+    // Read a raw value straight from a sync-code backup doc (for manual recovery).
+    window._fetchSyncDoc = async (code, key) => {
+      try {
+        await _fbReady;
+        const d = await fbDb.collection("sync").doc(code).collection("data").doc(key).get();
+        return d.exists ? (d.data().value || null) : null;
+      } catch (e) { console.warn("fetchSyncDoc failed:", e); return null; }
+    };
 
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
@@ -120,6 +142,32 @@
                 const fbData = doc.data();
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
+                // SAFETY (main data only): never let the empty starter clobber real
+                // data, and let real data restore over an empty starter — no matter
+                // the timestamps. This is what prevents the cross-device wipe bug.
+                if (key === "daily-grind-v13" && localData) {
+                  const rc = _mainRichness(fbValue), rl = _mainRichness(localData.value);
+                  if (rc !== null && rl !== null) {
+                    if (rc <= 2 && rl >= rc + 3) {
+                      // cloud is the empty starter, local is real → keep local & heal cloud
+                      const healTs = Math.max(localTs, fbTs) + 1;
+                      localStorage.setItem(key + "_ts", String(healTs));
+                      localStorage.setItem("dg-owner", _identity());
+                      window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
+                      ref.set({ value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                      return localData;
+                    }
+                    if (rl <= 2 && rc >= rl + 3) {
+                      // local is the empty starter, cloud is real → take cloud (recover)
+                      const saveTs = fbTs || Date.now();
+                      localStorage.setItem(key, fbValue);
+                      localStorage.setItem(key + "_ts", String(saveTs));
+                      localStorage.setItem("dg-owner", _identity());
+                      window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = saveTs;
+                      return { key, value: fbValue };
+                    }
+                  }
+                }
                 // Cloud is source of truth when sync is enabled.
                 // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
                 if (localTs > fbTs && localData) {
@@ -918,6 +966,7 @@ function DailyGrind() {
   const [formTaskTime, setFormTaskTime] = useState("");
   const [goalInput, setGoalInput] = useState("200");
   const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
+  const [recoverCode, setRecoverCode] = useState("");
   const [winAnim, setWinAnim] = useState(false);
   const [levelUpAnim, setLevelUpAnim] = useState(null);
   const prevLevelRef = useRef(null);
@@ -1082,8 +1131,13 @@ function DailyGrind() {
       changed = true;
     }
 
-    if (changed) save(updated);
-  }, [data, save]);
+    if (changed) {
+      // Never let a freshly-loaded empty starter auto-write to the cloud — that
+      // was the cross-device wipe. Keep bookkeeping in memory only until the
+      // user actually has data (or makes an edit, which saves explicitly).
+      if (hasSavedData) save(updated); else setData(updated);
+    }
+  }, [data, save, hasSavedData]);
 
   const getTL = () => data?.log[today] || {};
 
@@ -1245,6 +1299,45 @@ function DailyGrind() {
   }
   function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save({ ...data, dailyGoal: v }); setGoalInput(String(v)); setView("main"); }
   function resetAll() { save(mkDefault()); setGoalInput("200"); setView("main"); setPage("habits"); }
+  function recoverFromSyncCode(code) {
+    (async () => {
+      const c = (code || "").trim();
+      if (!c) { alert("Enter the sync code you used before signing in (e.g. 123)."); return; }
+      const val = await window._fetchSyncDoc(c, STORAGE_KEY);
+      if (!val) { alert(`No backup found under code "${c}". Double-check the code and try again.`); return; }
+      let parsed; try { parsed = JSON.parse(val); } catch (e) { alert("That backup couldn't be read."); return; }
+      const habitN = (parsed.habitSections || []).reduce((s, sec) => s + (sec.items || []).length, 0);
+      const taskN = (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0);
+      if (!confirm(`Found a backup with ${habitN} habits and ${taskN} tasks under code "${c}".\n\nRestore it? This replaces your current data and saves it to your account.`)) return;
+      setGoalInput(String(parsed.dailyGoal || 100));
+      setHasSavedData(true);
+      save(parsed);
+      alert("Restored! Your habits and tasks are back.");
+      setView("main"); setPage("habits");
+    })();
+  }
+  function exportBackup() {
+    try {
+      const blob = { app: "daily-grind", exportedAt: new Date().toISOString(), main: localStorage.getItem(STORAGE_KEY), cal: localStorage.getItem("dg-cal-events") };
+      const a = document.createElement("a");
+      a.href = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(blob, null, 2));
+      a.download = `daily-grind-backup-${today}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { alert("Export failed: " + e); }
+  }
+  function importBackup(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const blob = JSON.parse(reader.result);
+        if (blob.main) { const p = JSON.parse(blob.main); setGoalInput(String(p.dailyGoal || 100)); setHasSavedData(true); save(p); }
+        if (blob.cal) { window.storage.set("dg-cal-events", blob.cal).catch(console.error); }
+        alert("Backup imported! Reloading...");
+        setTimeout(() => location.reload(), 600);
+      } catch (e) { alert("Import failed — file not recognized: " + e); }
+    };
+    reader.readAsText(file);
+  }
 
   useEffect(() => {
     if (!data) return;
@@ -2419,6 +2512,24 @@ function DailyGrind() {
           </div>
         )}
       </div>}
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Backup &amp; Restore</label>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.5 }}>Download a backup file to keep safe, or restore from one.</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={exportBackup} style={S.cBtn}>{"⬇"} Download backup</button>
+          <label style={{ ...S.cBtn, textAlign: "center", cursor: "pointer", display: "block" }}>{"⬆"} Import backup
+            <input type="file" accept="application/json,.json" style={{ display: "none" }} onChange={(e) => { if (e.target.files && e.target.files[0]) importBackup(e.target.files[0]); }} />
+          </label>
+        </div>
+      </div>
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Recover from old sync code</label>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>Lost your habits/tasks? Enter the sync code you used before signing in (e.g. 123) to pull them back from your old backup.</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={{ ...S.inp, flex: 1 }} value={recoverCode} onChange={(e) => setRecoverCode(e.target.value.trim())} placeholder="old sync code" />
+          <button onClick={() => recoverFromSyncCode(recoverCode)} style={{ ...S.okBtn, flex: "none", padding: "11px 16px" }}>Recover</button>
+        </div>
+      </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
       </div>
