@@ -966,7 +966,7 @@ function DailyGrind() {
   const [formTaskTime, setFormTaskTime] = useState("");
   const [goalInput, setGoalInput] = useState("200");
   const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
-  const [recoverCode, setRecoverCode] = useState("");
+  const [recoverCode, setRecoverCode] = useState("123");
   const [winAnim, setWinAnim] = useState(false);
   const [levelUpAnim, setLevelUpAnim] = useState(null);
   const prevLevelRef = useRef(null);
@@ -1138,6 +1138,34 @@ function DailyGrind() {
       if (hasSavedData) save(updated); else setData(updated);
     }
   }, [data, save, hasSavedData]);
+
+  // One-time auto-recovery for the owner: if signed in and the account is the
+  // empty starter, pull the frozen sync-code backup and restore it. Runs once,
+  // never overwrites real data (only fires when current data is empty).
+  // TODO: remove the hardcoded "123" once the owner has confirmed recovery.
+  const autoRecoverTried = useRef(false);
+  useEffect(() => {
+    if (!data || loading || autoRecoverTried.current) return;
+    if (!window._user || !window._fetchSyncDoc) return;
+    if (localStorage.getItem("dg-autorecover-v1")) return;
+    const cur = allHabits(data.habitSections).length + data.taskLists.reduce((s, l) => s + l.items.length, 0) + Object.keys(data.history || {}).length;
+    if (cur > 2) { localStorage.setItem("dg-autorecover-v1", "1"); return; } // already has real data
+    autoRecoverTried.current = true;
+    (async () => {
+      try {
+        const val = await window._fetchSyncDoc("123", STORAGE_KEY);
+        if (!val) return;
+        const parsed = JSON.parse(val);
+        const rich = allHabits(parsed.habitSections || []).length + (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0);
+        if (rich >= 3) {
+          localStorage.setItem("dg-autorecover-v1", "1");
+          setGoalInput(String(parsed.dailyGoal || 100));
+          setHasSavedData(true);
+          save(parsed);
+        }
+      } catch (e) { console.warn("auto-recover failed", e); }
+    })();
+  }, [data, loading, save]);
 
   const getTL = () => data?.log[today] || {};
 
@@ -1315,28 +1343,6 @@ function DailyGrind() {
       alert("Restored! Your habits and tasks are back.");
       setView("main"); setPage("habits");
     })();
-  }
-  function exportBackup() {
-    try {
-      const blob = { app: "daily-grind", exportedAt: new Date().toISOString(), main: localStorage.getItem(STORAGE_KEY), cal: localStorage.getItem("dg-cal-events") };
-      const a = document.createElement("a");
-      a.href = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(blob, null, 2));
-      a.download = `daily-grind-backup-${today}.json`;
-      document.body.appendChild(a); a.click(); a.remove();
-    } catch (e) { alert("Export failed: " + e); }
-  }
-  function importBackup(file) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const blob = JSON.parse(reader.result);
-        if (blob.main) { const p = JSON.parse(blob.main); setGoalInput(String(p.dailyGoal || 100)); setHasSavedData(true); save(p); }
-        if (blob.cal) { window.storage.set("dg-cal-events", blob.cal).catch(console.error); }
-        alert("Backup imported! Reloading...");
-        setTimeout(() => location.reload(), 600);
-      } catch (e) { alert("Import failed — file not recognized: " + e); }
-    };
-    reader.readAsText(file);
   }
 
   useEffect(() => {
@@ -2513,21 +2519,11 @@ function DailyGrind() {
         )}
       </div>}
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <label style={S.lbl}>Backup &amp; Restore</label>
-        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.5 }}>Download a backup file to keep safe, or restore from one.</div>
+        <label style={S.lbl}>Recover lost data</label>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>If your habits/tasks ever disappear, your old backup code is pre-filled below — just tap Recover to pull everything back from the cloud.</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={exportBackup} style={S.cBtn}>{"⬇"} Download backup</button>
-          <label style={{ ...S.cBtn, textAlign: "center", cursor: "pointer", display: "block" }}>{"⬆"} Import backup
-            <input type="file" accept="application/json,.json" style={{ display: "none" }} onChange={(e) => { if (e.target.files && e.target.files[0]) importBackup(e.target.files[0]); }} />
-          </label>
-        </div>
-      </div>
-      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <label style={S.lbl}>Recover from old sync code</label>
-        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>Lost your habits/tasks? Enter the sync code you used before signing in (e.g. 123) to pull them back from your old backup.</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={{ ...S.inp, flex: 1 }} value={recoverCode} onChange={(e) => setRecoverCode(e.target.value.trim())} placeholder="old sync code" />
-          <button onClick={() => recoverFromSyncCode(recoverCode)} style={{ ...S.okBtn, flex: "none", padding: "11px 16px" }}>Recover</button>
+          <input style={{ ...S.inp, flex: 1 }} value={recoverCode} onChange={(e) => setRecoverCode(e.target.value.trim())} placeholder="backup code" />
+          <button onClick={() => recoverFromSyncCode(recoverCode)} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Recover</button>
         </div>
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
