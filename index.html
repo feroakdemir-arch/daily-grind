@@ -200,7 +200,13 @@
                 await ref.set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
                 localStorage.setItem("dg-owner", ident);
               }
-            } catch (e) { console.warn("Firestore get failed:", e); }
+            } catch (e) {
+              console.warn("Firestore get failed:", e);
+              // A transient cloud-read failure for a signed-in user must NOT
+              // degrade into showing/saving the empty starter. Signal the app
+              // to retry instead of falling back to defaults.
+              if (window._user && !localData) return { error: true };
+            }
           }
           return localData;
         } catch { return null; }
@@ -1021,7 +1027,23 @@ function DailyGrind() {
   const weekDates = getWeekDates(today);
 
   const [hasSavedData, setHasSavedData] = useState(true);
-  useEffect(() => { (async () => { try { const r = await window.storage.get(STORAGE_KEY); if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); } else { setData(mkDefault()); setHasSavedData(false); } } catch(e) { setData(mkDefault()); setHasSavedData(false); } setLoading(false); })(); }, []);
+  useEffect(() => { (async () => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await window.storage.get(STORAGE_KEY);
+        if (r && r.error) {
+          // Transient cloud-read failure for a signed-in user — wait and retry
+          // rather than show (and risk saving) the empty starter.
+          if (attempt < 3) { await new Promise((res) => setTimeout(res, 700 * (attempt + 1))); continue; }
+          setData(mkDefault()); setHasSavedData(false); break; // gave up; no auto-save will run
+        }
+        if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); }
+        else { setData(mkDefault()); setHasSavedData(false); }
+        break;
+      } catch (e) { setData(mkDefault()); setHasSavedData(false); break; }
+    }
+    setLoading(false);
+  })(); }, []);
   const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
   // Real-time cloud sync subscription for main data
