@@ -108,6 +108,9 @@
     function _mainRichness(val) {
       try {
         const d = JSON.parse(val);
+        // An intentional "Reset Everything" carries a resetStamp — treat it as
+        // real data so the reset propagates instead of being healed away.
+        if (d.resetStamp) return 999;
         const habits = (d.habitSections || []).reduce((s, sec) => s + ((sec.items || []).length), 0);
         const tasks = (d.taskLists || []).reduce((s, l) => s + ((l.items || []).length) + ((l.completedLog || []).length), 0);
         const hist = d.history ? Object.keys(d.history).length : 0;
@@ -249,6 +252,13 @@
               const ourLastTs = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
               if (fbTs === ourLastTs) return;
               if (fbTs > localTs) {
+                // Same safety as get(): a live-sync update carrying the empty
+                // starter must never clobber real local data.
+                if (key === "daily-grind-v13") {
+                  const localRaw = localStorage.getItem(key);
+                  const rc = _mainRichness(d.value), rl = localRaw !== null ? _mainRichness(localRaw) : null;
+                  if (rc !== null && rl !== null && rc <= 2 && rl >= rc + 3) return;
+                }
                 localStorage.setItem(key, d.value);
                 localStorage.setItem(key + "_ts", String(fbTs));
                 try { callback(d.value); } catch(e) { console.warn(e); }
@@ -972,7 +982,7 @@ function DailyGrind() {
   const [formTaskTime, setFormTaskTime] = useState("");
   const [goalInput, setGoalInput] = useState("200");
   const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
-  const [recoverCode, setRecoverCode] = useState("123");
+  const [recoverCode, setRecoverCode] = useState(() => (window._user && (window._user.email || "").toLowerCase() === "feroakdemir@gmail.com") ? "123" : "");
   const [winAnim, setWinAnim] = useState(false);
   const [levelUpAnim, setLevelUpAnim] = useState(null);
   const prevLevelRef = useRef(null);
@@ -1044,7 +1054,7 @@ function DailyGrind() {
     }
     setLoading(false);
   })(); }, []);
-  const save = useCallback(async (nd) => { setData(nd); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
+  const save = useCallback(async (nd) => { setData(nd); setHasSavedData(true); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
 
   // Real-time cloud sync subscription for main data
   useEffect(() => {
@@ -1161,14 +1171,16 @@ function DailyGrind() {
     }
   }, [data, save, hasSavedData]);
 
-  // One-time auto-recovery for the owner: if signed in and the account is the
-  // empty starter, pull the frozen sync-code backup and restore it. Runs once,
-  // never overwrites real data (only fires when current data is empty).
-  // TODO: remove the hardcoded "123" once the owner has confirmed recovery.
+  // One-time auto-recovery for the OWNER ONLY: if signed in and the account is
+  // the empty starter, pull the frozen sync-code backup and restore it. Gated
+  // to the owner's email — without this gate, every brand-new user's empty
+  // account would get the owner's personal backup restored into it.
+  // TODO: remove entirely once the owner has confirmed recovery.
+  const isOwner = !!(window._user && (window._user.email || "").toLowerCase() === "feroakdemir@gmail.com");
   const autoRecoverTried = useRef(false);
   useEffect(() => {
     if (!data || loading || autoRecoverTried.current) return;
-    if (!window._user || !window._fetchSyncDoc) return;
+    if (!isOwner || !window._fetchSyncDoc) return;
     if (localStorage.getItem("dg-autorecover-v1")) return;
     const cur = allHabits(data.habitSections).length + data.taskLists.reduce((s, l) => s + l.items.length, 0) + Object.keys(data.history || {}).length;
     if (cur > 2) { localStorage.setItem("dg-autorecover-v1", "1"); return; } // already has real data
@@ -1242,6 +1254,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const deleteTaskItem = useCallback((listId, taskId) => {
     setData((prev) => {
@@ -1249,6 +1262,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const deleteCompletedEntry = useCallback((listId, entryId) => {
     setData((prev) => {
@@ -1256,6 +1270,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const addTaskItem = useCallback((listId, name, points) => {
     setData((prev) => {
@@ -1264,6 +1279,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const reorderTask = useCallback((listId, fromIndex, toIndex) => {
     setData((prev) => {
@@ -1277,6 +1293,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const reorderTaskList = useCallback((fromIdx, toIdx) => {
     if (fromIdx === toIdx) return;
@@ -1288,6 +1305,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
   const openEditTask = useCallback((listId, task) => {
     setEditTaskCtx({ listId, itemId: task.id });
@@ -1339,6 +1357,7 @@ function DailyGrind() {
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
+    setHasSavedData(true);
   }, []);
 
   function addNewList() {
@@ -1348,7 +1367,7 @@ function DailyGrind() {
     setNewListName(""); setShowNewList(false); setNewListRepeats(false);
   }
   function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save({ ...data, dailyGoal: v }); setGoalInput(String(v)); setView("main"); }
-  function resetAll() { save(mkDefault()); setGoalInput("200"); setView("main"); setPage("habits"); }
+  function resetAll() { save({ ...mkDefault(), resetStamp: Date.now() }); setGoalInput("200"); setView("main"); setPage("habits"); }
   function recoverFromSyncCode(code) {
     (async () => {
       const c = (code || "").trim();
@@ -2542,7 +2561,7 @@ function DailyGrind() {
       </div>}
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <label style={S.lbl}>Recover lost data</label>
-        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>If your habits/tasks ever disappear, your old backup code is pre-filled below — just tap Recover to pull everything back from the cloud.</div>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>If you used a sync code before creating your account, enter it here to pull that data into your account.</div>
         <div style={{ display: "flex", gap: 8 }}>
           <input style={{ ...S.inp, flex: 1 }} value={recoverCode} onChange={(e) => setRecoverCode(e.target.value.trim())} placeholder="backup code" />
           <button onClick={() => recoverFromSyncCode(recoverCode)} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Recover</button>
