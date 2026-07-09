@@ -18,7 +18,29 @@
   <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231a1a2e'/%3E%3Ctext x='50' y='68' font-size='55' text-anchor='middle' font-weight='900' font-family='monospace' fill='%237c3aed'%3EG%3C/text%3E%3C/svg%3E" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #f5f5f7; overflow-x: hidden; }
+    html { background: #0b0b14; }
+    body { background: #0b0b14; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
+    ::selection { background: #7c3aed66; color: #fff; }
+    /* dialed-in scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: #0b0b14; }
+    ::-webkit-scrollbar-thumb { background: #2d2d3a; border-radius: 5px; border: 2px solid #0b0b14; }
+    ::-webkit-scrollbar-thumb:hover { background: #3d3d4e; }
+    /* every press feels physical */
+    button { transition: transform 0.1s ease, opacity 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; }
+    button:active { transform: scale(0.96); }
+    /* inputs light up when you're in them */
+    input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 3px #7c3aed26 !important; }
+    /* kill the default number spinners (they scream "unstyled") */
+    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    /* full-screen moments pop instead of appearing */
+    @keyframes overlayPop { 0% { opacity: 0; transform: scale(1.04); } 100% { opacity: 1; transform: scale(1); } }
+    .overlay-pop { animation: overlayPop 0.35s cubic-bezier(0.22, 1, 0.36, 1); }
+    /* XP bar has a living shimmer */
+    @keyframes xpShimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+    .xp-fill { background-size: 200% 100% !important; animation: xpShimmer 3s linear infinite; }
+    @media (prefers-reduced-motion: reduce) { .overlay-pop, .xp-fill { animation: none; } }
   </style>
 </head>
 <body>
@@ -1605,7 +1627,7 @@ function DailyGrind() {
   const Nav = () => (
     <div style={S.nav}>
       {[["habits", "Habits"], ["tasks", "Tasks"], ["timer", "Timer"], ["calendar", "Cal"]].map(([k, lb]) => (
-        <button key={k} onClick={() => { setPage(k); setView("main"); }} style={{ ...S.navBtn, opacity: page === k ? 1 : 0.4, color: page === k ? "#a78bfa" : "#e2e2ea" }}>
+        <button key={k} onClick={() => { setPage(k); setView("main"); }} style={{ ...S.navBtn, opacity: page === k ? 1 : 0.45, color: page === k ? "#a78bfa" : "#e2e2ea", background: page === k ? "linear-gradient(180deg,#7c3aed24,transparent)" : "none", boxShadow: page === k ? "inset 0 2px 0 #7c3aed" : "none" }}>
           {navIcons[k]}
           <span style={S.navLbl}>{lb}</span>
         </button>
@@ -1618,8 +1640,8 @@ function DailyGrind() {
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
       <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : S.box}>
-        {page !== "calendar" && winAnim && <div style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
-        {page !== "calendar" && levelUpAnim && !winAnim && <div style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b22 0%,#f5f5f7ee 60%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#d97706", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
+        {page !== "calendar" && winAnim && <div className="overlay-pop" style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
+        {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
 
         {page !== "calendar" && <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
@@ -1652,7 +1674,7 @@ function DailyGrind() {
             <span style={{ fontSize: 12, fontWeight: 900, color: "#ffd43b", letterSpacing: 1, whiteSpace: "nowrap" }}>LVL {lvl.level}</span>
             <span style={{ fontSize: 8, fontWeight: 800, color: "#8b8b9e", letterSpacing: 2, whiteSpace: "nowrap" }}>{rankForLevel(lvl.level)}</span>
             <div style={{ flex: 1, height: 4, background: "#2d2d3a", borderRadius: 2, overflow: "hidden" }}>
-              <div style={{ width: `${Math.min(100, (lvl.intoLevel / lvl.needed) * 100)}%`, height: "100%", background: "linear-gradient(90deg,#ffd43b,#ff922b)", borderRadius: 2, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" }} />
+              <div className="xp-fill" style={{ width: `${Math.min(100, (lvl.intoLevel / lvl.needed) * 100)}%`, height: "100%", background: "linear-gradient(90deg,#ffd43b,#ff922b,#ffd43b)", borderRadius: 2, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" }} />
             </div>
             <span style={{ fontSize: 9, color: "#555566", whiteSpace: "nowrap" }}>{lvl.intoLevel}/{lvl.needed} XP</span>
           </div>
@@ -2209,57 +2231,57 @@ function DailyGrind() {
                 return (
                   <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
                     onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}>
-                    <div style={{ background: "#fff", borderRadius: 14, maxWidth: 360, width: "100%", overflow: "hidden", boxShadow: "0 8px 32px #00000044" }}
+                    <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, maxWidth: 360, width: "100%", overflow: "hidden", boxShadow: "0 12px 40px #000000aa" }}
                       onClick={(e) => e.stopPropagation()}>
                       {/* Color bar top */}
                       <div style={{ height: 6, background: evt.color || "#4fc3f7" }} />
                       {/* Action bar */}
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: "10px 14px 0" }}>
                         <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); }}
-                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u270E"}</button>
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
                           else { deleteCalEvent(evt.id); setCalSelectedEvent(null); setCalDeleteConfirm(false); }
-                        }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
+                        }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
                         <button onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
-                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#555", padding: "4px 8px" }}>{"\u2715"}</button>
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u2715"}</button>
                       </div>
                       {/* Content */}
                       <div style={{ padding: "4px 20px 20px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                           <div style={{ width: 14, height: 14, borderRadius: 4, background: evt.color || "#4fc3f7", flexShrink: 0 }} />
-                          <h3 style={{ fontSize: 20, fontWeight: 600, color: "#1a1a2e", margin: 0 }}>{evt.title}</h3>
+                          <h3 style={{ fontSize: 20, fontWeight: 700, color: "#f0f0f4", margin: 0 }}>{evt.title}</h3>
                         </div>
-                        <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
+                        <div style={{ fontSize: 13, color: "#8b8b9e", marginBottom: 4 }}>
                           {dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} {"\u00B7"} {fmtTime(evt.start)} - {fmtTime(evt.end)}
                         </div>
                         {repeatLabel && <div style={{ fontSize: 12, color: "#7c3aed", marginBottom: 8 }}>{"\u21BB"} {repeatLabel}</div>}
                         {evt.desc && (
-                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #eee" }}>
+                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                               <span style={{ fontSize: 14 }}>{"\u2630"}</span>
-                              <span style={{ fontSize: 12, color: "#888" }}>Description</span>
+                              <span style={{ fontSize: 12, color: "#8b8b9e" }}>Description</span>
                             </div>
-                            <div style={{ fontSize: 13, color: "#333", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{evt.desc}</div>
+                            <div style={{ fontSize: 13, color: "#c9c9d4", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{evt.desc}</div>
                           </div>
                         )}
                         {calDeleteConfirm && (
-                          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #eee", display: "flex", flexDirection: "column", gap: 8 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 2 }}>Delete recurring event</div>
+                          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #2d2d3a", display: "flex", flexDirection: "column", gap: 8 }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: "#ff4757", marginBottom: 2 }}>Delete recurring event</div>
                             <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
-                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #e0e0e0", background: "#fff", cursor: "pointer", fontSize: 13, color: "#333", textAlign: "left" }}>
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #2d2d3a", background: "#12122a", cursor: "pointer", fontSize: 13, color: "#e2e2ea", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This event
                             </button>
                             <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, undefined, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
-                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ffe0b2", background: "#fff8e1", cursor: "pointer", fontSize: 13, color: "#9a6300", textAlign: "left" }}>
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #fbbf2440", background: "#fbbf2414", cursor: "pointer", fontSize: 13, color: "#fbbf24", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This and following events
                             </button>
                             <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, true); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
-                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ffcdd2", background: "#ffebee", cursor: "pointer", fontSize: 13, color: "#c62828", textAlign: "left" }}>
+                              style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ff475740", background: "#ff475714", cursor: "pointer", fontSize: 13, color: "#ff4757", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} All events
                             </button>
                             <button onClick={() => setCalDeleteConfirm(false)}
-                              style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "none", cursor: "pointer", fontSize: 12, color: "#888", textAlign: "center" }}>
+                              style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "none", cursor: "pointer", fontSize: 12, color: "#8b8b9e", textAlign: "center" }}>
                               Cancel
                             </button>
                           </div>
@@ -2576,20 +2598,20 @@ function DailyGrind() {
 }
 
 const S = {
-  shell: { minHeight: "100vh", background: "#f5f5f7", color: "#1a1a2e", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',monospace" },
+  shell: { minHeight: "100vh", background: "#0b0b14", color: "#e2e2ea", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',monospace" },
   box: { padding: "16px 14px", maxWidth: 900, margin: "0 auto", paddingBottom: 80 },
-  title: { fontSize: 18, fontWeight: 900, letterSpacing: 6, margin: 0, color: "#1a1a2e" },
+  title: { fontSize: 18, fontWeight: 900, letterSpacing: 6, margin: 0, color: "#f0f0f4", textShadow: "0 0 24px #7c3aed55" },
   date: { fontSize: 11, color: "#8b8b9e", letterSpacing: 1, marginTop: 4, textTransform: "uppercase" },
-  streakB: { fontSize: 13, fontWeight: 700, color: "#d97706", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 20, padding: "4px 12px" },
-  gear: { background: "none", border: "1px solid #2d2d3a", color: "#2d2d3a", fontSize: 16, width: 34, height: 34, borderRadius: 8, cursor: "pointer" },
-  sc: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "20px 18px", marginBottom: 24, boxShadow: "0 1px 3px #0000000a" },
+  streakB: { fontSize: 13, fontWeight: 700, color: "#fbbf24", background: "#fbbf2414", border: "1px solid #fbbf2440", borderRadius: 20, padding: "4px 12px" },
+  gear: { background: "#12122a", border: "1px solid #2d2d3a", color: "#8b8b9e", fontSize: 16, width: 34, height: 34, borderRadius: 8, cursor: "pointer" },
+  sc: { background: "linear-gradient(160deg, #1a1a2e 0%, #16162a 100%)", border: "1px solid #7c3aed2e", borderRadius: 16, padding: "20px 18px", marginBottom: 24, boxShadow: "0 0 40px #7c3aed14, 0 8px 24px #00000066" },
   tr: { height: 6, background: "#2d2d3a", borderRadius: 3, overflow: "hidden" },
   fl: { height: "100%", borderRadius: 3, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" },
   secH: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0 10px", borderBottom: "1px solid #2d2d3a", marginBottom: 10 },
-  secLbl: { fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#1a1a2e", textTransform: "uppercase" },
+  secLbl: { fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#c9c9d4", textTransform: "uppercase" },
   secCnt: { fontSize: 10, color: "#8b8b9e", background: "#2d2d3a", borderRadius: 10, padding: "2px 7px", fontWeight: 700 },
   secPt: { fontSize: 12, color: "#7c3aed", fontWeight: 700 },
-  card: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "14px 16px 16px", marginBottom: 10, boxShadow: "0 1px 3px #0000000a" },
+  card: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "14px 16px 16px", marginBottom: 10, boxShadow: "0 4px 18px #00000055" },
   cardHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", cursor: "pointer", marginBottom: 4 },
   cardName: { fontSize: 14, fontWeight: 700, color: "#f0f0f4", lineHeight: 1.3 },
   cardPts: { fontSize: 13, fontWeight: 800, color: "#a78bfa", flexShrink: 0, marginLeft: 8 },
@@ -2609,7 +2631,7 @@ const S = {
   addR: { display: "flex", alignItems: "center", gap: 8, width: "100%", background: "none", border: "1px dashed #2d2d3a55", borderRadius: 8, padding: "10px 12px", color: "#555566", fontSize: 12, cursor: "pointer", fontFamily: "inherit", marginTop: 6, letterSpacing: 1 },
   addI: { color: "#7c3aed", fontSize: 16, fontWeight: 700 },
 
-  taskList: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "16px", marginBottom: 12, boxShadow: "0 1px 3px #0000000a" },
+  taskList: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "16px", marginBottom: 12, boxShadow: "0 4px 18px #00000055" },
   tlHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid #2d2d3a", paddingBottom: 10 },
   tlTitle: { fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 },
   tlDel: { background: "none", border: "none", color: "#555566", fontSize: 20, cursor: "pointer", fontFamily: "inherit", padding: "0 4px", lineHeight: 1 },
@@ -2624,7 +2646,7 @@ const S = {
   tAddPts: { width: 48, background: "none", border: "none", borderBottom: "1px solid #2d2d3a", color: "#a78bfa", fontSize: 12, fontFamily: "inherit", padding: "8px 4px", outline: "none", textAlign: "center" },
   compToggle: { background: "none", border: "none", color: "#8b8b9e", fontSize: 11, cursor: "pointer", fontFamily: "inherit", padding: "10px 0 4px", letterSpacing: 1, fontWeight: 600, display: "flex", alignItems: "center" },
 
-  fCard: { background: "#1a1a2e", borderRadius: 14, padding: "28px 22px", marginTop: 40, border: "1px solid #2d2d3a", boxShadow: "0 1px 3px #0000000a" },
+  fCard: { background: "#1a1a2e", borderRadius: 16, padding: "28px 22px", marginTop: 40, border: "1px solid #2d2d3a", boxShadow: "0 8px 28px #00000066" },
   fTitle: { fontSize: 13, fontWeight: 900, letterSpacing: 4, margin: "0 0 20px 0", color: "#f0f0f4" },
   lbl: { fontSize: 9, fontWeight: 800, letterSpacing: 3, color: "#8b8b9e", textTransform: "uppercase", display: "block", marginBottom: 6, marginTop: 14 },
   inp: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 14, fontFamily: "inherit", outline: "none", boxSizing: "border-box" },
@@ -2636,8 +2658,8 @@ const S = {
   nav: { position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", background: "#1a1a2eee", borderTop: "1px solid #2d2d3a", zIndex: 100, backdropFilter: "blur(10px)", padding: "4px 0 env(safe-area-inset-bottom, 6px)" },
   navBtn: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "10px 0 6px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", transition: "opacity 0.2s" },
   navLbl: { fontSize: 9, fontWeight: 700, letterSpacing: 2, color: "#e2e2ea", textTransform: "uppercase" },
-  win: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "radial-gradient(circle at center,#00ff8722 0%,#f5f5f7ee 60%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999, pointerEvents: "none" },
-  winTxt: { fontSize: 24, fontWeight: 900, letterSpacing: 8, color: "#16a34a", textShadow: "0 0 40px #00ff8744" },
+  win: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "radial-gradient(circle at center,#00ff8726 0%,#0b0b14f2 62%)", backdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999, pointerEvents: "none" },
+  winTxt: { fontSize: 24, fontWeight: 900, letterSpacing: 8, color: "#00ff87", textShadow: "0 0 40px #00ff8766" },
   winSub: { fontSize: 13, color: "#8b8b9e", marginTop: 8, letterSpacing: 2 },
 };
 
