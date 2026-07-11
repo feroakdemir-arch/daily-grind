@@ -1026,6 +1026,9 @@ function DailyGrind() {
   const [storeBuyAnim, setStoreBuyAnim] = useState(null);
   const [storeName, setStoreName] = useState("");
   const [storePrice, setStorePrice] = useState("");
+  const [editStoreId, setEditStoreId] = useState(null);
+  const [editStoreName, setEditStoreName] = useState("");
+  const [editStorePrice, setEditStorePrice] = useState("");
   const [winAnim, setWinAnim] = useState(false);
   const [levelUpAnim, setLevelUpAnim] = useState(null);
   const prevLevelRef = useRef(null);
@@ -1432,6 +1435,20 @@ function DailyGrind() {
   }
   function deleteStoreItem(id) {
     save({ ...data, storeItems: (data.storeItems || []).filter((i) => i.id !== id) });
+  }
+  function startStoreEdit(item) {
+    setEditStoreId(item.id);
+    setEditStoreName(item.name);
+    setEditStorePrice(String(item.price));
+  }
+  function saveStoreEdit() {
+    const name = editStoreName.trim();
+    const price = Math.max(10, parseInt(editStorePrice) || 0);
+    if (!name || !parseInt(editStorePrice)) { alert("Reward needs a name and a price."); return; }
+    // Items may still be the unsaved defaults — persist the whole list with the edit applied
+    const items = (data.storeItems || mkStoreDefaults(data.dailyGoal)).map((i) => i.id === editStoreId ? { ...i, name, price } : i);
+    save({ ...data, storeItems: items });
+    setEditStoreId(null);
   }
   function recoverFromSyncCode(code) {
     (async () => {
@@ -2588,12 +2605,23 @@ function DailyGrind() {
       </div>
       {items.map((item) => {
         const affordable = walletBalance >= item.price;
+        if (editStoreId === item.id) {
+          return (
+            <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0", borderBottom: "1px solid #2d2d3a" }}>
+              <input style={{ ...S.inp, flex: 2, padding: "9px 11px" }} value={editStoreName} onChange={(e) => setEditStoreName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") saveStoreEdit(); }} autoFocus />
+              <input style={{ ...S.inp, flex: 1, padding: "9px 11px" }} type="number" value={editStorePrice} onChange={(e) => setEditStorePrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") saveStoreEdit(); }} />
+              <button onClick={saveStoreEdit} style={{ padding: "9px 14px", borderRadius: 9, border: "none", background: "#4cd137", color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{"✓"}</button>
+              <button onClick={() => setEditStoreId(null)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid #2d2d3a", background: "none", color: "#8b8b9e", fontSize: 13, fontWeight: 900, cursor: "pointer", fontFamily: "inherit" }}>{"✕"}</button>
+            </div>
+          );
+        }
         return (
           <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0", borderBottom: "1px solid #2d2d3a" }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#f0f0f4" }}>{item.name}</div>
               <div style={{ fontSize: 10, color: affordable ? "#00d9ff" : "#555566", fontWeight: 700, marginTop: 2 }}>{item.price.toLocaleString()} pts</div>
             </div>
+            <button onClick={() => startStoreEdit(item)} title="Edit reward" style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#8b8b9e", padding: "2px 6px", fontFamily: "inherit" }}>{"✎"}</button>
             <button onClick={() => buyStoreItem(item, walletBalance)} disabled={!affordable}
               style={{ padding: "9px 18px", borderRadius: 9, border: "none", background: affordable ? "linear-gradient(135deg,#00d9ff,#0abde3)" : "#2d2d3a", color: affordable ? "#0b0b14" : "#555566", fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: affordable ? "pointer" : "default", fontFamily: "inherit" }}>
               {affordable ? "BUY" : "LOCKED"}
