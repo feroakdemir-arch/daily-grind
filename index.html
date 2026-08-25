@@ -471,7 +471,76 @@ function fmtDoneDate(d) {
   catch (e) { return ""; }
 }
 
-function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList, onDeleteCompleted }) {
+function taskElapsedSeconds(task, now = Date.now()) {
+  const saved = Math.max(0, Number(task.trackedSeconds) || 0);
+  const startedAt = Number(task.timerStartedAt);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return saved;
+  return saved + Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
+function stopTaskTimer(task, now = Date.now()) {
+  if (!task.timerStartedAt) return task;
+  const stopped = { ...task, trackedSeconds: taskElapsedSeconds(task, now) };
+  delete stopped.timerStartedAt;
+  return stopped;
+}
+
+function fmtTaskDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function TaskWorkTimer({ task, onToggle }) {
+  const startedAt = Number(task.timerStartedAt);
+  const running = Number.isFinite(startedAt) && startedAt > 0;
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    setNow(Date.now());
+    if (!running) return;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [running, startedAt]);
+
+  const elapsed = taskElapsedSeconds(task, now);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5, minHeight: 22 }}>
+      <button
+        onClick={onToggle}
+        aria-label={`${running ? "Stop" : "Start"} timer for ${task.name}`}
+        aria-pressed={running}
+        title={running ? "Stop tracking time" : "Start tracking time"}
+        style={{
+          background: running ? "#ff47571c" : "#00ff8714",
+          border: `1px solid ${running ? "#ff475766" : "#00ff874d"}`,
+          borderRadius: 6,
+          color: running ? "#ff6b78" : "#00ff87",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          fontSize: 9,
+          fontWeight: 900,
+          letterSpacing: 1,
+          padding: "4px 7px",
+          lineHeight: 1,
+          flexShrink: 0,
+        }}
+      >
+        {running ? "■ STOP" : "▶ START"}
+      </button>
+      <span style={{ color: running ? "#00ff87" : "#8b8b9e", fontSize: 10, fontWeight: 800, letterSpacing: 0.8, fontVariantNumeric: "tabular-nums" }}>
+        {running && <span aria-hidden="true" style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#00ff87", boxShadow: "0 0 8px #00ff87", marginRight: 6 }} />}
+        {fmtTaskDuration(elapsed)}
+      </span>
+    </div>
+  );
+}
+
+function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList, onDeleteCompleted }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
@@ -542,8 +611,8 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
   const pending = list.items.filter((t) => !t.done);
   // Completed = live done tasks (can be un-checked) + archived history from past
   // daily resets (read-only). Merged + sorted newest-first, paginated 10 at a time.
-  const completedLive = list.items.filter((t) => t.done).map((t) => ({ key: t.id, taskId: t.id, name: t.name, points: t.points, date: t.doneDate, live: true }));
-  const completedArchived = (list.completedLog || []).map((e) => ({ key: e.id, name: e.name, points: e.points, date: e.date, live: false }));
+  const completedLive = list.items.filter((t) => t.done).map((t) => ({ key: t.id, taskId: t.id, name: t.name, points: t.points, date: t.doneDate, trackedSeconds: taskElapsedSeconds(t), live: true }));
+  const completedArchived = (list.completedLog || []).map((e) => ({ key: e.id, name: e.name, points: e.points, date: e.date, trackedSeconds: Math.max(0, Number(e.trackedSeconds) || 0), live: false }));
   const completedAll = [...completedLive, ...completedArchived].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const completedView = completedAll.slice(0, completedShown);
 
@@ -667,8 +736,13 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
             title="Drag to reorder"
           >{"\u22ee"}</span>
           <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
-          <span style={S.tText}>{t.name}</span>
-          {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ marginLeft: 6, padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span style={{ ...S.tText, flex: "0 1 auto" }}>{t.name}</span>
+              {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
+            </div>
+            <TaskWorkTimer task={t} onToggle={() => onToggleTimer(list.id, t.id)} />
+          </div>
           {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
           <button onClick={() => onEdit && onEdit(list.id, t)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#8b8b9e", padding: "2px 6px", fontFamily: "inherit" }} title="Edit task">{"\u270e"}</button>
           <button onClick={() => onDelete(list.id, t.id)} style={S.tX}>&times;</button>
@@ -700,7 +774,10 @@ function TaskListCard({ list, listIdx, onToggle, onDelete, onDeleteList, onAdd, 
               </button>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e", display: "block" }}>{c.name}</span>
-                {c.date && <span style={{ fontSize: 9, color: "#555566", letterSpacing: 0.5 }}>Completed: {fmtDoneDate(c.date)}</span>}
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 }}>
+                  {c.date && <span style={{ fontSize: 9, color: "#555566", letterSpacing: 0.5 }}>Completed: {fmtDoneDate(c.date)}</span>}
+                  {c.trackedSeconds > 0 && <span style={{ fontSize: 9, color: "#00b86b", letterSpacing: 0.5 }}>⏱ {fmtTaskDuration(c.trackedSeconds)} worked</span>}
+                </div>
               </div>
               {c.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be", marginTop: 2 }}>+{c.points}</span>}
               <button onClick={() => { if (c.live) onDelete(list.id, c.taskId); else onDeleteCompleted(list.id, c.key); }} style={{ ...S.tX, marginTop: 2 }}>&times;</button>
@@ -1195,8 +1272,14 @@ function DailyGrind() {
           // Archive each completed daily task into history, then reset for the new day.
           const archived = l.items.filter((t) => t.done).map((t) => ({
             id: `c_${t.id}_${t.doneDate || yday}`, name: t.name, points: t.points, date: t.doneDate || yday,
+            trackedSeconds: taskElapsedSeconds(t),
           }));
-          return { ...l, completedLog: [...archived, ...(l.completedLog || [])], items: l.items.map((t) => ({ ...t, done: false, doneDate: undefined })) };
+          return { ...l, completedLog: [...archived, ...(l.completedLog || [])], items: l.items.map((t) => {
+            const reset = { ...t, done: false, trackedSeconds: 0 };
+            delete reset.doneDate;
+            delete reset.timerStartedAt;
+            return reset;
+          }) };
         }
         // Non-daily: keep completed items in place; stamp legacy done tasks with a date.
         return { ...l, items: l.items.map((t) => (t.done && !t.doneDate) ? { ...t, doneDate: yday } : t) };
@@ -1296,7 +1379,36 @@ function DailyGrind() {
 
   const toggleTask = useCallback((listId, taskId) => {
     setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => t.id === taskId ? { ...t, done: !t.done, doneDate: !t.done ? getToday(prev.dayResetHour || 0) : undefined } : t) } : l) };
+      const now = Date.now();
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => {
+        if (t.id !== taskId) return t;
+        const nextDone = !t.done;
+        const timed = nextDone ? stopTaskTimer(t, now) : t;
+        const updated = { ...timed, done: nextDone };
+        if (nextDone) updated.doneDate = getToday(prev.dayResetHour || 0); else delete updated.doneDate;
+        return updated;
+      }) } : l) };
+      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
+      return nd;
+    });
+    setHasSavedData(true);
+  }, []);
+  const toggleTaskTimer = useCallback((listId, taskId) => {
+    setData((prev) => {
+      const now = Date.now();
+      const target = prev.taskLists.find((l) => l.id === listId)?.items.find((t) => t.id === taskId);
+      if (!target || target.done) return prev;
+      const targetIsRunning = !!target.timerStartedAt;
+      const nd = { ...prev, taskLists: prev.taskLists.map((l) => ({
+        ...l,
+        items: l.items.map((t) => {
+          if (t.id === taskId && l.id === listId) {
+            if (targetIsRunning) return stopTaskTimer(t, now);
+            return { ...t, timerStartedAt: now, trackedSeconds: Math.max(0, Number(t.trackedSeconds) || 0) };
+          }
+          return targetIsRunning ? t : stopTaskTimer(t, now);
+        }),
+      })) };
       window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
       return nd;
     });
@@ -1834,7 +1946,7 @@ function DailyGrind() {
         {page === "tasks" && (
           <div data-tasklists-container>
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
