@@ -95,6 +95,11 @@
     window._signOut = async () => {
       localStorage.removeItem("dg-was-signed-in");
       await fbAuth.signOut();
+      // Signing out must also remove this account's device cache. The cloud
+      // copy is untouched; this only prevents another person on the same
+      // browser from seeing or accidentally merging the previous account.
+      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code"]
+        .forEach((key) => localStorage.removeItem(key));
     };
 
     // Sync code - stored in localStorage, shared across devices
@@ -149,6 +154,28 @@
       } catch (e) { console.warn("fetchSyncDoc failed:", e); return null; }
     };
 
+    const _cloudWriteQueues = {};
+    const _pendingStorageWrites = {};
+    const _storageStatusListeners = new Set();
+    function _emitStorageStatus(state, key, error) {
+      const detail = { state, key, at: Date.now(), error: error ? String(error.message || error) : "" };
+      _storageStatusListeners.forEach((listener) => { try { listener(detail); } catch (e) {} });
+    }
+    function _nextLocalTs(key) {
+      const stored = parseInt(localStorage.getItem(key + "_ts") || "0");
+      const last = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
+      return Math.max(Date.now(), stored + 1, last + 1);
+    }
+    function _queueCloudWrite(key, ref, payload) {
+      const previous = _cloudWriteQueues[key] || Promise.resolve();
+      const next = previous.catch(() => {}).then(() => ref.set(payload));
+      const tracked = next.finally(() => {
+        if (_cloudWriteQueues[key] === tracked) delete _cloudWriteQueues[key];
+      });
+      _cloudWriteQueues[key] = tracked;
+      return tracked;
+    }
+
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
     window.storage = {
@@ -156,17 +183,40 @@
         try {
           const raw = localStorage.getItem(key);
           const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
-          const localData = raw !== null ? { key, value: raw } : null;
+          let localData = raw !== null ? { key, value: raw } : null;
 
-          if (_cloudPossible()) {
-            await _fbReady;
-            const ref = _docRef(key);
-            if (ref) try {
+          // Always let Firebase restore its existing session before deciding
+          // whether this is a cloud-backed account. Without this wait, a fast
+          // page load can briefly look signed out and show an empty starter.
+          await _fbReady;
+          const ref = _docRef(key);
+
+          const owner = localStorage.getItem("dg-owner");
+          const ident = _identity();
+          const ownerIsUser = !!(owner && owner.indexOf("uid:") === 0);
+          const identIsUser = ident.indexOf("uid:") === 0;
+          if (localData && ownerIsUser && (!identIsUser || owner !== ident)) {
+            localStorage.removeItem(key);
+            localStorage.removeItem(key + "_ts");
+            localData = null;
+          }
+
+          if (ref) {
+            try {
               const doc = await ref.get();
               if (doc.exists) {
                 const fbData = doc.data();
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
+                if (typeof fbValue !== "string") {
+                  console.warn("Cloud data is invalid for", key);
+                  if (!localData) return { error: true };
+                  const healTs = Math.max(localTs, fbTs, Date.now()) + 1;
+                  localStorage.setItem(key + "_ts", String(healTs));
+                  window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
+                  _queueCloudWrite(key, ref, { value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                  return localData;
+                }
                 // SAFETY (main data only): never let the empty starter clobber real
                 // data, and let real data restore over an empty starter — no matter
                 // the timestamps. This is what prevents the cross-device wipe bug.
@@ -179,7 +229,7 @@
                       localStorage.setItem(key + "_ts", String(healTs));
                       localStorage.setItem("dg-owner", _identity());
                       window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
-                      ref.set({ value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                      _queueCloudWrite(key, ref, { value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
                       return localData;
                     }
                     if (rl <= 2 && rc >= rl + 3) {
@@ -197,7 +247,7 @@
                 // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
                 if (localTs > fbTs && localData) {
                   // Local has unsynced changes — push to cloud
-                  ref.set({ value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                  _queueCloudWrite(key, ref, { value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
                   return localData;
                 }
                 // Otherwise, cloud wins
@@ -213,8 +263,6 @@
                 // migrates into a fresh account on first sign-in).
                 // EXCEPT: if the local data belongs to a DIFFERENT signed-in
                 // account, start this account clean instead of importing it.
-                const owner = localStorage.getItem("dg-owner");
-                const ident = _identity();
                 if (owner && owner.indexOf("uid:") === 0 && owner !== ident) {
                   localStorage.removeItem(key);
                   localStorage.removeItem(key + "_ts");
@@ -222,7 +270,7 @@
                 }
                 const pushTs = localTs || Date.now();
                 localStorage.setItem(key + "_ts", String(pushTs));
-                await ref.set({ value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                await _queueCloudWrite(key, ref, { value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
                 localStorage.setItem("dg-owner", ident);
               }
             } catch (e) {
@@ -234,28 +282,50 @@
             }
           }
           return localData;
-        } catch { return null; }
+        } catch (e) {
+          console.warn("Storage get failed:", e);
+          return { error: true };
+        }
       },
       async set(key, value) {
+        let ts;
         try {
-          const ts = Date.now();
+          ts = _nextLocalTs(key);
           localStorage.setItem(key, value);
           localStorage.setItem(key + "_ts", String(ts));
           window._lastLocalTs = window._lastLocalTs || {};
           window._lastLocalTs[key] = ts;
+        } catch (e) {
+          _emitStorageStatus("error", key, e);
+          throw e;
+        }
 
-          if (_cloudPossible()) {
-            await _fbReady;
+        _pendingStorageWrites[key] = (_pendingStorageWrites[key] || 0) + 1;
+        _emitStorageStatus("saving", key);
+        try {
+          await _fbReady;
+          const ref = _docRef(key);
+          if (ref) {
             localStorage.setItem("dg-owner", _identity());
-            const ref = _docRef(key);
-            if (ref) ref.set({
+            await _queueCloudWrite(key, ref, {
               value: value,
               localTs: ts,
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-            }).catch((e) => console.warn("Firestore set failed:", e));
+            });
           }
+          _pendingStorageWrites[key] = Math.max(0, (_pendingStorageWrites[key] || 1) - 1);
+          if (!Object.values(_pendingStorageWrites).some((count) => count > 0)) _emitStorageStatus("saved", key);
           return { key, value };
-        } catch { return null; }
+        } catch (e) {
+          console.warn("Firestore set failed:", e);
+          _pendingStorageWrites[key] = Math.max(0, (_pendingStorageWrites[key] || 1) - 1);
+          _emitStorageStatus("error", key, e);
+          throw e;
+        }
+      },
+      onStatus(callback) {
+        _storageStatusListeners.add(callback);
+        return () => _storageStatusListeners.delete(callback);
       },
       // Subscribe to real-time cloud updates for a key
       subscribe(key, callback) {
@@ -281,8 +351,10 @@
                   const rc = _mainRichness(d.value), rl = localRaw !== null ? _mainRichness(localRaw) : null;
                   if (rc !== null && rl !== null && rc <= 2 && rl >= rc + 3) return;
                 }
+                if (typeof d.value !== "string") return;
                 localStorage.setItem(key, d.value);
                 localStorage.setItem(key + "_ts", String(fbTs));
+                localStorage.setItem("dg-owner", _identity());
                 try { callback(d.value); } catch(e) { console.warn(e); }
               }
             }, (err) => console.warn("Firestore subscribe failed:", err));
@@ -315,6 +387,31 @@ const mkDefault = () => ({
   taskLists: JSON.parse(JSON.stringify(DEFAULT_TASK_LISTS)),
   dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
+
+function parseMainData(raw) {
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
+    throw new Error("Saved Daily Grind data has an invalid shape");
+  }
+  return {
+    ...parsed,
+    habitSections: parsed.habitSections.map((section) => ({ ...section, items: Array.isArray(section.items) ? section.items : [] })),
+    taskLists: parsed.taskLists.map((list) => ({
+      ...list,
+      items: Array.isArray(list.items) ? list.items : [],
+      completedLog: Array.isArray(list.completedLog) ? list.completedLog : [],
+    })),
+    log: parsed.log && typeof parsed.log === "object" ? parsed.log : {},
+    history: parsed.history && typeof parsed.history === "object" ? parsed.history : {},
+  };
+}
+
+function makeId(prefix) {
+  const random = (window.crypto && window.crypto.getRandomValues)
+    ? Array.from(window.crypto.getRandomValues(new Uint32Array(2)), (n) => n.toString(36)).join("")
+    : Math.random().toString(36).slice(2);
+  return `${prefix}_${Date.now()}_${random}`;
+}
 
 function localDateStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -537,6 +634,22 @@ function TaskWorkTimer({ task, onToggle }) {
         {fmtTaskDuration(elapsed)}
       </span>
     </div>
+  );
+}
+
+function SaveIndicator({ info, onRetry }) {
+  if (!info || info.state === "idle") return null;
+  const isError = info.state === "error";
+  const color = isError ? "#ff6b78" : info.state === "saving" ? "#ffd43b" : "#00b86b";
+  const label = isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
+  return (
+    <button
+      onClick={isError ? onRetry : undefined}
+      title={isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
+      style={{ background: "none", border: "none", color, cursor: isError ? "pointer" : "default", fontFamily: "inherit", fontSize: 8, fontWeight: 800, letterSpacing: 1.2, marginTop: 5, padding: 0 }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -856,32 +969,35 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
 
   function pickStatus(st, dateOverride) {
     const targetDate = dateOverride || pickerDate;
-    const dtl = data.log[targetDate] || {};
-    const ntl = { ...dtl };
-    if (st === undefined) { delete ntl[item.id]; }
-    else ntl[item.id] = st;
-    const nd = { ...data, log: { ...data.log, [targetDate]: ntl } };
-    // Keep that day's archived history score in sync when editing the past
-    const entry = data.history[targetDate];
-    if (entry && targetDate !== today) {
-      const habits = allHabits(data.habitSections);
-      const hsBefore = habits.reduce((sc, h) => sc + (dtl[h.id] === "done" ? h.points : 0), 0);
-      const ts = entry.ts !== undefined ? entry.ts : Math.max(0, (entry.score || 0) - hsBefore);
-      const hsAfter = habits.reduce((sc, h) => sc + (ntl[h.id] === "done" ? h.points : 0), 0);
-      const score = hsAfter + ts;
-      nd.history = { ...data.history, [targetDate]: { ...entry, score, won: score >= (entry.goal || data.dailyGoal), ts } };
-    }
-    save(nd);
+    save((current) => {
+      const dtl = current.log[targetDate] || {};
+      const ntl = { ...dtl };
+      if (st === undefined) { delete ntl[item.id]; }
+      else ntl[item.id] = st;
+      const nd = { ...current, log: { ...current.log, [targetDate]: ntl } };
+      // Keep that day's archived history score in sync when editing the past
+      const entry = current.history[targetDate];
+      if (entry && targetDate !== today) {
+        const habits = allHabits(current.habitSections);
+        const hsBefore = habits.reduce((sc, h) => sc + (dtl[h.id] === "done" ? h.points : 0), 0);
+        const ts = entry.ts !== undefined ? entry.ts : Math.max(0, (entry.score || 0) - hsBefore);
+        const hsAfter = habits.reduce((sc, h) => sc + (ntl[h.id] === "done" ? h.points : 0), 0);
+        const score = hsAfter + ts;
+        nd.history = { ...current.history, [targetDate]: { ...entry, score, won: score >= (entry.goal || current.dailyGoal), ts } };
+      }
+      return nd;
+    });
     if (!dateOverride) { setShowPicker(false); setShowComment(false); }
   }
 
   function saveComment() {
-    const dtl = data.log[pickerDate] || {};
     const trimmed = commentText.trim();
-    const ntl = { ...dtl };
-    if (trimmed) ntl[item.id + "_note"] = trimmed;
-    else delete ntl[item.id + "_note"];
-    save({ ...data, log: { ...data.log, [pickerDate]: ntl } });
+    save((current) => {
+      const ntl = { ...(current.log[pickerDate] || {}) };
+      if (trimmed) ntl[item.id + "_note"] = trimmed;
+      else delete ntl[item.id + "_note"];
+      return { ...current, log: { ...current.log, [pickerDate]: ntl } };
+    });
     setShowComment(false); setShowPicker(false);
   }
 
@@ -1084,6 +1200,10 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
 function DailyGrind() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [saveInfo, setSaveInfo] = useState({ state: "idle", key: "", error: "" });
+  const dataRef = useRef(null);
   const [page, setPage] = useState("habits");
   const [view, setView] = useState("main");
   const [editItem, setEditItem] = useState(null);
@@ -1132,6 +1252,9 @@ function DailyGrind() {
   const [showCalSettings, setShowCalSettings] = useState(false);
   const [calEvents, setCalEvents] = useState([]);
   const [calEventsLoaded, setCalEventsLoaded] = useState(false);
+  const [calLoadError, setCalLoadError] = useState(false);
+  const [calLoadAttempt, setCalLoadAttempt] = useState(0);
+  const calEventsRef = useRef([]);
   const [calView, setCalView] = useState("week");
   const [calAddEvent, setCalAddEvent] = useState(null);
   const [calEventTitle, setCalEventTitle] = useState("");
@@ -1160,33 +1283,75 @@ function DailyGrind() {
   const weekDates = getWeekDates(today);
 
   const [hasSavedData, setHasSavedData] = useState(true);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  useEffect(() => { calEventsRef.current = calEvents; }, [calEvents]);
+  useEffect(() => window.storage.onStatus ? window.storage.onStatus(setSaveInfo) : undefined, []);
+
   useEffect(() => { (async () => {
+    setLoading(true);
+    setLoadError("");
+    let loaded = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         const r = await window.storage.get(STORAGE_KEY);
         if (r && r.error) {
-          // Transient cloud-read failure for a signed-in user — wait and retry
-          // rather than show (and risk saving) the empty starter.
+          // A signed-in account with no safe local cache must never fall back
+          // to an empty starter; that could overwrite real cloud data.
           if (attempt < 3) { await new Promise((res) => setTimeout(res, 700 * (attempt + 1))); continue; }
-          setData(mkDefault()); setHasSavedData(false); break; // gave up; no auto-save will run
+          setLoadError("We couldn't safely load your saved data. Nothing has been overwritten.");
+          break;
         }
-        if (r?.value) { const p = JSON.parse(r.value); setData(p); setGoalInput(String(p.dailyGoal)); }
-        else { setData(mkDefault()); setHasSavedData(false); }
+        if (r?.value) {
+          const parsed = parseMainData(r.value);
+          dataRef.current = parsed;
+          setData(parsed);
+          setGoalInput(String(parsed.dailyGoal || 100));
+          setHasSavedData(true);
+        } else {
+          const starter = mkDefault();
+          dataRef.current = starter;
+          setData(starter);
+          setHasSavedData(false);
+        }
+        loaded = true;
         break;
-      } catch (e) { setData(mkDefault()); setHasSavedData(false); break; }
+      } catch (e) {
+        console.warn("Main data load failed:", e);
+        setLoadError("Your saved data couldn't be read safely. Nothing has been overwritten.");
+        break;
+      }
     }
+    if (!loaded && !dataRef.current) setData(null);
     setLoading(false);
-  })(); }, []);
-  const save = useCallback(async (nd) => { setData(nd); setHasSavedData(true); try { await window.storage.set(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error(e); } }, []);
+  })(); }, [loadAttempt]);
+
+  const save = useCallback((nextOrUpdater) => {
+    const current = dataRef.current;
+    if (!current) return Promise.resolve(null);
+    const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
+    if (!next || typeof next !== "object") return Promise.resolve(null);
+    dataRef.current = next;
+    setData(next);
+    setHasSavedData(true);
+    return window.storage.set(STORAGE_KEY, JSON.stringify(next)).catch((e) => { console.error(e); return null; });
+  }, []);
+
+  const retrySaves = useCallback(() => {
+    const jobs = [];
+    if (dataRef.current) jobs.push(window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)));
+    if (calEventsLoaded && !calLoadError) jobs.push(window.storage.set("dg-cal-events", JSON.stringify(calEventsRef.current)));
+    Promise.allSettled(jobs);
+  }, [calEventsLoaded, calLoadError]);
 
   // Real-time cloud sync subscription for main data
   useEffect(() => {
     if (!window.storage.subscribe) return;
     const unsub = window.storage.subscribe(STORAGE_KEY, (newValue) => {
       try {
-        const parsed = JSON.parse(newValue);
+        const parsed = parseMainData(newValue);
+        dataRef.current = parsed;
         setData(parsed);
-        setGoalInput(String(parsed.dailyGoal));
+        setGoalInput(String(parsed.dailyGoal || 100));
       } catch(e) { console.warn("Live sync parse failed:", e); }
     });
     return unsub;
@@ -1196,7 +1361,13 @@ function DailyGrind() {
   useEffect(() => {
     if (!window.storage.subscribe) return;
     const unsub = window.storage.subscribe("dg-cal-events", (newValue) => {
-      try { setCalEvents(JSON.parse(newValue)); }
+      try {
+        const parsed = JSON.parse(newValue);
+        if (!Array.isArray(parsed)) throw new Error("Invalid calendar data");
+        calEventsRef.current = parsed;
+        setCalEvents(parsed);
+        setCalLoadError(false);
+      }
       catch(e) { console.warn("Cal live sync parse failed:", e); }
     });
     return unsub;
@@ -1208,18 +1379,37 @@ function DailyGrind() {
     (async () => {
       try {
         const r = await window.storage.get("dg-cal-events");
-        if (r?.value) { setCalEvents(JSON.parse(r.value)); }
+        if (r?.error) {
+          setCalLoadError(true);
+          setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar data could not be loaded safely." });
+          setCalEventsLoaded(true);
+          return;
+        }
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          if (!Array.isArray(parsed)) throw new Error("Invalid calendar data");
+          calEventsRef.current = parsed;
+          setCalEvents(parsed);
+        }
         else {
           // Fallback: read raw localStorage if storage.get returned nothing
-          try { const raw = localStorage.getItem("dg-cal-events"); if (raw) setCalEvents(JSON.parse(raw)); } catch {}
+          const raw = localStorage.getItem("dg-cal-events");
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) throw new Error("Invalid local calendar data");
+            calEventsRef.current = parsed;
+            setCalEvents(parsed);
+          }
         }
+        setCalLoadError(false);
       } catch(e) {
         console.warn("Cal sync load failed:", e);
-        try { const raw = localStorage.getItem("dg-cal-events"); if (raw) setCalEvents(JSON.parse(raw)); } catch {}
+        setCalLoadError(true);
+        setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar data could not be loaded safely." });
       }
       setCalEventsLoaded(true);
     })();
-  }, [calEventsLoaded]);
+  }, [calEventsLoaded, calLoadAttempt]);
 
   // Day rollover
   useEffect(() => {
@@ -1296,7 +1486,7 @@ function DailyGrind() {
       // Never let a freshly-loaded empty starter auto-write to the cloud — that
       // was the cross-device wipe. Keep bookkeeping in memory only until the
       // user actually has data (or makes an edit, which saves explicitly).
-      if (hasSavedData) save(updated); else setData(updated);
+      if (hasSavedData) save(updated); else { dataRef.current = updated; setData(updated); }
     }
   }, [data, save, hasSavedData]);
 
@@ -1311,6 +1501,7 @@ function DailyGrind() {
     if (!data || loading || autoRecoverTried.current) return;
     if (!isOwner || !window._fetchSyncDoc) return;
     if (localStorage.getItem("dg-autorecover-v1")) return;
+    if (data.resetStamp) { localStorage.setItem("dg-autorecover-v1", "1"); return; }
     const cur = allHabits(data.habitSections).length + data.taskLists.reduce((s, l) => s + l.items.length, 0) + Object.keys(data.history || {}).length;
     if (cur > 2) { localStorage.setItem("dg-autorecover-v1", "1"); return; } // already has real data
     autoRecoverTried.current = true;
@@ -1333,42 +1524,49 @@ function DailyGrind() {
   const getTL = () => data?.log[today] || {};
 
   function toggleHabit(itemId) {
-    const tl = getTL(); const cur = tl[itemId]; const next = statusCycle[(statusCycle.indexOf(cur) + 1) % statusCycle.length];
-    const ntl = { ...tl }; if (next === undefined) { delete ntl[itemId]; } else ntl[itemId] = next;
-    save({ ...data, log: { ...data.log, [today]: ntl } });
+    save((current) => {
+      const tl = current.log[today] || {};
+      const cur = tl[itemId];
+      const next = statusCycle[(statusCycle.indexOf(cur) + 1) % statusCycle.length];
+      const ntl = { ...tl };
+      if (next === undefined) delete ntl[itemId]; else ntl[itemId] = next;
+      return { ...current, log: { ...current.log, [today]: ntl } };
+    });
   }
   function saveNote(itemId, note) {
-    const tl = getTL();
-    save({ ...data, log: { ...data.log, [today]: { ...tl, [itemId + "_note"]: note } } });
+    save((current) => ({ ...current, log: { ...current.log, [today]: { ...(current.log[today] || {}), [itemId + "_note"]: note } } }));
   }
   function addHabit(secId) {
     if (!formName.trim()) return;
-    const item = { id: `h_${Date.now()}`, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
-    save({ ...data, habitSections: data.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item] } : s) });
+    const item = { id: makeId("h"), name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    save((current) => ({ ...current, habitSections: current.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item] } : s) }));
     setFormName(""); setFormPoints("10"); setFormDesc(""); setView("main");
   }
-  function deleteHabit(id) { save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) }); setView("main"); }
+  function deleteHabit(id) { save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) })); setView("main"); }
   function saveHabitEdit() {
     if (!editItem || !formName.trim()) return;
     const u = { ...editItem, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
-    const newLog = { ...data.log, [today]: { ...getTL(), [editItem.id + "_note"]: formComment.trim() } };
-    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i) })), log: newLog });
+    save((current) => ({
+      ...current,
+      habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i) })),
+      log: { ...current.log, [today]: { ...(current.log[today] || {}), [editItem.id + "_note"]: formComment.trim() } },
+    }));
     setView("main"); setEditItem(null); setFormDesc(""); setFormComment("");
   }
   function moveHabitTo(tgt) {
     if (!editItem) return;
-    save({ ...data, habitSections: data.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem] : s.items.filter((i) => i.id !== editItem.id) })) });
+    save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem] : s.items.filter((i) => i.id !== editItem.id) })) }));
     setEditSection(tgt);
   }
   function reorderHabit(secId, fromIdx, toIdx) {
     if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
-    save({ ...data, habitSections: data.habitSections.map((s) => {
+    save((current) => ({ ...current, habitSections: current.habitSections.map((s) => {
       if (s.id !== secId) return s;
       const items = [...s.items];
       const [moved] = items.splice(fromIdx, 1);
       items.splice(toIdx, 0, moved);
       return { ...s, items };
-    }) });
+    }) }));
   }
   function openEditHabit(item, secId) {
     setEditItem(item); setEditSection(secId);
@@ -1378,9 +1576,9 @@ function DailyGrind() {
   }
 
   const toggleTask = useCallback((listId, taskId) => {
-    setData((prev) => {
+    save((prev) => {
       const now = Date.now();
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => {
+      return { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.map((t) => {
         if (t.id !== taskId) return t;
         const nextDone = !t.done;
         const timed = nextDone ? stopTaskTimer(t, now) : t;
@@ -1388,18 +1586,15 @@ function DailyGrind() {
         if (nextDone) updated.doneDate = getToday(prev.dayResetHour || 0); else delete updated.doneDate;
         return updated;
       }) } : l) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
     });
-    setHasSavedData(true);
-  }, []);
+  }, [save]);
   const toggleTaskTimer = useCallback((listId, taskId) => {
-    setData((prev) => {
+    save((prev) => {
       const now = Date.now();
       const target = prev.taskLists.find((l) => l.id === listId)?.items.find((t) => t.id === taskId);
       if (!target || target.done) return prev;
       const targetIsRunning = !!target.timerStartedAt;
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => ({
+      return { ...prev, taskLists: prev.taskLists.map((l) => ({
         ...l,
         items: l.items.map((t) => {
           if (t.id === taskId && l.id === listId) {
@@ -1409,62 +1604,36 @@ function DailyGrind() {
           return targetIsRunning ? t : stopTaskTimer(t, now);
         }),
       })) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
     });
-    setHasSavedData(true);
-  }, []);
+  }, [save]);
   const deleteTaskItem = useCallback((listId, taskId) => {
-    setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
-    });
-    setHasSavedData(true);
-  }, []);
+    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) }));
+  }, [save]);
   const deleteCompletedEntry = useCallback((listId, entryId) => {
-    setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
-    });
-    setHasSavedData(true);
-  }, []);
+    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) }));
+  }, [save]);
   const addTaskItem = useCallback((listId, name, points) => {
-    setData((prev) => {
-      const task = { id: `t_${Date.now()}`, name, points, done: false };
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
-    });
-    setHasSavedData(true);
-  }, []);
+    const task = { id: makeId("t"), name, points, done: false };
+    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) }));
+  }, [save]);
   const reorderTask = useCallback((listId, fromIndex, toIndex) => {
-    setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.map((l) => {
+    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => {
         if (l.id !== listId) return l;
         const items = [...l.items];
         const [moved] = items.splice(fromIndex, 1);
         items.splice(toIndex, 0, moved);
         return { ...l, items };
-      }) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
-    });
-    setHasSavedData(true);
-  }, []);
+      }) }));
+  }, [save]);
   const reorderTaskList = useCallback((fromIdx, toIdx) => {
     if (fromIdx === toIdx) return;
-    setData((prev) => {
+    save((prev) => {
       const lists = [...prev.taskLists];
       const [moved] = lists.splice(fromIdx, 1);
       lists.splice(toIdx, 0, moved);
-      const nd = { ...prev, taskLists: lists };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
+      return { ...prev, taskLists: lists };
     });
-    setHasSavedData(true);
-  }, []);
+  }, [save]);
   const openEditTask = useCallback((listId, task) => {
     setEditTaskCtx({ listId, itemId: task.id });
     setFormTaskName(task.name || "");
@@ -1482,14 +1651,14 @@ function DailyGrind() {
   }, []);
   function moveTaskTo(targetListId) {
     if (!editTaskCtx || targetListId === editTaskCtx.listId) return;
-    const srcList = data.taskLists.find((l) => l.id === editTaskCtx.listId);
+    const srcList = dataRef.current?.taskLists.find((l) => l.id === editTaskCtx.listId);
     const task = srcList?.items.find((i) => i.id === editTaskCtx.itemId);
     if (!task) return;
-    save({ ...data, taskLists: data.taskLists.map((l) => {
+    save((current) => ({ ...current, taskLists: current.taskLists.map((l) => {
       if (l.id === editTaskCtx.listId) return { ...l, items: l.items.filter((i) => i.id !== editTaskCtx.itemId) };
       if (l.id === targetListId) return { ...l, items: [...l.items, task] };
       return l;
-    }) });
+    }) }));
     setEditTaskCtx({ listId: targetListId, itemId: editTaskCtx.itemId });
   }
   function saveTaskEdit() {
@@ -1498,7 +1667,7 @@ function DailyGrind() {
     if (formTaskDeadline) {
       deadline = formTaskTime ? `${formTaskDeadline}T${formTaskTime}` : formTaskDeadline;
     }
-    save({ ...data, taskLists: data.taskLists.map((l) => l.id !== editTaskCtx.listId ? l : {
+    save((current) => ({ ...current, taskLists: current.taskLists.map((l) => l.id !== editTaskCtx.listId ? l : {
       ...l,
       items: l.items.map((i) => {
         if (i.id !== editTaskCtx.itemId) return i;
@@ -1506,35 +1675,35 @@ function DailyGrind() {
         if (deadline) u.deadline = deadline; else delete u.deadline;
         return u;
       })
-    }) });
+    }) }));
     setEditTaskCtx(null); setView("main");
   }
   const deleteTaskList = useCallback((listId) => {
-    setData((prev) => {
-      const nd = { ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) };
-      window.storage.set(STORAGE_KEY, JSON.stringify(nd)).catch(console.error);
-      return nd;
-    });
-    setHasSavedData(true);
-  }, []);
+    const list = dataRef.current?.taskLists.find((entry) => entry.id === listId);
+    if (list && (list.items.length || (list.completedLog || []).length) && !confirm(`Delete "${list.title}" and all of its tasks?`)) return;
+    save((prev) => ({ ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) }));
+  }, [save]);
 
   function addNewList() {
     if (!newListName.trim()) return;
-    const list = { id: `tl_${Date.now()}`, title: newListName.trim(), resetsDaily: newListRepeats, items: [] };
-    save({ ...data, taskLists: [...data.taskLists, list] });
+    const list = { id: makeId("tl"), title: newListName.trim(), resetsDaily: newListRepeats, items: [] };
+    save((current) => ({ ...current, taskLists: [...current.taskLists, list] }));
     setNewListName(""); setShowNewList(false); setNewListRepeats(false);
   }
-  function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save({ ...data, dailyGoal: v }); setGoalInput(String(v)); setView("main"); }
-  function resetAll() { save({ ...mkDefault(), resetStamp: Date.now() }); setGoalInput("200"); setView("main"); setPage("habits"); }
+  function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save((current) => ({ ...current, dailyGoal: v })); setGoalInput(String(v)); setView("main"); }
+  function resetAll() {
+    if (!confirm("Reset every habit, task, score, streak, and reward? Your cloud copy will also be reset.")) return;
+    save({ ...mkDefault(), resetStamp: Date.now() }); setGoalInput("100"); setView("main"); setPage("habits");
+  }
   function openStore() {
-    if (!data.storeItems) save({ ...data, storeItems: mkStoreDefaults(data.dailyGoal) });
+    if (!data.storeItems) save((current) => ({ ...current, storeItems: mkStoreDefaults(current.dailyGoal) }));
     setView("store");
   }
   function buyStoreItem(item, balance) {
     if (balance < item.price) return;
     if (!confirm(`Buy "${item.name}" for ${item.price} pts?`)) return;
-    const purchase = { id: `sp_${Date.now()}`, name: item.name, price: item.price, date: today };
-    save({ ...data, walletSpent: (data.walletSpent || 0) + item.price, storePurchases: [purchase, ...(data.storePurchases || [])].slice(0, 50) });
+    const purchase = { id: makeId("sp"), name: item.name, price: item.price, date: today };
+    save((current) => ({ ...current, walletSpent: (current.walletSpent || 0) + item.price, storePurchases: [purchase, ...(current.storePurchases || [])].slice(0, 50) }));
     setStoreBuyAnim(item.name);
     setTimeout(() => setStoreBuyAnim(null), 2600);
   }
@@ -1542,11 +1711,11 @@ function DailyGrind() {
     const name = storeName.trim();
     const price = Math.max(10, parseInt(storePrice) || 0);
     if (!name || !parseInt(storePrice)) { alert("Give your reward a name and a price."); return; }
-    save({ ...data, storeItems: [...(data.storeItems || []), { id: `st_${Date.now()}`, name, price }] });
+    save((current) => ({ ...current, storeItems: [...(current.storeItems || []), { id: makeId("st"), name, price }] }));
     setStoreName(""); setStorePrice("");
   }
   function deleteStoreItem(id) {
-    save({ ...data, storeItems: (data.storeItems || []).filter((i) => i.id !== id) });
+    save((current) => ({ ...current, storeItems: (current.storeItems || []).filter((i) => i.id !== id) }));
   }
   function startStoreEdit(item) {
     setEditStoreId(item.id);
@@ -1558,8 +1727,7 @@ function DailyGrind() {
     const price = Math.max(10, parseInt(editStorePrice) || 0);
     if (!name || !parseInt(editStorePrice)) { alert("Reward needs a name and a price."); return; }
     // Items may still be the unsaved defaults — persist the whole list with the edit applied
-    const items = (data.storeItems || mkStoreDefaults(data.dailyGoal)).map((i) => i.id === editStoreId ? { ...i, name, price } : i);
-    save({ ...data, storeItems: items });
+    save((current) => ({ ...current, storeItems: (current.storeItems || mkStoreDefaults(current.dailyGoal)).map((i) => i.id === editStoreId ? { ...i, name, price } : i) }));
     setEditStoreId(null);
   }
   function recoverFromSyncCode(code) {
@@ -1568,14 +1736,14 @@ function DailyGrind() {
       if (!c) { alert("Enter the sync code you used before signing in (e.g. 123)."); return; }
       const val = await window._fetchSyncDoc(c, STORAGE_KEY);
       if (!val) { alert(`No backup found under code "${c}". Double-check the code and try again.`); return; }
-      let parsed; try { parsed = JSON.parse(val); } catch (e) { alert("That backup couldn't be read."); return; }
+      let parsed; try { parsed = parseMainData(val); } catch (e) { alert("That backup couldn't be read safely."); return; }
       const habitN = (parsed.habitSections || []).reduce((s, sec) => s + (sec.items || []).length, 0);
       const taskN = (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0);
       if (!confirm(`Found a backup with ${habitN} habits and ${taskN} tasks under code "${c}".\n\nRestore it? This replaces your current data and saves it to your account.`)) return;
       setGoalInput(String(parsed.dailyGoal || 100));
       setHasSavedData(true);
-      save(parsed);
-      alert("Restored! Your habits and tasks are back.");
+      const result = await save(parsed);
+      alert(result ? "Restored! Your habits and tasks are back and synced." : "Restored on this device. Cloud sync still needs to reconnect; tap CLOUD SYNC FAILED to retry.");
       setView("main"); setPage("habits");
     })();
   }
@@ -1673,6 +1841,14 @@ function DailyGrind() {
     return () => clearInterval(i);
   }, [stopwatchRunning]);
 
+  if (loadError) return (
+    <div style={S.shell}><div style={{ ...S.box, paddingTop: 100, textAlign: "center", maxWidth: 460 }}>
+      <div style={{ fontSize: 34, marginBottom: 16 }}>⚠</div>
+      <div style={{ color: "#f0f0f4", fontSize: 15, fontWeight: 900, letterSpacing: 2, marginBottom: 10 }}>DATA KEPT SAFE</div>
+      <div style={{ color: "#8b8b9e", fontSize: 11, lineHeight: 1.7, marginBottom: 20 }}>{loadError}</div>
+      <button onClick={() => setLoadAttempt((n) => n + 1)} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
+    </div></div>
+  );
   if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 4 }}>LOADING...</span></div></div>;
 
   // First-time visitors sign in before using the app. Anyone with existing
@@ -1709,44 +1885,52 @@ function DailyGrind() {
   }
 
   // Calendar helpers
-  function saveCalEvents(evts) { setCalEvents(evts); window.storage.set("dg-cal-events", JSON.stringify(evts)).catch(console.error); }
+  function saveCalEvents(nextOrUpdater) {
+    if (calLoadError) return;
+    const current = calEventsRef.current;
+    const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
+    if (!Array.isArray(next)) return;
+    calEventsRef.current = next;
+    setCalEvents(next);
+    window.storage.set("dg-cal-events", JSON.stringify(next)).catch(console.error);
+  }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
-    const evt = { id: `ce_${Date.now()}`, date: dateStr, title, start, end, color: color || "#4fc3f7" };
+    const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || "#4fc3f7" };
     if (repeat && repeat !== "none") evt.repeat = repeat;
     if (repeat === "custom" && repeatDays && repeatDays.length) evt.repeatDays = [...repeatDays].sort((a,b) => a-b);
     if (desc) evt.desc = desc;
-    saveCalEvents([...calEvents, evt]);
+    saveCalEvents((events) => [...events, evt]);
   }
   function editCalEvent(id, updates) {
-    saveCalEvents(calEvents.map(e => e.id === id ? { ...e, ...updates } : e));
+    saveCalEvents((events) => events.map(e => e.id === id ? { ...e, ...updates } : e));
   }
   function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
     if (untilDate) {
-      const evt = calEvents.find(e => e.id === id);
+      const evt = calEventsRef.current.find(e => e.id === id);
       if (!evt) return;
       // If truncating from the very first occurrence, that's equivalent to deleting the whole series.
-      if (untilDate <= evt.date) { saveCalEvents(calEvents.filter(e => e.id !== id)); return; }
-      saveCalEvents(calEvents.map(e => e.id === id ? { ...e, untilDate } : e));
+      if (untilDate <= evt.date) { saveCalEvents((events) => events.filter(e => e.id !== id)); return; }
+      saveCalEvents((events) => events.map(e => e.id === id ? { ...e, untilDate } : e));
       return;
     }
     if (exceptionDate) {
       // Add exception date to skip this one instance
-      saveCalEvents(calEvents.map(e => {
+      saveCalEvents((events) => events.map(e => {
         if (e.id === id) {
-          const exceptions = e.exceptions ? [...e.exceptions, exceptionDate] : [exceptionDate];
+          const exceptions = e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate];
           return { ...e, exceptions };
         }
         return e;
       }));
     } else if (deleteAll) {
-      const evt = calEvents.find(e => e.id === id);
+      const evt = calEventsRef.current.find(e => e.id === id);
       if (evt && evt.repeat) {
-        saveCalEvents(calEvents.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat)));
+        saveCalEvents((events) => events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat)));
       } else {
-        saveCalEvents(calEvents.filter(e => e.id !== id));
+        saveCalEvents((events) => events.filter(e => e.id !== id));
       }
     } else {
-      saveCalEvents(calEvents.filter(e => e.id !== id));
+      saveCalEvents((events) => events.filter(e => e.id !== id));
     }
   }
   function getEventsForDate(dateStr) {
@@ -1821,6 +2005,7 @@ function DailyGrind() {
           <div>
             <h1 style={S.title}>DAILY GRIND</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
+            <SaveIndicator info={saveInfo} onRetry={retrySaves} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {data.streak > 0 && <div style={S.streakB}>{"\uD83D\uDD25"} {data.streak}</div>}
@@ -2069,6 +2254,13 @@ function DailyGrind() {
         })()}
 
         {page === "calendar" && (() => {
+          if (calLoadError) return (
+            <div style={{ maxWidth: 440, margin: "80px auto", textAlign: "center", background: "#12122a", border: "1px solid #ff475755", borderRadius: 14, padding: 24 }}>
+              <div style={{ color: "#f0f0f4", fontSize: 13, fontWeight: 900, letterSpacing: 2, marginBottom: 10 }}>CALENDAR DATA KEPT SAFE</div>
+              <div style={{ color: "#8b8b9e", fontSize: 10, lineHeight: 1.6, marginBottom: 18 }}>The calendar could not be loaded, so editing is paused to prevent an empty calendar from replacing your saved events.</div>
+              <button onClick={() => { setCalLoadError(false); setCalEventsLoaded(false); setCalLoadAttempt((n) => n + 1); }} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
+            </div>
+          );
           const calDates = getCalWeekDates(calWeekOffset);
           const calStartHour = data.calStartHour ?? 6;
           const calEndHour = data.calEndHour ?? 23;
@@ -2112,10 +2304,11 @@ function DailyGrind() {
               {/* Header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                 <button onClick={() => setCalWeekOffset(calWeekOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25C0"}</button>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>{monthLabel}</div>
-                  <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 2, padding: "4px 8px" }}>TODAY</button>
-                </div>
+                 <div style={{ textAlign: "center" }}>
+                   <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>{monthLabel}</div>
+                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 2, padding: "4px 8px" }}>TODAY</button>
+                   <SaveIndicator info={saveInfo} onRetry={retrySaves} />
+                 </div>
                 <div style={{ display: "flex", alignItems: "center" }}>
                   <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25B6"}</button>
                   <button onClick={() => setShowCalSettings(true)} title="Calendar settings" style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 10px" }}>{"\u2699"}</button>
@@ -2587,7 +2780,7 @@ function DailyGrind() {
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY STARTS AT</label>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[4,5,6,7,8,9,10].map(h => (
-                        <button key={h} onClick={() => save({ ...data, calStartHour: h })}
+                        <button key={h} onClick={() => save((current) => ({ ...current, calStartHour: h }))}
                           style={{ padding: "8px 12px", borderRadius: 8, border: calStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calStartHour === h ? "#7c3aed22" : "#12122a", color: calStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                           {fmtHour(h)}
                         </button>
@@ -2596,7 +2789,7 @@ function DailyGrind() {
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY ENDS AT</label>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[21,22,23,24,25,26,27,28].map(h => (
-                        <button key={h} onClick={() => save({ ...data, calEndHour: h })}
+                        <button key={h} onClick={() => save((current) => ({ ...current, calEndHour: h }))}
                           style={{ padding: "8px 12px", borderRadius: 8, border: calEndHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEndHour === h ? "#7c3aed22" : "#12122a", color: calEndHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                           {fmtHour(h)}{h >= 24 ? " +1" : ""}
                         </button>
@@ -2604,7 +2797,7 @@ function DailyGrind() {
                     </div>
                     <div style={{ fontSize: 10, color: "#7c3aed", marginBottom: 16, lineHeight: 1.4 }}>Currently showing {fmtHour(calStartHour)} → {fmtHour(calEndHour)}{calEndHour >= 24 ? " (next morning)" : ""} · {totalHours}h</div>
                     <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={() => save({ ...data, calStartHour: 6, calEndHour: 23 })} style={S.cBtn}>Reset Default</button>
+                      <button onClick={() => save((current) => ({ ...current, calStartHour: 6, calEndHour: 23 }))} style={S.cBtn}>Reset Default</button>
                       <button onClick={() => setShowCalSettings(false)} style={S.okBtn}>Done</button>
                     </div>
                   </div>
@@ -2772,7 +2965,7 @@ function DailyGrind() {
         <label style={S.lbl}>Day Resets At</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[0,1,2,3,4,5,6].map(h => (
-            <button key={h} onClick={() => save({ ...data, dayResetHour: h })}
+            <button key={h} onClick={() => save((current) => ({ ...current, dayResetHour: h }))}
               style={{ padding: "8px 14px", borderRadius: 8, border: (data.dayResetHour || 0) === h ? "2px solid #7c3aed" : "1px solid #2d2d3a",
                 background: (data.dayResetHour || 0) === h ? "#7c3aed22" : "#12122a", color: (data.dayResetHour || 0) === h ? "#7c3aed" : "#8b8b9e",
                 fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>

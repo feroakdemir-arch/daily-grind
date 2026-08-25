@@ -20,7 +20,7 @@ Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day,
 
 - **Accounts:** Google sign-in required for new visitors (welcome gate). Data per-account at `users/{uid}/data/`. Legacy sync codes still work for signed-out users with data.
 - **Security rules published:** users can only touch their own data; legacy `sync/{code}` open to any authed user (delete that block once owner's phone is signed in with Google).
-- **Data safety stack:** richness guard (empty starter can NEVER overwrite real data, in get() AND the live-sync listener), no auto-save while on fresh starter, retry on transient cloud read failures, `resetStamp` lets intentional resets propagate. Cross-device wipe bug is dead.
+- **Data safety stack:** richness guard (empty starter can NEVER overwrite real data, in get() AND the live-sync listener), authentication resolves before choosing local vs cloud data, corrupt/failed loads are blocked instead of showing a writable empty starter, no auto-save while on a fresh starter, monotonic timestamps + serialized cloud writes prevent rapid edits arriving out of order, visible save/sync status with manual retry, account-owned local caches are isolated and cleared on sign-out, and `resetStamp` propagates intentional resets without triggering owner auto-recovery. Cross-device wipe paths are guarded.
 - **XP system:** goal-normalized (100% of goal = 100 XP, cap 150/day) so point inflation can't buy levels. Curve: L2=100 XP, L5≈700, L10≈2700, L20≈10.4k.
 - **Store:** wallet = lifetime raw points − spent. Defaults priced off dailyGoal (Sleep In 0.75×, Skip Gym 1×, Friends 1×, Rest Day 1.5×, Cheat Day 2×). Custom rewards, inline edit (✎), purchase log, buy overlay. Spending NEVER touches XP/level/history.
 - **Tasks:** per-list completed history w/ dates and tracked work time, paginated 10 + Load More; daily lists archive completions before reset. Each pending task has a persistent cumulative Start/Stop timer; starting a different task stops the current one, and completing a running task stops it automatically. Drag reorder everywhere (habits/tasks/lists) with auto-scroll. Task editor: points, deadlines (+chips), move between lists, send to pomodoro.
@@ -34,6 +34,7 @@ Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day,
 - **Auto-recovery hardcode:** `index.html` has owner-email-gated auto-restore from `sync/123` (search `dg-autorecover-v1` / `isOwner`). Remove once owner confirms recovery is complete. `sync/123` in Firestore = frozen backup of owner's full data (33 habits, 121 main tasks, 60 days history).
 - **Components must stay module-level** (HabitCard, TaskListCard). Defining components inside DailyGrind causes remount-on-every-keystroke bugs (hit us twice: FW focus bug, HabitCard).
 - Syntax-check before pushing: extract babel script → esbuild → node --check.
+- **Persistence rule:** all main-data edits must go through `save(current => next)` so rapid actions compose against `dataRef`; calendar edits must go through `saveCalEvents(events => next)`. Never call Firestore directly from a component or put storage side effects inside a React state updater.
 
 ## 3. MARKETING FOUNDATION (in progress — foundation skill, steps confirmed so far)
 
