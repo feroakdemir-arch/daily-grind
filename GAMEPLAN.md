@@ -5,7 +5,7 @@
 
 ## 1. WHAT THIS IS
 
-The user's own product: a habit tracker + task lists + time-blocked calendar + pomodoro
+The user's own product: a habit tracker + task lists + synced notes + time-blocked calendar + pomodoro
 that scores your day in points. Hit your daily goal → win the day → streaks → XP → levels
 → ranks (ROOKIE → GRINDER → OPERATOR → MACHINE → RELENTLESS → UNSTOPPABLE → LEGEND → GOAT).
 Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day, sleep in).
@@ -24,6 +24,7 @@ Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day,
 - **XP system:** goal-normalized (100% of goal = 100 XP, cap 150/day) so point inflation can't buy levels. Curve: L2=100 XP, L5≈700, L10≈2700, L20≈10.4k.
 - **Store:** wallet = lifetime raw points − spent. Defaults priced off dailyGoal (Sleep In 0.75×, Skip Gym 1×, Friends 1×, Rest Day 1.5×, Cheat Day 2×). Custom rewards, inline edit (✎), purchase log, buy overlay. Spending NEVER touches XP/level/history.
 - **Tasks:** per-list completed history w/ dates and tracked work time, paginated 10 + Load More; daily lists archive completions before reset. Each pending task has a persistent cumulative Start/Stop timer; starting a different task stops the current one, and completing a running task stops it automatically. Drag reorder everywhere (habits/tasks/lists) with auto-scroll. Task editor: points, deadlines (+chips), move between lists, send to pomodoro.
+- **Notes:** dedicated bottom-nav section with a focused auto-saving editor, cloud sync through the main account data, full-text search, free-form tags and tag filters, pin/unpin ordering, editing, and confirmed deletion.
 - **Habits:** past-day editing (weekly dots + monthly calendar, both), auto-skip (red ✗) for unmarked days at rollover incl. multi-day gaps, history score recomputes on past edits.
 - **Calendar:** custom repeat days, 3-option recurring delete (this/following/all), configurable day window incl. past-midnight spillover, drag-safe on mobile.
 - **Pomodoro:** looping alarm until Start/Reset, tab-title countdown + 🔔.
