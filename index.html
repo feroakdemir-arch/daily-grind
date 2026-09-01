@@ -163,9 +163,9 @@
       if (key === "dg-cal-events") {
         try {
           const events = JSON.parse(value);
-          const validTime = (time) => {
+          const validTime = (time, maxHour) => {
             const match = typeof time === "string" && /^(\d{1,2}):(\d{2})$/.exec(time);
-            return !!(match && Number(match[1]) <= 23 && Number(match[2]) <= 59);
+            return !!(match && Number(match[1]) <= maxHour && Number(match[2]) <= 59);
           };
           const validDate = (value) => {
             if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -175,7 +175,9 @@
           };
           return Array.isArray(events) && events.every((event) => event && typeof event === "object" && !Array.isArray(event)
             && validDate(event.date)
-            && validTime(event.start) && validTime(event.end));
+            // Starts always belong to the event's date. Ends may use 24:00+
+            // for events that continue into the following day.
+            && validTime(event.start, 23) && validTime(event.end, 47));
         }
         catch (e) { return false; }
       }
@@ -797,15 +799,15 @@ function parseCalendarData(raw) {
     const date = new Date(year, month - 1, day);
     return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
   };
-  const validTime = (value) => {
+  const validTime = (value, maxHour) => {
     const match = typeof value === "string" && /^(\d{1,2}):(\d{2})$/.exec(value);
-    return !!(match && Number(match[1]) <= 23 && Number(match[2]) <= 59);
+    return !!(match && Number(match[1]) <= maxHour && Number(match[2]) <= 59);
   };
   const repeats = new Set(["daily", "weekly", "weekdays", "custom"]);
   return parsed.map((event, index) => {
     if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error(`Calendar event ${index + 1} is invalid`);
     if (!validDate(event.date)) throw new Error(`Calendar event ${index + 1} has an invalid date`);
-    if (!validTime(event.start) || !validTime(event.end)) {
+    if (!validTime(event.start, 23) || !validTime(event.end, 47)) {
       throw new Error(`Calendar event ${index + 1} has an invalid time`);
     }
     const normalized = {
