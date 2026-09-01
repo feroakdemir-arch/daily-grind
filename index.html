@@ -40,13 +40,14 @@
     /* XP bar has a living shimmer */
     @keyframes xpShimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
     .xp-fill { background-size: 200% 100% !important; animation: xpShimmer 3s linear infinite; }
-    .notes-workspace { display: grid; grid-template-columns: 190px 270px minmax(0, 1fr); min-height: 650px; background: #121220; border: 1px solid #2d2d3a; border-radius: 16px; overflow: hidden; box-shadow: 0 12px 36px #00000066; }
-    .notes-sections { background: #11111f; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; }
-    .notes-pages { background: #171726; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; overflow-y: auto; max-height: 760px; }
-    .notes-editor { background: #1a1a2e; min-width: 0; min-height: 650px; display: flex; flex-direction: column; }
+    .notes-screen { height: 100vh; height: 100dvh; }
+    .notes-workspace { display: grid; grid-template-columns: 190px 270px minmax(0, 1fr); flex: 1; min-height: 0; width: 100%; background: #121220; border-top: 1px solid #2d2d3a; border-bottom: 1px solid #2d2d3a; overflow: hidden; box-shadow: 0 12px 36px #00000066; }
+    .notes-sections { background: #11111f; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; min-height: 0; overflow-y: auto; }
+    .notes-pages { background: #171726; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; min-height: 0; overflow-y: auto; }
+    .notes-editor { background: #1a1a2e; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     .note-page-button:hover { background: #25253a !important; }
     @media (max-width: 760px) {
-      .notes-workspace { display: block; min-height: 0; border-radius: 12px; }
+      .notes-workspace { display: block; min-height: 0; overflow-y: auto; }
       .notes-sections { border-right: 0; border-bottom: 1px solid #2d2d3a; padding: 10px; }
       .notes-section-list { display: flex !important; overflow-x: auto; gap: 6px; padding-bottom: 2px; }
       .notes-section-list > button { width: auto !important; flex-shrink: 0; }
@@ -2489,11 +2490,11 @@ function DailyGrind() {
   // MAIN
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
-      <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : page === "notes" ? { ...S.box, maxWidth: 1320, padding: "14px 12px 80px" } : S.box}>
+      <div className={page === "notes" ? "notes-screen" : undefined} style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : page === "notes" ? { ...S.box, maxWidth: "none", margin: 0, padding: "14px 0 calc(54px + env(safe-area-inset-bottom, 0px))", display: "flex", flexDirection: "column", overflow: "hidden", boxSizing: "border-box" } : S.box}>
         {page !== "calendar" && winAnim && <div className="overlay-pop" style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
         {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
 
-        {page !== "calendar" && <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        {page !== "calendar" && <div style={{ marginBottom: page === "notes" ? 12 : 20, padding: page === "notes" ? "0 16px" : 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <h1 style={S.title}>DAILY GRIND</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
@@ -3403,7 +3404,7 @@ function DailyGrind() {
           );
         })()}
 
-        <div style={{ height: 80 }} />
+        {page !== "notes" && <div style={{ height: 80 }} />}
       </div>
       <Nav />
     </div>
