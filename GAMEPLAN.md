@@ -1,5 +1,5 @@
 # DAILY GRIND — Master Gameplan & Session Handoff
-*Last updated: August 2026. This file is the source of truth for continuing work in any session.*
+*Last updated: September 2026. This file is the source of truth for continuing work in any session.*
 
 ---
 
@@ -20,7 +20,7 @@ Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day,
 
 - **Accounts:** Google sign-in required for new visitors (welcome gate). Data per-account at `users/{uid}/data/`. Legacy sync codes still work for signed-out users with data.
 - **Security rules published:** users can only touch their own data; legacy `sync/{code}` open to any authed user (delete that block once owner's phone is signed in with Google).
-- **Data safety stack:** richness guard (empty starter can NEVER overwrite real data, in get() AND the live-sync listener), authentication resolves before choosing local vs cloud data, corrupt/failed loads are blocked instead of showing a writable empty starter, no auto-save while on a fresh starter, monotonic timestamps + serialized cloud writes prevent rapid edits arriving out of order, visible save/sync status with manual retry, account-owned local caches are isolated and cleared on sign-out, and `resetStamp` propagates intentional resets without triggering owner auto-recovery. Cross-device wipe paths are guarded.
+- **Data safety stack:** richness guard (empty starter can NEVER overwrite real data, in get() AND the live-sync listener), authentication resolves before choosing local vs cloud data, corrupt/failed loads are blocked instead of showing a writable empty starter, no auto-save while on a fresh starter, monotonic timestamps + serialized cloud writes prevent rapid edits arriving out of order, visible save/sync status with manual retry, account-owned local caches are isolated and cleared on sign-out, and `resetStamp` propagates intentional resets without triggering owner auto-recovery. Cross-device wipe paths are guarded. Every successful main-data edit is also debounced into independent latest/hourly/daily/weekly Firestore recovery copies with SHA-256 integrity checks and monthly metadata indexes; DailyGrind never auto-deletes those copies. Note deletion, full reset, and any restore create a unique pre-action safety copy first and abort if a signed-in cloud copy cannot be made. Settings includes recovery history, restore, and a full JSON download/import for an off-platform copy (including calendar data).
 - **XP system:** goal-normalized (100% of goal = 100 XP, cap 150/day) so point inflation can't buy levels. Curve: L2=100 XP, L5≈700, L10≈2700, L20≈10.4k.
 - **Store:** wallet = lifetime raw points − spent. Defaults priced off dailyGoal (Sleep In 0.75×, Skip Gym 1×, Friends 1×, Rest Day 1.5×, Cheat Day 2×). Custom rewards, inline edit (✎), purchase log, buy overlay. Spending NEVER touches XP/level/history.
 - **Tasks:** per-list completed history w/ dates and tracked work time, paginated 10 + Load More; daily lists archive completions before reset. Each pending task has a persistent cumulative Start/Stop timer; starting a different task stops the current one, and completing a running task stops it automatically. Drag reorder everywhere (habits/tasks/lists) with auto-scroll. Task editor: points, deadlines (+chips), move between lists, send to pomodoro.
@@ -36,6 +36,7 @@ Plus a **Store**: spend earned points on real-life rewards (cheat day, rest day,
 - **Components must stay module-level** (HabitCard, TaskListCard). Defining components inside DailyGrind causes remount-on-every-keystroke bugs (hit us twice: FW focus bug, HabitCard).
 - Syntax-check before pushing: extract babel script → esbuild → node --check.
 - **Persistence rule:** all main-data edits must go through `save(current => next)` so rapid actions compose against `dataRef`; calendar edits must go through `saveCalEvents(events => next)`. Never call Firestore directly from a component or put storage side effects inside a React state updater.
+- **Recovery vault:** backup documents live beside account data using the `dg-vault-main-*` prefix; month-sharded metadata uses `dg-vault-index-YYYY-MM`. Never reuse those prefixes for normal storage keys, never auto-delete vault documents, and always validate/checksum a vault copy before restore. `window.dataVault` is the only supported vault API.
 
 ## 3. MARKETING FOUNDATION (in progress — foundation skill, steps confirmed so far)
 
@@ -104,7 +105,7 @@ domain + DNS records, add domain to Firebase authorized domains.
 ### Feature backlog (agreed good ideas, not yet built)
 - **Streak Shield** store item (mechanical: protects streak on a missed day — Duolingo's
   most-monetized feature; natural Pro/paid item)
-- Server-side backups when revenue justifies it
+- Platform-managed/offsite database backups when revenue justifies it (the in-app versioned Firestore vault + downloadable JSON backup already ship)
 - Remove owner auto-recovery hardcode after confirmation
 - Delete legacy `sync/{code}` rules block once owner's phone is on Google sign-in
 

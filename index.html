@@ -111,7 +111,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -191,6 +191,202 @@
       _cloudWriteQueues[key] = tracked;
       return tracked;
     }
+
+    // Versioned recovery vault. The live document remains the fast source of
+    // truth, while these independent copies make accidental deletion or a bad
+    // overwrite recoverable. Daily Grind never deletes vault documents.
+    const VAULT_PREFIX = "dg-vault-main-";
+    const VAULT_INDEX_PREFIX = "dg-vault-index-";
+    const _vaultStatusListeners = new Set();
+    const _vaultIndexQueues = {};
+    let _vaultTimer = null;
+    let _vaultPendingValue = null;
+    function _emitVaultStatus(state, detail) {
+      const payload = { state, at: Date.now(), ...(detail || {}) };
+      _vaultStatusListeners.forEach((listener) => { try { listener(payload); } catch (e) {} });
+    }
+    function _vaultCollection() {
+      if (window._user) return fbDb.collection("users").doc(window._user.uid).collection("data");
+      const syncCode = window._getSyncCode();
+      if (syncCode) return fbDb.collection("sync").doc(syncCode).collection("data");
+      return null;
+    }
+    function _localDateParts(now) {
+      const d = new Date(now);
+      const pad = (n) => String(n).padStart(2, "0");
+      return {
+        day: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+        hour: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}`,
+      };
+    }
+    function _weekStart(now) {
+      const d = new Date(now);
+      const day = (d.getDay() + 6) % 7;
+      d.setHours(12, 0, 0, 0);
+      d.setDate(d.getDate() - day);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+    function _byteSize(text) {
+      try { return new TextEncoder().encode(text).length; }
+      catch (e) { return unescape(encodeURIComponent(text)).length; }
+    }
+    async function _sha256(text) {
+      if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) return "";
+      const bytes = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    function _updateVaultIndex(collection, targets, now, reason, sizeBytes) {
+      const parts = _localDateParts(now);
+      const indexId = VAULT_INDEX_PREFIX + parts.day.slice(0, 7);
+      const previous = _vaultIndexQueues[indexId] || Promise.resolve();
+      const next = previous.catch(() => {}).then(async () => {
+        const ref = collection.doc(indexId);
+        const doc = await ref.get();
+        let entries = [];
+        if (doc.exists) {
+          try {
+            const parsed = JSON.parse(doc.data().value || "[]");
+            if (Array.isArray(parsed)) entries = parsed;
+          } catch (e) {}
+        }
+        const additions = targets.filter((target) => target.kind !== "latest").map((target) => ({
+          id: target.id, kind: target.kind, reason: reason || "automatic", at: now, sizeBytes,
+        }));
+        additions.forEach((addition) => {
+          const existing = entries.findIndex((entry) => entry && entry.id === addition.id);
+          if (existing >= 0) entries[existing] = addition;
+          else entries.push(addition);
+        });
+        entries.sort((a, b) => (b.at || 0) - (a.at || 0));
+        await ref.set({
+          value: JSON.stringify(entries),
+          month: parts.day.slice(0, 7),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+      const tracked = next.finally(() => {
+        if (_vaultIndexQueues[indexId] === tracked) delete _vaultIndexQueues[indexId];
+      });
+      _vaultIndexQueues[indexId] = tracked;
+      return tracked;
+    }
+    async function _captureVault(value, reason, safetyCopy) {
+      if (typeof value !== "string" || _mainRichness(value) === null) throw new Error("Backup data is invalid");
+      await _fbReady;
+      const collection = _vaultCollection();
+      if (!collection) {
+        if (safetyCopy) {
+          try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, reason, at: Date.now() })); }
+          catch (e) { throw new Error("A local safety copy could not be created"); }
+        }
+        _emitVaultStatus("local-only", { message: "Sign in to enable automatic cloud history." });
+        return { cloud: false, copies: safetyCopy ? 1 : 0 };
+      }
+      const sizeBytes = _byteSize(value);
+      // Firestore documents are capped at about 1 MiB; leave room for vault metadata.
+      if (sizeBytes > 950000) throw new Error("Your data is too large for a cloud snapshot. Download a backup file instead.");
+      const now = Date.now();
+      const checksum = await _sha256(value);
+      const parts = _localDateParts(now);
+      const targets = safetyCopy
+        ? [{ id: `${VAULT_PREFIX}safety-${now}`, kind: "safety" }]
+        : [
+            { id: `${VAULT_PREFIX}latest`, kind: "latest" },
+            { id: `${VAULT_PREFIX}hourly-${parts.hour}`, kind: "hourly" },
+            { id: `${VAULT_PREFIX}daily-${parts.day}`, kind: "daily" },
+            { id: `${VAULT_PREFIX}weekly-${_weekStart(now)}`, kind: "weekly" },
+          ];
+      _emitVaultStatus("saving", { reason: reason || "automatic" });
+      await Promise.all(targets.map((target) => _queueCloudWrite(`vault:${target.id}`, collection.doc(target.id), {
+        value,
+        checksum,
+        sizeBytes,
+        schemaVersion: 1,
+        kind: target.kind,
+        reason: reason || "automatic",
+        clientCreatedAt: now,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      })));
+      await _updateVaultIndex(collection, targets, now, reason, sizeBytes);
+      const result = { cloud: true, copies: targets.length, at: now };
+      _emitVaultStatus("saved", result);
+      return result;
+    }
+    function _scheduleVault(value) {
+      _vaultPendingValue = value;
+      clearTimeout(_vaultTimer);
+      _vaultTimer = setTimeout(() => {
+        const pending = _vaultPendingValue;
+        _vaultPendingValue = null;
+        _captureVault(pending, "automatic", false).catch((error) => {
+          console.warn("Automatic backup failed:", error);
+          _emitVaultStatus("error", { error: String(error.message || error) });
+        });
+      }, 4000);
+    }
+    window.dataVault = {
+      schedule: _scheduleVault,
+      capture(value, reason, safetyCopy) {
+        return _captureVault(value, reason, !!safetyCopy);
+      },
+      async list() {
+        await _fbReady;
+        let localItems = [];
+        try {
+          const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
+          if (local && typeof local.value === "string") localItems = [{
+            id: `${VAULT_PREFIX}local-safety`, kind: "safety", reason: local.reason || "local-safety", at: local.at || 0, sizeBytes: _byteSize(local.value),
+          }];
+        } catch (e) {}
+        const collection = _vaultCollection();
+        if (!collection) return localItems;
+        const snap = await collection
+          .orderBy(firebase.firestore.FieldPath.documentId())
+          .startAt(VAULT_INDEX_PREFIX)
+          .endAt(VAULT_INDEX_PREFIX + "\uf8ff")
+          .get();
+        const cloudItems = [];
+        snap.docs.forEach((doc) => {
+          try {
+            const entries = JSON.parse((doc.data() || {}).value || "[]");
+            if (Array.isArray(entries)) cloudItems.push(...entries);
+          } catch (e) {}
+        });
+        const unique = new Map();
+        [...cloudItems, ...localItems].forEach((item) => {
+          if (!item || typeof item.id !== "string" || !item.id.startsWith(VAULT_PREFIX)) return;
+          const current = unique.get(item.id);
+          if (!current || (item.at || 0) > (current.at || 0)) unique.set(item.id, item);
+        });
+        return Array.from(unique.values()).sort((a, b) => (b.at || 0) - (a.at || 0));
+      },
+      async read(id) {
+        if (typeof id !== "string" || !id.startsWith(VAULT_PREFIX)) throw new Error("Invalid backup selection");
+        if (id === `${VAULT_PREFIX}local-safety`) {
+          const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
+          if (!local || typeof local.value !== "string" || _mainRichness(local.value) === null) throw new Error("That local safety copy is invalid");
+          return { value: local.value, kind: "safety", at: local.at || 0 };
+        }
+        await _fbReady;
+        const collection = _vaultCollection();
+        if (!collection) throw new Error("Sign in to read cloud backups");
+        const doc = await collection.doc(id).get();
+        if (!doc.exists) throw new Error("That backup no longer exists");
+        const item = doc.data() || {};
+        if (typeof item.value !== "string" || _mainRichness(item.value) === null) throw new Error("That backup is invalid");
+        if (item.checksum) {
+          const actual = await _sha256(item.value);
+          if (actual && actual !== item.checksum) throw new Error("Backup integrity check failed");
+        }
+        return { value: item.value, kind: item.kind || "snapshot", at: item.clientCreatedAt || 0 };
+      },
+      onStatus(callback) {
+        _vaultStatusListeners.add(callback);
+        return () => _vaultStatusListeners.delete(callback);
+      },
+      cloudEnabled() { return !!(window._user || window._getSyncCode()); },
+    };
 
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
@@ -329,6 +525,7 @@
               updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             });
           }
+          if (key === "daily-grind-v13") window.dataVault.schedule(value);
           _pendingStorageWrites[key] = Math.max(0, (_pendingStorageWrites[key] || 1) - 1);
           if (!Object.values(_pendingStorageWrites).some((count) => count > 0)) _emitStorageStatus("saved", key);
           return { key, value };
@@ -1234,7 +1431,14 @@ function DailyGrind() {
   const [loadError, setLoadError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [saveInfo, setSaveInfo] = useState({ state: "idle", key: "", error: "" });
+  const [vaultInfo, setVaultInfo] = useState({ state: "idle", at: 0, error: "" });
+  const [vaultItems, setVaultItems] = useState([]);
+  const [vaultSelectedId, setVaultSelectedId] = useState("");
+  const [vaultLoading, setVaultLoading] = useState(false);
+  const [vaultMessage, setVaultMessage] = useState("");
   const dataRef = useRef(null);
+  const backupFileRef = useRef(null);
+  const initialVaultRef = useRef(false);
   const [page, setPage] = useState("habits");
   const [view, setView] = useState("main");
   const [editItem, setEditItem] = useState(null);
@@ -1326,6 +1530,7 @@ function DailyGrind() {
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => { calEventsRef.current = calEvents; }, [calEvents]);
   useEffect(() => window.storage.onStatus ? window.storage.onStatus(setSaveInfo) : undefined, []);
+  useEffect(() => window.dataVault?.onStatus ? window.dataVault.onStatus(setVaultInfo) : undefined, []);
 
   useEffect(() => { (async () => {
     setLoading(true);
@@ -1364,6 +1569,12 @@ function DailyGrind() {
     if (!loaded && !dataRef.current) setData(null);
     setLoading(false);
   })(); }, [loadAttempt]);
+
+  useEffect(() => {
+    if (loading || !hasSavedData || !dataRef.current || initialVaultRef.current) return;
+    initialVaultRef.current = true;
+    window.dataVault?.schedule(JSON.stringify(dataRef.current));
+  }, [loading, hasSavedData]);
 
   const save = useCallback((nextOrUpdater) => {
     const current = dataRef.current;
@@ -1832,17 +2043,29 @@ function DailyGrind() {
   function insertNoteText(text) {
     setNoteDraft((draft) => draft ? { ...draft, body: `${draft.body}${draft.body && !draft.body.endsWith("\n") ? "\n" : ""}${text}` } : draft);
   }
-  function deleteNote(note) {
-    if (!confirm(`Delete "${note.title || "Untitled note"}"? This cannot be undone.`)) return;
+  async function deleteNote(note) {
+    if (!confirm(`Delete "${note.title || "Untitled note"}"? A safety copy will be kept first.`)) return;
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
+    try {
+      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-note-delete", true);
+    } catch (error) {
+      alert("The safety copy could not be created, so the note was not deleted. Check your connection and try again.");
+      return;
+    }
     if (noteDraft?.id === note.id) setNoteDraft(null);
     save((current) => ({ ...current, notes: (current.notes || []).filter((entry) => entry.id !== note.id) }));
   }
   function saveGoal() { const v = Math.max(1, parseInt(goalInput) || 200); save((current) => ({ ...current, dailyGoal: v })); setGoalInput(String(v)); setView("main"); }
-  function resetAll() {
+  async function resetAll() {
     if (!confirm("Reset every habit, task, note, score, streak, and reward? Your cloud copy will also be reset.")) return;
-    save({ ...mkDefault(), resetStamp: Date.now() }); setGoalInput("100"); setView("main"); setPage("habits");
+    try {
+      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-reset-everything", true);
+    } catch (error) {
+      alert("The safety copy could not be created, so nothing was reset. Check your connection and try again.");
+      return;
+    }
+    await save({ ...mkDefault(), resetStamp: Date.now() }); setGoalInput("100"); setView("main"); setPage("habits");
   }
   function openStore() {
     if (!data.storeItems) save((current) => ({ ...current, storeItems: mkStoreDefaults(current.dailyGoal) }));
@@ -1889,12 +2112,122 @@ function DailyGrind() {
       const habitN = (parsed.habitSections || []).reduce((s, sec) => s + (sec.items || []).length, 0);
       const taskN = (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0);
       if (!confirm(`Found a backup with ${habitN} habits and ${taskN} tasks under code "${c}".\n\nRestore it? This replaces your current data and saves it to your account.`)) return;
+      try {
+        await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-sync-code-restore", true);
+      } catch (error) {
+        alert("The safety copy could not be created, so nothing was restored. Check your connection and try again.");
+        return;
+      }
       setGoalInput(String(parsed.dailyGoal || 100));
       setHasSavedData(true);
       const result = await save(parsed);
       alert(result ? "Restored! Your habits and tasks are back and synced." : "Restored on this device. Cloud sync still needs to reconnect; tap CLOUD SYNC FAILED to retry.");
       setView("main"); setPage("habits");
     })();
+  }
+
+  async function flushCurrentNote() {
+    clearTimeout(noteSaveTimerRef.current);
+    noteSaveVersionRef.current += 1;
+    if (!noteDraft || (!noteDraft.title.trim() && !noteDraft.body.trim())) return;
+    const signature = noteSignature(noteDraft);
+    if (signature === noteSavedSignatureRef.current) return;
+    const result = await persistNoteDraft({ ...noteDraft });
+    const savedLocally = (dataRef.current?.notes || []).some((note) => note.id === noteDraft.id);
+    if (!result && !savedLocally) throw new Error("Your open note could not be saved");
+    noteSavedSignatureRef.current = signature;
+    setNoteDraftState("saved");
+  }
+
+  async function downloadFullBackup() {
+    try {
+      await flushCurrentNote();
+      const mainData = dataRef.current;
+      if (!mainData) throw new Error("Daily Grind data is not loaded");
+      const exportedAt = new Date().toISOString();
+      const bundle = {
+        format: "daily-grind-backup",
+        version: 1,
+        exportedAt,
+        mainData,
+        calendarEvents: calEventsRef.current,
+      };
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `daily-grind-backup-${exportedAt.slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setVaultMessage("Backup downloaded. Keep a copy somewhere outside DailyGrind.");
+    } catch (error) {
+      setVaultMessage(`Backup failed: ${error.message || error}`);
+    }
+  }
+
+  async function importBackupFile(event) {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const bundle = JSON.parse(await file.text());
+      const rawMain = bundle && bundle.format === "daily-grind-backup" ? bundle.mainData : bundle;
+      const parsed = parseMainData(JSON.stringify(rawMain));
+      const restoredCalendar = bundle && bundle.format === "daily-grind-backup" ? bundle.calendarEvents : null;
+      if (restoredCalendar !== null && !Array.isArray(restoredCalendar)) throw new Error("Calendar data is invalid");
+      const noteCount = (parsed.notes || []).length;
+      const taskCount = (parsed.taskLists || []).reduce((sum, list) => sum + (list.items || []).length, 0);
+      if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
+      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-file-restore", true);
+      const mainResult = await save(parsed);
+      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
+      setGoalInput(String(parsed.dailyGoal || 100));
+      setHasSavedData(true);
+      setVaultMessage(mainResult && calendarResult ? "Backup restored and synced." : "Backup restored on this device. Cloud sync needs to reconnect; use the save-status retry when it does.");
+      setView("main");
+    } catch (error) {
+      alert(`That backup could not be restored safely. ${error.message || error}`);
+    }
+  }
+
+  async function loadCloudBackups() {
+    setVaultLoading(true);
+    setVaultMessage("");
+    try {
+      const items = await window.dataVault.list();
+      setVaultItems(items);
+      setVaultSelectedId((current) => current && items.some((item) => item.id === current) ? current : (items[0]?.id || ""));
+      setVaultMessage(items.length ? `${items.length} recovery copies found.` : "No recovery copies yet. Make an edit and DailyGrind will create them automatically.");
+    } catch (error) {
+      setVaultMessage(`Cloud history could not be loaded: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
+  }
+
+  async function restoreCloudBackup() {
+    if (!vaultSelectedId) return;
+    setVaultLoading(true);
+    setVaultMessage("");
+    try {
+      const backup = await window.dataVault.read(vaultSelectedId);
+      const parsed = parseMainData(backup.value);
+      const noteCount = (parsed.notes || []).length;
+      const selected = vaultItems.find((item) => item.id === vaultSelectedId);
+      const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
+      if (!confirm(`Restore the ${selected?.kind || "cloud"} copy from ${when} with ${noteCount} notes?\n\nYour current data will be saved as a safety copy first.`)) return;
+      await window.dataVault.capture(JSON.stringify(dataRef.current), "before-cloud-restore", true);
+      const result = await save(parsed);
+      setGoalInput(String(parsed.dailyGoal || 100));
+      setVaultMessage(result ? "Cloud copy restored. Your previous version is still kept as a safety copy." : "Copy restored on this device. Cloud sync needs to reconnect; use the save-status retry when it does.");
+      await loadCloudBackups();
+    } catch (error) {
+      setVaultMessage(`Restore failed: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -2035,13 +2368,13 @@ function DailyGrind() {
 
   // Calendar helpers
   function saveCalEvents(nextOrUpdater) {
-    if (calLoadError) return;
+    if (calLoadError) return Promise.resolve(null);
     const current = calEventsRef.current;
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
-    if (!Array.isArray(next)) return;
+    if (!Array.isArray(next)) return Promise.resolve(null);
     calEventsRef.current = next;
     setCalEvents(next);
-    window.storage.set("dg-cal-events", JSON.stringify(next)).catch(console.error);
+    return window.storage.set("dg-cal-events", JSON.stringify(next)).catch((error) => { console.error(error); return null; });
   }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
     const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || "#4fc3f7" };
@@ -3283,6 +3616,49 @@ function DailyGrind() {
           </div>
         )}
       </div>}
+      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
+        <label style={S.lbl}>Data Protection</label>
+        <div style={{ background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 12, padding: 14, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+            <span style={{ color: window.dataVault?.cloudEnabled() ? "#4cd137" : "#fbbf24", fontSize: 12 }}>{"●"}</span>
+            <span style={{ fontSize: 11, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>
+              {window.dataVault?.cloudEnabled() ? "AUTOMATIC CLOUD HISTORY ACTIVE" : "LOCAL SAVING ACTIVE"}
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6 }}>
+            {window.dataVault?.cloudEnabled()
+              ? "DailyGrind keeps separate latest, hourly, daily, and weekly recovery copies after your edits. The app never automatically deletes them."
+              : "Your device keeps the current copy. Sign in for long-term cloud history across devices."}
+          </div>
+          {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 9, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
+          {vaultInfo.state === "saved" && <div style={{ marginTop: 8, fontSize: 9, color: "#4cd137", letterSpacing: 1.5 }}>RECOVERY COPIES CURRENT • {new Date(vaultInfo.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>}
+          {vaultInfo.state === "error" && <div style={{ marginTop: 8, fontSize: 9, color: "#ff6b7a", lineHeight: 1.5 }}>BACKUP NEEDS ATTENTION • {vaultInfo.error}</div>}
+        </div>
+        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.55 }}>
+          Downloaded backups are your independent copy if the entire site, account, or Firebase project is ever removed.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={downloadFullBackup} style={{ ...S.okBtn, flex: "1 1 180px" }}>Download Full Backup</button>
+          <button onClick={() => backupFileRef.current?.click()} style={{ ...S.cBtn, flex: "1 1 180px" }}>Restore Backup File</button>
+          <input ref={backupFileRef} type="file" accept=".json,application/json" onChange={importBackupFile} style={{ display: "none" }} />
+        </div>
+        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={loadCloudBackups} disabled={vaultLoading} style={{ ...S.cBtn, flex: "1 1 180px", opacity: vaultLoading ? 0.6 : 1 }}>
+            {vaultLoading ? "Loading Recovery History…" : "View Recovery History"}
+          </button>
+          {vaultItems.length > 0 && <button onClick={restoreCloudBackup} disabled={vaultLoading || !vaultSelectedId} style={{ ...S.okBtn, flex: "1 1 180px", opacity: vaultLoading ? 0.6 : 1 }}>Restore Selected Copy</button>}
+        </div>
+        {vaultItems.length > 0 && (
+          <select value={vaultSelectedId} onChange={(event) => setVaultSelectedId(event.target.value)} style={{ ...S.inp, marginTop: 10, fontSize: 10 }}>
+            {vaultItems.map((item) => (
+              <option key={item.id} value={item.id}>
+                {`${item.kind.toUpperCase()} • ${item.at ? new Date(item.at).toLocaleString() : "time unavailable"}${item.reason && item.reason !== "automatic" ? ` • ${item.reason.replaceAll("-", " ")}` : ""}`}
+              </option>
+            ))}
+          </select>
+        )}
+        {vaultMessage && <div style={{ marginTop: 9, fontSize: 10, color: vaultMessage.toLowerCase().includes("failed") || vaultMessage.toLowerCase().includes("could not") ? "#ff6b7a" : "#4cd137", lineHeight: 1.5 }}>{vaultMessage}</div>}
+      </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <label style={S.lbl}>Recover lost data</label>
         <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>If you used a sync code before creating your account, enter it here to pull that data into your account.</div>
