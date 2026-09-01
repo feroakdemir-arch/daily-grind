@@ -116,31 +116,16 @@
         .forEach((key) => localStorage.removeItem(key));
     };
 
-    // Sync code - stored in localStorage, shared across devices
-    const SYNC_CODE_KEY = "daily-grind-sync-code";
-    window._getSyncCode = () => localStorage.getItem(SYNC_CODE_KEY);
-    window._setSyncCode = (code) => {
-      if (code) localStorage.setItem(SYNC_CODE_KEY, code);
-      else localStorage.removeItem(SYNC_CODE_KEY);
-    };
-
-    // Where cloud data lives: a signed-in account beats a sync code.
-    // Accounts: users/{uid}/data/{key}. Sync codes (legacy): sync/{code}/data/{key}.
+    // Every cloud document is scoped to the signed-in account.
     function _docRef(key) {
       if (window._user) return fbDb.collection("users").doc(window._user.uid).collection("data").doc(key);
-      const syncCode = window._getSyncCode();
-      if (syncCode) return fbDb.collection("sync").doc(syncCode).collection("data").doc(key);
       return null;
-    }
-    function _cloudPossible() {
-      return !!(window._getSyncCode() || localStorage.getItem("dg-was-signed-in"));
     }
     // Who the data on THIS device belongs to. On a shared computer, signing into a
     // different account must never import the previous person's local data.
     function _identity() {
       if (window._user) return "uid:" + window._user.uid;
-      const c = window._getSyncCode();
-      return c ? "sync:" + c : "anon";
+      return "anon";
     }
     // "Richness" of a daily-grind-v13 blob — how much real content it holds.
     // The empty starter scores ~1; a real account scores many. Used so the
@@ -149,6 +134,16 @@
     function _mainRichness(val) {
       try {
         const d = JSON.parse(val);
+        const isObject = (item) => item && typeof item === "object" && !Array.isArray(item);
+        if (!isObject(d) || !Array.isArray(d.habitSections) || !Array.isArray(d.taskLists)) return null;
+        if (!d.habitSections.every((section) => isObject(section) && Array.isArray(section.items) && section.items.every(isObject))) return null;
+        if (!d.taskLists.every((list) => isObject(list) && Array.isArray(list.items) && list.items.every(isObject)
+          && (list.completedLog === undefined || (Array.isArray(list.completedLog) && list.completedLog.every(isObject))))) return null;
+        if (d.notes !== undefined && (!Array.isArray(d.notes) || !d.notes.every(isObject))) return null;
+        if (d.log !== undefined && !isObject(d.log)) return null;
+        if (d.history !== undefined && !isObject(d.history)) return null;
+        if (d.storeItems !== undefined && (!Array.isArray(d.storeItems) || !d.storeItems.every(isObject))) return null;
+        if (d.storePurchases !== undefined && (!Array.isArray(d.storePurchases) || !d.storePurchases.every(isObject))) return null;
         // An intentional "Reset Everything" carries a resetStamp — treat it as
         // real data so the reset propagates instead of being healed away.
         if (d.resetStamp) return 999;
@@ -162,15 +157,30 @@
         return habits + tasks + notes + hist + logs;
       } catch (e) { return null; }
     }
-    // Read a raw value straight from a sync-code backup doc (for manual recovery).
-    window._fetchSyncDoc = async (code, key) => {
-      try {
-        await _fbReady;
-        const d = await fbDb.collection("sync").doc(code).collection("data").doc(key).get();
-        return d.exists ? (d.data().value || null) : null;
-      } catch (e) { console.warn("fetchSyncDoc failed:", e); return null; }
-    };
-
+    function _validStorageValue(key, value) {
+      if (typeof value !== "string") return false;
+      if (key === "daily-grind-v13") return _mainRichness(value) !== null;
+      if (key === "dg-cal-events") {
+        try {
+          const events = JSON.parse(value);
+          const validTime = (time) => {
+            const match = typeof time === "string" && /^(\d{1,2}):(\d{2})$/.exec(time);
+            return !!(match && Number(match[1]) <= 23 && Number(match[2]) <= 59);
+          };
+          const validDate = (value) => {
+            if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+            const parts = value.split("-").map(Number);
+            const date = new Date(parts[0], parts[1] - 1, parts[2]);
+            return date.getFullYear() === parts[0] && date.getMonth() === parts[1] - 1 && date.getDate() === parts[2];
+          };
+          return Array.isArray(events) && events.every((event) => event && typeof event === "object" && !Array.isArray(event)
+            && validDate(event.date)
+            && validTime(event.start) && validTime(event.end));
+        }
+        catch (e) { return false; }
+      }
+      return true;
+    }
     const _cloudWriteQueues = {};
     const _pendingStorageWrites = {};
     const _storageStatusListeners = new Set();
@@ -197,6 +207,7 @@
     // truth, while these independent copies make accidental deletion or a bad
     // overwrite recoverable. Daily Grind never deletes vault documents.
     const VAULT_PREFIX = "dg-vault-main-";
+    const VAULT_CAL_PREFIX = "dg-vault-calendar-";
     const VAULT_INDEX_PREFIX = "dg-vault-index-";
     const _vaultStatusListeners = new Set();
     const _vaultIndexQueues = {};
@@ -208,8 +219,6 @@
     }
     function _vaultCollection() {
       if (window._user) return fbDb.collection("users").doc(window._user.uid).collection("data");
-      const syncCode = window._getSyncCode();
-      if (syncCode) return fbDb.collection("sync").doc(syncCode).collection("data");
       return null;
     }
     function _localDateParts(now) {
@@ -237,7 +246,13 @@
       const bytes = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
       return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
     }
-    function _updateVaultIndex(collection, targets, now, reason, sizeBytes) {
+    function _calendarValueForVault() {
+      const raw = localStorage.getItem("dg-cal-events");
+      if (raw === null) return "[]";
+      if (!_validStorageValue("dg-cal-events", raw)) throw new Error("Calendar data is invalid and was not backed up");
+      return raw;
+    }
+    function _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes) {
       const parts = _localDateParts(now);
       const indexId = VAULT_INDEX_PREFIX + parts.day.slice(0, 7);
       const previous = _vaultIndexQueues[indexId] || Promise.resolve();
@@ -252,7 +267,7 @@
           } catch (e) {}
         }
         const additions = targets.filter((target) => target.kind !== "latest").map((target) => ({
-          id: target.id, kind: target.kind, reason: reason || "automatic", at: now, sizeBytes,
+          id: target.id, calendarId: target.calendarId, kind: target.kind, reason: reason || "automatic", at: now, sizeBytes, calendarSizeBytes,
         }));
         additions.forEach((addition) => {
           const existing = entries.findIndex((entry) => entry && entry.id === addition.id);
@@ -276,41 +291,58 @@
       if (typeof value !== "string" || _mainRichness(value) === null) throw new Error("Backup data is invalid");
       await _fbReady;
       const collection = _vaultCollection();
+      const calendarValue = _calendarValueForVault();
       if (!collection) {
         if (safetyCopy) {
-          try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, reason, at: Date.now() })); }
+          try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, calendarValue, reason, at: Date.now() })); }
           catch (e) { throw new Error("A local safety copy could not be created"); }
         }
         _emitVaultStatus("local-only", { message: "Sign in to enable automatic cloud history." });
         return { cloud: false, copies: safetyCopy ? 1 : 0 };
       }
       const sizeBytes = _byteSize(value);
+      const calendarSizeBytes = _byteSize(calendarValue);
       // Firestore documents are capped at about 1 MiB; leave room for vault metadata.
       if (sizeBytes > 950000) throw new Error("Your data is too large for a cloud snapshot. Download a backup file instead.");
+      if (calendarSizeBytes > 950000) throw new Error("Your calendar is too large for a cloud snapshot. Download a backup file instead.");
       const now = Date.now();
       const checksum = await _sha256(value);
+      const calendarChecksum = await _sha256(calendarValue);
       const parts = _localDateParts(now);
       const targets = safetyCopy
-        ? [{ id: `${VAULT_PREFIX}safety-${now}`, kind: "safety" }]
+        ? [{ id: `${VAULT_PREFIX}safety-${now}`, calendarId: `${VAULT_CAL_PREFIX}safety-${now}`, kind: "safety" }]
         : [
-            { id: `${VAULT_PREFIX}latest`, kind: "latest" },
-            { id: `${VAULT_PREFIX}hourly-${parts.hour}`, kind: "hourly" },
-            { id: `${VAULT_PREFIX}daily-${parts.day}`, kind: "daily" },
-            { id: `${VAULT_PREFIX}weekly-${_weekStart(now)}`, kind: "weekly" },
+            { id: `${VAULT_PREFIX}latest`, calendarId: `${VAULT_CAL_PREFIX}latest`, kind: "latest" },
+            { id: `${VAULT_PREFIX}hourly-${parts.hour}`, calendarId: `${VAULT_CAL_PREFIX}hourly-${parts.hour}`, kind: "hourly" },
+            { id: `${VAULT_PREFIX}daily-${parts.day}`, calendarId: `${VAULT_CAL_PREFIX}daily-${parts.day}`, kind: "daily" },
+            { id: `${VAULT_PREFIX}weekly-${_weekStart(now)}`, calendarId: `${VAULT_CAL_PREFIX}weekly-${_weekStart(now)}`, kind: "weekly" },
           ];
       _emitVaultStatus("saving", { reason: reason || "automatic" });
-      await Promise.all(targets.map((target) => _queueCloudWrite(`vault:${target.id}`, collection.doc(target.id), {
-        value,
-        checksum,
-        sizeBytes,
-        schemaVersion: 1,
-        kind: target.kind,
-        reason: reason || "automatic",
-        clientCreatedAt: now,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      })));
-      await _updateVaultIndex(collection, targets, now, reason, sizeBytes);
-      const result = { cloud: true, copies: targets.length, at: now };
+      await Promise.all(targets.flatMap((target) => [
+        _queueCloudWrite(`vault:${target.id}`, collection.doc(target.id), {
+          value,
+          checksum,
+          sizeBytes,
+          calendarId: target.calendarId,
+          schemaVersion: 2,
+          kind: target.kind,
+          reason: reason || "automatic",
+          clientCreatedAt: now,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        }),
+        _queueCloudWrite(`vault:${target.calendarId}`, collection.doc(target.calendarId), {
+          value: calendarValue,
+          checksum: calendarChecksum,
+          sizeBytes: calendarSizeBytes,
+          schemaVersion: 2,
+          kind: target.kind,
+          reason: reason || "automatic",
+          clientCreatedAt: now,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        }),
+      ]));
+      await _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes);
+      const result = { cloud: true, copies: targets.length * 2, at: now };
       _emitVaultStatus("saved", result);
       return result;
     }
@@ -337,7 +369,7 @@
         try {
           const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
           if (local && typeof local.value === "string") localItems = [{
-            id: `${VAULT_PREFIX}local-safety`, kind: "safety", reason: local.reason || "local-safety", at: local.at || 0, sizeBytes: _byteSize(local.value),
+            id: `${VAULT_PREFIX}local-safety`, calendarId: `${VAULT_CAL_PREFIX}local-safety`, kind: "safety", reason: local.reason || "local-safety", at: local.at || 0, sizeBytes: _byteSize(local.value), calendarSizeBytes: typeof local.calendarValue === "string" ? _byteSize(local.calendarValue) : 0,
           }];
         } catch (e) {}
         const collection = _vaultCollection();
@@ -367,7 +399,7 @@
         if (id === `${VAULT_PREFIX}local-safety`) {
           const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
           if (!local || typeof local.value !== "string" || _mainRichness(local.value) === null) throw new Error("That local safety copy is invalid");
-          return { value: local.value, kind: "safety", at: local.at || 0 };
+          return { value: local.value, calendarValue: typeof local.calendarValue === "string" ? local.calendarValue : null, kind: "safety", at: local.at || 0 };
         }
         await _fbReady;
         const collection = _vaultCollection();
@@ -380,13 +412,25 @@
           const actual = await _sha256(item.value);
           if (actual && actual !== item.checksum) throw new Error("Backup integrity check failed");
         }
-        return { value: item.value, kind: item.kind || "snapshot", at: item.clientCreatedAt || 0 };
+        let calendarValue = null;
+        if (typeof item.calendarId === "string" && item.calendarId.startsWith(VAULT_CAL_PREFIX)) {
+          const calendarDoc = await collection.doc(item.calendarId).get();
+          if (!calendarDoc.exists) throw new Error("The calendar companion for this backup is missing");
+          const calendarItem = calendarDoc.data() || {};
+          if (!_validStorageValue("dg-cal-events", calendarItem.value)) throw new Error("The calendar backup is invalid");
+          if (calendarItem.checksum) {
+            const actualCalendar = await _sha256(calendarItem.value);
+            if (actualCalendar && actualCalendar !== calendarItem.checksum) throw new Error("Calendar backup integrity check failed");
+          }
+          calendarValue = calendarItem.value;
+        }
+        return { value: item.value, calendarValue, kind: item.kind || "snapshot", at: item.clientCreatedAt || 0 };
       },
       onStatus(callback) {
         _vaultStatusListeners.add(callback);
         return () => _vaultStatusListeners.delete(callback);
       },
-      cloudEnabled() { return !!(window._user || window._getSyncCode()); },
+      cloudEnabled() { return !!window._user; },
     };
 
     // Storage that syncs localStorage + Firestore.
@@ -421,9 +465,9 @@
                 const fbData = doc.data();
                 const fbValue = fbData.value;
                 const fbTs = fbData.localTs || 0;
-                if (typeof fbValue !== "string") {
+                if (!_validStorageValue(key, fbValue)) {
                   console.warn("Cloud data is invalid for", key);
-                  if (!localData) return { error: true };
+                  if (!localData || !_validStorageValue(key, localData.value)) return { error: true };
                   const healTs = Math.max(localTs, fbTs, Date.now()) + 1;
                   localStorage.setItem(key + "_ts", String(healTs));
                   window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
@@ -459,9 +503,12 @@
                 // Cloud is source of truth when sync is enabled.
                 // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
                 if (localTs > fbTs && localData) {
-                  // Local has unsynced changes — push to cloud
-                  _queueCloudWrite(key, ref, { value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
-                  return localData;
+                  if (_validStorageValue(key, localData.value)) {
+                    // Local has unsynced changes — push to cloud
+                    _queueCloudWrite(key, ref, { value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                    return localData;
+                  }
+                  console.warn("Invalid local data was ignored for", key);
                 }
                 // Otherwise, cloud wins
                 const saveTs = fbTs || Date.now();
@@ -476,6 +523,7 @@
                 // migrates into a fresh account on first sign-in).
                 // EXCEPT: if the local data belongs to a DIFFERENT signed-in
                 // account, start this account clean instead of importing it.
+                if (!_validStorageValue(key, localData.value)) return { error: true };
                 if (owner && owner.indexOf("uid:") === 0 && owner !== ident) {
                   localStorage.removeItem(key);
                   localStorage.removeItem(key + "_ts");
@@ -503,6 +551,7 @@
       async set(key, value) {
         let ts;
         try {
+          if (!_validStorageValue(key, value)) throw new Error(`Invalid data was blocked for ${key}`);
           ts = _nextLocalTs(key);
           localStorage.setItem(key, value);
           localStorage.setItem(key + "_ts", String(ts));
@@ -527,6 +576,10 @@
             });
           }
           if (key === "daily-grind-v13") window.dataVault.schedule(value);
+          if (key === "dg-cal-events") {
+            const mainValue = localStorage.getItem("daily-grind-v13");
+            if (mainValue) window.dataVault.schedule(mainValue);
+          }
           _pendingStorageWrites[key] = Math.max(0, (_pendingStorageWrites[key] || 1) - 1);
           if (!Object.values(_pendingStorageWrites).some((count) => count > 0)) _emitStorageStatus("saved", key);
           return { key, value };
@@ -536,6 +589,18 @@
           _emitStorageStatus("error", key, e);
           throw e;
         }
+      },
+      // Synchronous local-only persistence for pagehide/visibilitychange. The
+      // newer timestamp makes the regular load path upload it on the next open.
+      setLocalOnly(key, value) {
+        if (!_validStorageValue(key, value)) throw new Error(`Invalid data was blocked for ${key}`);
+        const ts = _nextLocalTs(key);
+        localStorage.setItem(key, value);
+        localStorage.setItem(key + "_ts", String(ts));
+        if (_docRef(key)) localStorage.setItem("dg-owner", _identity());
+        window._lastLocalTs = window._lastLocalTs || {};
+        window._lastLocalTs[key] = ts;
+        return { key, value };
       },
       onStatus(callback) {
         _storageStatusListeners.add(callback);
@@ -552,6 +617,11 @@
           unsub = ref.onSnapshot((doc) => {
               if (!doc.exists) return;
               const d = doc.data();
+              if (!_validStorageValue(key, d.value)) {
+                console.warn("Invalid cloud update blocked for", key);
+                _emitStorageStatus("error", key, new Error("Invalid cloud update was blocked"));
+                return;
+              }
               const fbTs = d.localTs || 0;
               const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
               // Ignore echoes of our own recent writes
@@ -565,7 +635,6 @@
                   const rc = _mainRichness(d.value), rl = localRaw !== null ? _mainRichness(localRaw) : null;
                   if (rc !== null && rl !== null && rc <= 2 && rl >= rc + 3) return;
                 }
-                if (typeof d.value !== "string") return;
                 localStorage.setItem(key, d.value);
                 localStorage.setItem(key + "_ts", String(fbTs));
                 localStorage.setItem("dg-owner", _identity());
@@ -581,6 +650,7 @@
 const { useState, useEffect, useCallback, useRef } = React;
 
 const STORAGE_KEY = "daily-grind-v13";
+const MAX_SAFE_DOC_BYTES = 900000;
 const DAYS = ["Sa", "Su", "Mo", "Tu", "We", "Th", "Fr"];
 
 const DEFAULT_HABIT_SECTIONS = [
@@ -608,14 +678,91 @@ function parseMainData(raw) {
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
     throw new Error("Saved Daily Grind data has an invalid shape");
   }
+  const objectOnly = (value) => value && typeof value === "object" && !Array.isArray(value);
+  const finiteNumber = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const optionalDate = (value) => typeof value === "string" && datePattern.test(value) ? value : undefined;
+  const normalizeTask = (item, fallbackId, fallbackName) => {
+    const normalized = {
+      ...item,
+      id: typeof item.id === "string" && item.id ? item.id : fallbackId,
+      name: typeof item.name === "string" ? item.name : fallbackName,
+      points: Math.max(0, finiteNumber(item.points, 0)),
+      trackedSeconds: Math.max(0, finiteNumber(item.trackedSeconds, 0)),
+      done: item.done === true,
+    };
+    const doneDate = optionalDate(item.doneDate);
+    if (doneDate) normalized.doneDate = doneDate; else delete normalized.doneDate;
+    if (typeof item.deadline === "string" && item.deadline.length <= 32) normalized.deadline = item.deadline;
+    else delete normalized.deadline;
+    const timerStartedAt = finiteNumber(item.timerStartedAt, 0);
+    if (timerStartedAt > 0) normalized.timerStartedAt = timerStartedAt; else delete normalized.timerStartedAt;
+    return normalized;
+  };
+  const habitSections = parsed.habitSections.filter(objectOnly).map((section, sectionIndex) => ({
+    ...section,
+    id: typeof section.id === "string" && section.id ? section.id : `section_legacy_${sectionIndex}`,
+    title: typeof section.title === "string" ? section.title : "HABITS",
+    icon: typeof section.icon === "string" ? section.icon : "•",
+    items: (Array.isArray(section.items) ? section.items : []).filter(objectOnly).map((item, itemIndex) => ({
+      ...item,
+      id: typeof item.id === "string" && item.id ? item.id : `habit_legacy_${sectionIndex}_${itemIndex}`,
+      name: typeof item.name === "string" ? item.name : "Untitled habit",
+      points: Math.max(1, finiteNumber(item.points, 10)),
+      desc: typeof item.desc === "string" ? item.desc : "",
+    })),
+  }));
+  const taskLists = parsed.taskLists.filter(objectOnly).map((list, listIndex) => ({
+    ...list,
+    id: typeof list.id === "string" && list.id ? list.id : `tasklist_legacy_${listIndex}`,
+    title: typeof list.title === "string" ? list.title : "Tasks",
+    resetsDaily: list.resetsDaily === true,
+    items: (Array.isArray(list.items) ? list.items : []).filter(objectOnly).map((item, itemIndex) =>
+      normalizeTask(item, `task_legacy_${listIndex}_${itemIndex}`, "Untitled task")),
+    completedLog: (Array.isArray(list.completedLog) ? list.completedLog : []).filter(objectOnly).map((entry, entryIndex) => {
+      const normalized = normalizeTask(entry, `completed_legacy_${listIndex}_${entryIndex}`, "Completed task");
+      normalized.done = true;
+      const date = optionalDate(entry.date);
+      if (date) normalized.date = date; else delete normalized.date;
+      delete normalized.timerStartedAt;
+      return normalized;
+    }),
+  }));
+  const log = objectOnly(parsed.log) ? Object.entries(parsed.log).reduce((days, [date, values]) => {
+    if (!objectOnly(values)) return days;
+    const safeValues = Object.entries(values).reduce((entries, [key, value]) => {
+      if (typeof value === "string") entries[key] = value;
+      return entries;
+    }, {});
+    days[date] = safeValues;
+    return days;
+  }, {}) : {};
+  const history = objectOnly(parsed.history) ? Object.entries(parsed.history).reduce((days, [date, entry]) => {
+    if (!objectOnly(entry)) return days;
+    const score = Math.max(0, finiteNumber(entry.score, 0));
+    const goal = Math.max(1, finiteNumber(entry.goal, parsed.dailyGoal || 100));
+    days[date] = { ...entry, score, goal, won: entry.won === true || score >= goal, ts: Math.max(0, finiteNumber(entry.ts, 0)) };
+    return days;
+  }, {}) : {};
+  const storeItems = Array.isArray(parsed.storeItems) ? parsed.storeItems.filter(objectOnly).map((item, index) => ({
+    ...item,
+    id: typeof item.id === "string" && item.id ? item.id : `store_legacy_${index}`,
+    name: typeof item.name === "string" ? item.name : "Reward",
+    price: Math.max(0, finiteNumber(item.price, 0)),
+  })) : undefined;
+  const storePurchases = Array.isArray(parsed.storePurchases) ? parsed.storePurchases.filter(objectOnly).map((item, index) => ({
+    ...item,
+    id: typeof item.id === "string" && item.id ? item.id : `purchase_legacy_${index}`,
+    name: typeof item.name === "string" ? item.name : "Reward",
+    price: Math.max(0, finiteNumber(item.price, 0)),
+    date: optionalDate(item.date) || "",
+  })) : [];
+  const calStartHour = Math.min(10, Math.max(4, Math.floor(finiteNumber(parsed.calStartHour, 6))));
+  const calEndHour = Math.min(28, Math.max(21, Math.floor(finiteNumber(parsed.calEndHour, 23))));
   return {
     ...parsed,
-    habitSections: parsed.habitSections.map((section) => ({ ...section, items: Array.isArray(section.items) ? section.items : [] })),
-    taskLists: parsed.taskLists.map((list) => ({
-      ...list,
-      items: Array.isArray(list.items) ? list.items : [],
-      completedLog: Array.isArray(list.completedLog) ? list.completedLog : [],
-    })),
+    habitSections: habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
+    taskLists,
     notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note) => note && typeof note === "object").map((note, index) => ({
       id: typeof note.id === "string" && note.id ? note.id : `note_legacy_${index}`,
       title: typeof note.title === "string" ? note.title : "",
@@ -625,9 +772,55 @@ function parseMainData(raw) {
       createdAt: Number.isFinite(note.createdAt) ? note.createdAt : 0,
       updatedAt: Number.isFinite(note.updatedAt) ? note.updatedAt : (Number.isFinite(note.createdAt) ? note.createdAt : 0),
     })) : [],
-    log: parsed.log && typeof parsed.log === "object" ? parsed.log : {},
-    history: parsed.history && typeof parsed.history === "object" ? parsed.history : {},
+    dailyGoal: Math.max(1, finiteNumber(parsed.dailyGoal, 100)),
+    dayResetHour: Math.min(6, Math.max(0, Math.floor(finiteNumber(parsed.dayResetHour, 0)))),
+    streak: Math.max(0, Math.floor(finiteNumber(parsed.streak, 0))),
+    lastCompletedDate: optionalDate(parsed.lastCompletedDate) || null,
+    lastTaskResetDate: optionalDate(parsed.lastTaskResetDate),
+    log,
+    history,
+    storeItems,
+    storePurchases,
+    walletSpent: Math.max(0, finiteNumber(parsed.walletSpent, 0)),
+    calStartHour,
+    calEndHour,
   };
+}
+
+function parseCalendarData(raw) {
+  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!Array.isArray(parsed)) throw new Error("Saved calendar data has an invalid shape");
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const validDate = (value) => {
+    if (typeof value !== "string" || !datePattern.test(value)) return false;
+    const [year, month, day] = value.split("-").map(Number);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+  };
+  const validTime = (value) => {
+    const match = typeof value === "string" && /^(\d{1,2}):(\d{2})$/.exec(value);
+    return !!(match && Number(match[1]) <= 23 && Number(match[2]) <= 59);
+  };
+  const repeats = new Set(["daily", "weekly", "weekdays", "custom"]);
+  return parsed.map((event, index) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error(`Calendar event ${index + 1} is invalid`);
+    if (!validDate(event.date)) throw new Error(`Calendar event ${index + 1} has an invalid date`);
+    if (!validTime(event.start) || !validTime(event.end)) {
+      throw new Error(`Calendar event ${index + 1} has an invalid time`);
+    }
+    const normalized = {
+      ...event,
+      id: typeof event.id === "string" && event.id ? event.id : `calendar_legacy_${index}`,
+      title: typeof event.title === "string" && event.title.trim() ? event.title : "Untitled event",
+      desc: typeof event.desc === "string" ? event.desc : "",
+      color: typeof event.color === "string" && /^#[0-9a-f]{3,8}$/i.test(event.color) ? event.color : "#4fc3f7",
+      exceptions: Array.isArray(event.exceptions) ? event.exceptions.filter(validDate) : undefined,
+      repeatDays: Array.isArray(event.repeatDays) ? [...new Set(event.repeatDays.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b) : undefined,
+    };
+    if (repeats.has(event.repeat)) normalized.repeat = event.repeat; else delete normalized.repeat;
+    if (validDate(event.untilDate)) normalized.untilDate = event.untilDate; else delete normalized.untilDate;
+    return normalized;
+  });
 }
 
 function makeId(prefix) {
@@ -637,9 +830,32 @@ function makeId(prefix) {
   return `${prefix}_${Date.now()}_${random}`;
 }
 
+function textByteSize(text) {
+  try { return new TextEncoder().encode(text).length; }
+  catch (e) { return new Blob([text]).size; }
+}
+
+async function sha256Text(text) {
+  if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) return "";
+  const bytes = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function noteSignature(note) {
   if (!note) return "";
   return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true]);
+}
+
+function normalizedNoteDraft(draft, now = Date.now()) {
+  return {
+    ...draft,
+    title: draft.title.trim() || "Untitled note",
+    body: draft.body,
+    tag: draft.tag.trim(),
+    pinned: draft.pinned === true,
+    createdAt: draft.createdAt || now,
+    updatedAt: now,
+  };
 }
 
 function localDateStr(d) {
@@ -1454,8 +1670,6 @@ function DailyGrind() {
   const [formTaskDeadline, setFormTaskDeadline] = useState("");
   const [formTaskTime, setFormTaskTime] = useState("");
   const [goalInput, setGoalInput] = useState("200");
-  const [syncCode, setSyncCode] = useState(window._getSyncCode() || "");
-  const [recoverCode, setRecoverCode] = useState(() => (window._user && (window._user.email || "").toLowerCase() === "feroakdemir@gmail.com") ? "123" : "");
   const [storeBuyAnim, setStoreBuyAnim] = useState(null);
   const [storeName, setStoreName] = useState("");
   const [storePrice, setStorePrice] = useState("");
@@ -1477,6 +1691,8 @@ function DailyGrind() {
   const noteSaveTimerRef = useRef(null);
   const noteSaveVersionRef = useRef(0);
   const noteSavedSignatureRef = useRef("");
+  const noteDraftRef = useRef(null);
+  noteDraftRef.current = noteDraft;
   const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
@@ -1582,23 +1798,40 @@ function DailyGrind() {
     if (!current) return Promise.resolve(null);
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
     if (!next || typeof next !== "object") return Promise.resolve(null);
-    dataRef.current = next;
-    setData(next);
+    let validated;
+    let serialized;
+    try {
+      serialized = JSON.stringify(next);
+      if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) throw new Error("Daily Grind data reached the safe cloud size limit. Download a backup before adding more data.");
+      validated = parseMainData(serialized);
+      serialized = JSON.stringify(validated);
+    } catch (error) {
+      console.error("Main data save blocked:", error);
+      setSaveInfo({ state: "error", key: STORAGE_KEY, error: String(error.message || error) });
+      return Promise.resolve(null);
+    }
+    dataRef.current = validated;
+    setData(validated);
     setHasSavedData(true);
-    return window.storage.set(STORAGE_KEY, JSON.stringify(next)).catch((e) => { console.error(e); return null; });
+    return window.storage.set(STORAGE_KEY, serialized).catch((e) => { console.error(e); return null; });
+  }, []);
+
+  const protectBeforeDestructive = useCallback(async (reason) => {
+    if (!dataRef.current) return false;
+    try {
+      await window.dataVault.capture(JSON.stringify(dataRef.current), reason, true);
+      return true;
+    } catch (error) {
+      console.error("Safety copy failed:", error);
+      alert("The safety copy could not be created, so nothing was deleted. Check your connection and try again.");
+      return false;
+    }
   }, []);
 
   const persistNoteDraft = useCallback((draft) => {
     if (!draft || (!draft.title.trim() && !draft.body.trim())) return Promise.resolve(null);
     const now = Date.now();
-    const note = {
-      ...draft,
-      title: draft.title.trim() || "Untitled note",
-      body: draft.body,
-      tag: draft.tag.trim(),
-      createdAt: draft.createdAt || now,
-      updatedAt: now,
-    };
+    const note = normalizedNoteDraft(draft, now);
     return save((current) => {
       const notes = Array.isArray(current.notes) ? current.notes : [];
       const exists = notes.some((entry) => entry.id === note.id);
@@ -1634,6 +1867,42 @@ function DailyGrind() {
     return () => clearTimeout(noteSaveTimerRef.current);
   }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, persistNoteDraft]);
 
+  // The normal note save is intentionally debounced, but closing or hiding a
+  // tab can happen inside that short window. Save the latest draft to the
+  // device synchronously; the normal load path uploads its newer timestamp.
+  useEffect(() => {
+    const persistLastDraftLocally = () => {
+      const draft = noteDraftRef.current;
+      const current = dataRef.current;
+      if (!draft || !current || (!draft.title.trim() && !draft.body.trim())) return;
+      if (noteSignature(draft) === noteSavedSignatureRef.current) return;
+      try {
+        const note = normalizedNoteDraft(draft);
+        const notes = Array.isArray(current.notes) ? current.notes : [];
+        const exists = notes.some((entry) => entry.id === note.id);
+        const next = parseMainData(JSON.stringify({
+          ...current,
+          notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
+        }));
+        const serialized = JSON.stringify(next);
+        if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) return;
+        dataRef.current = next;
+        window.storage.setLocalOnly(STORAGE_KEY, serialized);
+      } catch (error) {
+        console.warn("Last-chance note save failed:", error);
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistLastDraftLocally();
+    };
+    window.addEventListener("pagehide", persistLastDraftLocally);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", persistLastDraftLocally);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
   useEffect(() => {
     if (noteTagFilter === "all" || !data) return;
     if (noteTagFilter === "__untagged__") return;
@@ -1657,7 +1926,10 @@ function DailyGrind() {
         dataRef.current = parsed;
         setData(parsed);
         setGoalInput(String(parsed.dailyGoal || 100));
-      } catch(e) { console.warn("Live sync parse failed:", e); }
+      } catch(e) {
+        console.warn("Live sync parse failed:", e);
+        setSaveInfo({ state: "error", key: STORAGE_KEY, error: "An invalid cloud update was blocked. Your current data was kept safe." });
+      }
     });
     return unsub;
   }, []);
@@ -1667,13 +1939,16 @@ function DailyGrind() {
     if (!window.storage.subscribe) return;
     const unsub = window.storage.subscribe("dg-cal-events", (newValue) => {
       try {
-        const parsed = JSON.parse(newValue);
-        if (!Array.isArray(parsed)) throw new Error("Invalid calendar data");
+        const parsed = parseCalendarData(newValue);
         calEventsRef.current = parsed;
         setCalEvents(parsed);
         setCalLoadError(false);
       }
-      catch(e) { console.warn("Cal live sync parse failed:", e); }
+      catch(e) {
+        console.warn("Cal live sync parse failed:", e);
+        setCalLoadError(true);
+        setSaveInfo({ state: "error", key: "dg-cal-events", error: "An invalid calendar update was blocked. Your current calendar was kept safe." });
+      }
     });
     return unsub;
   }, []);
@@ -1691,8 +1966,7 @@ function DailyGrind() {
           return;
         }
         if (r?.value) {
-          const parsed = JSON.parse(r.value);
-          if (!Array.isArray(parsed)) throw new Error("Invalid calendar data");
+          const parsed = parseCalendarData(r.value);
           calEventsRef.current = parsed;
           setCalEvents(parsed);
         }
@@ -1700,8 +1974,7 @@ function DailyGrind() {
           // Fallback: read raw localStorage if storage.get returned nothing
           const raw = localStorage.getItem("dg-cal-events");
           if (raw) {
-            const parsed = JSON.parse(raw);
-            if (!Array.isArray(parsed)) throw new Error("Invalid local calendar data");
+            const parsed = parseCalendarData(raw);
             calEventsRef.current = parsed;
             setCalEvents(parsed);
           }
@@ -1715,6 +1988,11 @@ function DailyGrind() {
       setCalEventsLoaded(true);
     })();
   }, [calEventsLoaded, calLoadAttempt]);
+
+  useEffect(() => {
+    if (!calEventsLoaded || calLoadError || !dataRef.current || !hasSavedData) return;
+    window.dataVault?.schedule(JSON.stringify(dataRef.current));
+  }, [calEventsLoaded, calLoadError, hasSavedData]);
 
   // Day rollover
   useEffect(() => {
@@ -1795,37 +2073,6 @@ function DailyGrind() {
     }
   }, [data, save, hasSavedData]);
 
-  // One-time auto-recovery for the OWNER ONLY: if signed in and the account is
-  // the empty starter, pull the frozen sync-code backup and restore it. Gated
-  // to the owner's email — without this gate, every brand-new user's empty
-  // account would get the owner's personal backup restored into it.
-  // TODO: remove entirely once the owner has confirmed recovery.
-  const isOwner = !!(window._user && (window._user.email || "").toLowerCase() === "feroakdemir@gmail.com");
-  const autoRecoverTried = useRef(false);
-  useEffect(() => {
-    if (!data || loading || autoRecoverTried.current) return;
-    if (!isOwner || !window._fetchSyncDoc) return;
-    if (localStorage.getItem("dg-autorecover-v1")) return;
-    if (data.resetStamp) { localStorage.setItem("dg-autorecover-v1", "1"); return; }
-    const cur = allHabits(data.habitSections).length + data.taskLists.reduce((s, l) => s + l.items.length, 0) + (data.notes || []).length + Object.keys(data.history || {}).length;
-    if (cur > 2) { localStorage.setItem("dg-autorecover-v1", "1"); return; } // already has real data
-    autoRecoverTried.current = true;
-    (async () => {
-      try {
-        const val = await window._fetchSyncDoc("123", STORAGE_KEY);
-        if (!val) return;
-        const parsed = JSON.parse(val);
-        const rich = allHabits(parsed.habitSections || []).length + (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0) + (Array.isArray(parsed.notes) ? parsed.notes.length : 0);
-        if (rich >= 3) {
-          localStorage.setItem("dg-autorecover-v1", "1");
-          setGoalInput(String(parsed.dailyGoal || 100));
-          setHasSavedData(true);
-          save(parsed);
-        }
-      } catch (e) { console.warn("auto-recover failed", e); }
-    })();
-  }, [data, loading, save]);
-
   const getTL = () => data?.log[today] || {};
 
   function toggleHabit(itemId) {
@@ -1847,7 +2094,13 @@ function DailyGrind() {
     save((current) => ({ ...current, habitSections: current.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item] } : s) }));
     setFormName(""); setFormPoints("10"); setFormDesc(""); setView("main");
   }
-  function deleteHabit(id) { save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) })); setView("main"); }
+  async function deleteHabit(id) {
+    const habit = allHabits(dataRef.current?.habitSections || []).find((item) => item.id === id);
+    if (!confirm(`Delete "${habit?.name || "this habit"}"? A safety copy will be kept first.`)) return;
+    if (!(await protectBeforeDestructive("before-habit-delete"))) return;
+    await save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) })) }));
+    setView("main");
+  }
   function saveHabitEdit() {
     if (!editItem || !formName.trim()) return;
     const u = { ...editItem, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
@@ -1911,12 +2164,19 @@ function DailyGrind() {
       })) };
     });
   }, [save]);
-  const deleteTaskItem = useCallback((listId, taskId) => {
-    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) }));
-  }, [save]);
-  const deleteCompletedEntry = useCallback((listId, entryId) => {
-    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) }));
-  }, [save]);
+  const deleteTaskItem = useCallback(async (listId, taskId) => {
+    const task = dataRef.current?.taskLists.find((list) => list.id === listId)?.items.find((item) => item.id === taskId);
+    if (!confirm(`Delete "${task?.name || "this task"}"? A safety copy will be kept first.`)) return false;
+    if (!(await protectBeforeDestructive("before-task-delete"))) return false;
+    const result = await save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: l.items.filter((t) => t.id !== taskId) } : l) }));
+    return !!result;
+  }, [save, protectBeforeDestructive]);
+  const deleteCompletedEntry = useCallback(async (listId, entryId) => {
+    const entry = dataRef.current?.taskLists.find((list) => list.id === listId)?.completedLog?.find((item) => item.id === entryId);
+    if (!confirm(`Remove "${entry?.name || "this completed task"}" from history? A safety copy will be kept first.`)) return;
+    if (!(await protectBeforeDestructive("before-task-history-delete"))) return;
+    await save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) }));
+  }, [save, protectBeforeDestructive]);
   const addTaskItem = useCallback((listId, name, points) => {
     const task = { id: makeId("t"), name, points, done: false };
     save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) }));
@@ -1983,11 +2243,12 @@ function DailyGrind() {
     }) }));
     setEditTaskCtx(null); setView("main");
   }
-  const deleteTaskList = useCallback((listId) => {
+  const deleteTaskList = useCallback(async (listId) => {
     const list = dataRef.current?.taskLists.find((entry) => entry.id === listId);
     if (list && (list.items.length || (list.completedLog || []).length) && !confirm(`Delete "${list.title}" and all of its tasks?`)) return;
-    save((prev) => ({ ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) }));
-  }, [save]);
+    if (!(await protectBeforeDestructive("before-task-list-delete"))) return;
+    await save((prev) => ({ ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) }));
+  }, [save, protectBeforeDestructive]);
 
   function addNewList() {
     if (!newListName.trim()) return;
@@ -2049,6 +2310,7 @@ function DailyGrind() {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     try {
+      await flushCurrentNote();
       await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-note-delete", true);
     } catch (error) {
       alert("The safety copy could not be created, so the note was not deleted. Check your connection and try again.");
@@ -2061,6 +2323,7 @@ function DailyGrind() {
   async function resetAll() {
     if (!confirm("Reset every habit, task, note, score, streak, and reward? Your cloud copy will also be reset.")) return;
     try {
+      await flushCurrentNote();
       await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-reset-everything", true);
     } catch (error) {
       alert("The safety copy could not be created, so nothing was reset. Check your connection and try again.");
@@ -2087,8 +2350,9 @@ function DailyGrind() {
     save((current) => ({ ...current, storeItems: [...(current.storeItems || []), { id: makeId("st"), name, price }] }));
     setStoreName(""); setStorePrice("");
   }
-  function deleteStoreItem(id) {
-    save((current) => ({ ...current, storeItems: (current.storeItems || []).filter((i) => i.id !== id) }));
+  async function deleteStoreItem(id) {
+    if (!(await protectBeforeDestructive("before-store-item-delete"))) return;
+    await save((current) => ({ ...current, storeItems: (current.storeItems || []).filter((i) => i.id !== id) }));
   }
   function startStoreEdit(item) {
     setEditStoreId(item.id);
@@ -2103,30 +2367,6 @@ function DailyGrind() {
     save((current) => ({ ...current, storeItems: (current.storeItems || mkStoreDefaults(current.dailyGoal)).map((i) => i.id === editStoreId ? { ...i, name, price } : i) }));
     setEditStoreId(null);
   }
-  function recoverFromSyncCode(code) {
-    (async () => {
-      const c = (code || "").trim();
-      if (!c) { alert("Enter the sync code you used before signing in (e.g. 123)."); return; }
-      const val = await window._fetchSyncDoc(c, STORAGE_KEY);
-      if (!val) { alert(`No backup found under code "${c}". Double-check the code and try again.`); return; }
-      let parsed; try { parsed = parseMainData(val); } catch (e) { alert("That backup couldn't be read safely."); return; }
-      const habitN = (parsed.habitSections || []).reduce((s, sec) => s + (sec.items || []).length, 0);
-      const taskN = (parsed.taskLists || []).reduce((s, l) => s + (l.items || []).length, 0);
-      if (!confirm(`Found a backup with ${habitN} habits and ${taskN} tasks under code "${c}".\n\nRestore it? This replaces your current data and saves it to your account.`)) return;
-      try {
-        await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-sync-code-restore", true);
-      } catch (error) {
-        alert("The safety copy could not be created, so nothing was restored. Check your connection and try again.");
-        return;
-      }
-      setGoalInput(String(parsed.dailyGoal || 100));
-      setHasSavedData(true);
-      const result = await save(parsed);
-      alert(result ? "Restored! Your habits and tasks are back and synced." : "Restored on this device. Cloud sync still needs to reconnect; tap CLOUD SYNC FAILED to retry.");
-      setView("main"); setPage("habits");
-    })();
-  }
-
   async function flushCurrentNote() {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
@@ -2146,12 +2386,20 @@ function DailyGrind() {
       const mainData = dataRef.current;
       if (!mainData) throw new Error("Daily Grind data is not loaded");
       const exportedAt = new Date().toISOString();
+      const mainText = JSON.stringify(mainData);
+      const calendarText = JSON.stringify(calEventsRef.current);
+      const [mainChecksum, calendarChecksum] = await Promise.all([sha256Text(mainText), sha256Text(calendarText)]);
       const bundle = {
         format: "daily-grind-backup",
-        version: 1,
+        version: mainChecksum && calendarChecksum ? 2 : 1,
         exportedAt,
         mainData,
         calendarEvents: calEventsRef.current,
+        integrity: mainChecksum && calendarChecksum ? {
+          algorithm: "SHA-256",
+          main: mainChecksum,
+          calendar: calendarChecksum,
+        } : undefined,
       };
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -2175,12 +2423,26 @@ function DailyGrind() {
     try {
       const bundle = JSON.parse(await file.text());
       const rawMain = bundle && bundle.format === "daily-grind-backup" ? bundle.mainData : bundle;
+      if (bundle && bundle.format === "daily-grind-backup" && Number(bundle.version) >= 2) {
+        if (!bundle.integrity || bundle.integrity.algorithm !== "SHA-256" || typeof bundle.integrity.main !== "string" || typeof bundle.integrity.calendar !== "string") {
+          throw new Error("This backup is missing its integrity information.");
+        }
+        const [mainChecksum, calendarChecksum] = await Promise.all([
+          sha256Text(JSON.stringify(rawMain)),
+          sha256Text(JSON.stringify(bundle.calendarEvents)),
+        ]);
+        if (!mainChecksum || !calendarChecksum || mainChecksum !== bundle.integrity.main || calendarChecksum !== bundle.integrity.calendar) {
+          throw new Error("This backup failed its integrity check and was not restored.");
+        }
+      }
       const parsed = parseMainData(JSON.stringify(rawMain));
-      const restoredCalendar = bundle && bundle.format === "daily-grind-backup" ? bundle.calendarEvents : null;
-      if (restoredCalendar !== null && !Array.isArray(restoredCalendar)) throw new Error("Calendar data is invalid");
+      const restoredCalendar = bundle && bundle.format === "daily-grind-backup" && bundle.calendarEvents !== undefined
+        ? parseCalendarData(bundle.calendarEvents)
+        : null;
       const noteCount = (parsed.notes || []).length;
       const taskCount = (parsed.taskLists || []).reduce((sum, list) => sum + (list.items || []).length, 0);
       if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
+      await flushCurrentNote();
       await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-file-restore", true);
       const mainResult = await save(parsed);
       const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
@@ -2215,14 +2477,21 @@ function DailyGrind() {
     try {
       const backup = await window.dataVault.read(vaultSelectedId);
       const parsed = parseMainData(backup.value);
+      const restoredCalendar = typeof backup.calendarValue === "string" ? parseCalendarData(backup.calendarValue) : null;
       const noteCount = (parsed.notes || []).length;
       const selected = vaultItems.find((item) => item.id === vaultSelectedId);
       const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
       if (!confirm(`Restore the ${selected?.kind || "cloud"} copy from ${when} with ${noteCount} notes?\n\nYour current data will be saved as a safety copy first.`)) return;
+      await flushCurrentNote();
       await window.dataVault.capture(JSON.stringify(dataRef.current), "before-cloud-restore", true);
       const result = await save(parsed);
+      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
       setGoalInput(String(parsed.dailyGoal || 100));
-      setVaultMessage(result ? "Cloud copy restored. Your previous version is still kept as a safety copy." : "Copy restored on this device. Cloud sync needs to reconnect; use the save-status retry when it does.");
+      setVaultMessage(result && calendarResult
+        ? restoredCalendar !== null
+          ? "Cloud copy restored, including its calendar. Your previous version is still kept as a safety copy."
+          : "Older cloud copy restored. It predates calendar snapshots, so your current calendar was left unchanged."
+        : "Copy restored on this device. Cloud sync needs to reconnect; use the save-status retry when it does.");
       await loadCloudBackups();
     } catch (error) {
       setVaultMessage(`Restore failed: ${error.message || error}`);
@@ -2372,10 +2641,23 @@ function DailyGrind() {
     if (calLoadError) return Promise.resolve(null);
     const current = calEventsRef.current;
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
-    if (!Array.isArray(next)) return Promise.resolve(null);
-    calEventsRef.current = next;
-    setCalEvents(next);
-    return window.storage.set("dg-cal-events", JSON.stringify(next)).catch((error) => { console.error(error); return null; });
+    let validated;
+    try { validated = parseCalendarData(next); }
+    catch (error) {
+      console.error(error);
+      setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar changes were blocked because the data was invalid." });
+      return Promise.resolve(null);
+    }
+    const serialized = JSON.stringify(validated);
+    if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) {
+      const error = new Error("Calendar data reached the safe cloud size limit. Download a backup before adding more events.");
+      console.error(error);
+      setSaveInfo({ state: "error", key: "dg-cal-events", error: error.message });
+      return Promise.resolve(null);
+    }
+    calEventsRef.current = validated;
+    setCalEvents(validated);
+    return window.storage.set("dg-cal-events", serialized).catch((error) => { console.error(error); return null; });
   }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
     const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || "#4fc3f7" };
@@ -2387,33 +2669,33 @@ function DailyGrind() {
   function editCalEvent(id, updates) {
     saveCalEvents((events) => events.map(e => e.id === id ? { ...e, ...updates } : e));
   }
-  function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
+  async function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
+    if (!(await protectBeforeDestructive("before-calendar-delete"))) return false;
     if (untilDate) {
       const evt = calEventsRef.current.find(e => e.id === id);
-      if (!evt) return;
+      if (!evt) return false;
       // If truncating from the very first occurrence, that's equivalent to deleting the whole series.
-      if (untilDate <= evt.date) { saveCalEvents((events) => events.filter(e => e.id !== id)); return; }
-      saveCalEvents((events) => events.map(e => e.id === id ? { ...e, untilDate } : e));
-      return;
+      if (untilDate <= evt.date) return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
+      return !!(await saveCalEvents((events) => events.map(e => e.id === id ? { ...e, untilDate } : e)));
     }
     if (exceptionDate) {
       // Add exception date to skip this one instance
-      saveCalEvents((events) => events.map(e => {
+      return !!(await saveCalEvents((events) => events.map(e => {
         if (e.id === id) {
           const exceptions = e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate];
           return { ...e, exceptions };
         }
         return e;
-      }));
+      })));
     } else if (deleteAll) {
       const evt = calEventsRef.current.find(e => e.id === id);
       if (evt && evt.repeat) {
-        saveCalEvents((events) => events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat)));
+        return !!(await saveCalEvents((events) => events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat))));
       } else {
-        saveCalEvents((events) => events.filter(e => e.id !== id));
+        return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
       }
     } else {
-      saveCalEvents((events) => events.filter(e => e.id !== id));
+      return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
     }
   }
   function getEventsForDate(dateStr) {
@@ -3210,7 +3492,11 @@ function DailyGrind() {
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
-                          else { deleteCalEvent(evt.id); setCalSelectedEvent(null); setCalDeleteConfirm(false); }
+                          else if (confirm(`Delete "${evt.title || "this event"}"? A safety copy will be kept first.`)) {
+                            deleteCalEvent(evt.id).then((deleted) => {
+                              if (deleted) { setCalSelectedEvent(null); setCalDeleteConfirm(false); }
+                            });
+                          }
                         }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
                         <button onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u2715"}</button>
@@ -3237,15 +3523,15 @@ function DailyGrind() {
                         {calDeleteConfirm && (
                           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #2d2d3a", display: "flex", flexDirection: "column", gap: 8 }}>
                             <div style={{ fontSize: 13, fontWeight: 700, color: "#ff4757", marginBottom: 2 }}>Delete recurring event</div>
-                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, false, evt._displayDate)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #2d2d3a", background: "#12122a", cursor: "pointer", fontSize: 13, color: "#e2e2ea", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This event
                             </button>
-                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, false, undefined, evt._displayDate); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, false, undefined, evt._displayDate)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #fbbf2440", background: "#fbbf2414", cursor: "pointer", fontSize: 13, color: "#fbbf24", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This and following events
                             </button>
-                            <button onClick={() => { const realId = evt._origId || evt.id; deleteCalEvent(realId, true); setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
+                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, true)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ff475740", background: "#ff475714", cursor: "pointer", fontSize: 13, color: "#ff4757", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} All events
                             </button>
@@ -3480,7 +3766,7 @@ function DailyGrind() {
         {"↑ SEND TO POMODORO"}
       </button>
       <div style={S.fAct}>
-        <button onClick={() => { deleteTaskItem(editTaskCtx.listId, editTaskCtx.itemId); setEditTaskCtx(null); setView("main"); }} style={S.dBtn}>Delete</button>
+        <button onClick={async () => { if (await deleteTaskItem(editTaskCtx.listId, editTaskCtx.itemId)) { setEditTaskCtx(null); setView("main"); } }} style={S.dBtn}>Delete</button>
         <button onClick={() => { setEditTaskCtx(null); setView("main"); }} style={S.cBtn}>Cancel</button>
         <button onClick={saveTaskEdit} style={S.okBtn}>Save</button>
       </div>
@@ -3604,19 +3890,6 @@ function DailyGrind() {
           </div>
         )}
       </div>
-      {!window._user && <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <label style={S.lbl}>Sync Code (legacy: same code on all devices to sync)</label>
-        <input style={S.inp} type="text" value={syncCode} onChange={(e) => setSyncCode(e.target.value.trim())} placeholder="e.g. mycode123" />
-        <div style={S.fAct}>
-          <button onClick={() => { window._setSyncCode(syncCode || null); alert(syncCode ? "Sync code set! Use the same code on your other devices." : "Sync disabled."); location.reload(); }} style={S.okBtn}>{syncCode ? "Enable Sync" : "Disable Sync"}</button>
-          {window._getSyncCode() && <button onClick={() => { alert("Pulling latest from cloud..."); location.reload(); }} style={{ ...S.cBtn, marginLeft: 8 }}>Pull from Cloud</button>}
-        </div>
-        {window._getSyncCode() && (
-          <div style={{ marginTop: 12, fontSize: 10, color: "#4cd137", letterSpacing: 1.5 }}>
-            {"\u25CF"} LIVE SYNC ACTIVE — cloud is source of truth
-          </div>
-        )}
-      </div>}
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <label style={S.lbl}>Data Protection</label>
         <div style={{ background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 12, padding: 14, marginBottom: 12 }}>
@@ -3628,7 +3901,7 @@ function DailyGrind() {
           </div>
           <div style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6 }}>
             {window.dataVault?.cloudEnabled()
-              ? "DailyGrind keeps separate latest, hourly, daily, and weekly recovery copies after your edits. The app never automatically deletes them."
+              ? "DailyGrind keeps paired main-data and calendar recovery copies: latest, hourly, daily, and weekly. The app never automatically deletes them."
               : "Your device keeps the current copy. Sign in for long-term cloud history across devices."}
           </div>
           {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 9, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
@@ -3659,14 +3932,6 @@ function DailyGrind() {
           </select>
         )}
         {vaultMessage && <div style={{ marginTop: 9, fontSize: 10, color: vaultMessage.toLowerCase().includes("failed") || vaultMessage.toLowerCase().includes("could not") ? "#ff6b7a" : "#4cd137", lineHeight: 1.5 }}>{vaultMessage}</div>}
-      </div>
-      <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <label style={S.lbl}>Recover lost data</label>
-        <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 8, lineHeight: 1.5 }}>If you used a sync code before creating your account, enter it here to pull that data into your account.</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={{ ...S.inp, flex: 1 }} value={recoverCode} onChange={(e) => setRecoverCode(e.target.value.trim())} placeholder="backup code" />
-          <button onClick={() => recoverFromSyncCode(recoverCode)} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>Recover</button>
-        </div>
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
         <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>

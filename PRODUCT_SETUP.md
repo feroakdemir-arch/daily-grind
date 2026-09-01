@@ -5,53 +5,31 @@ We do it in safe phases so your **live app never breaks** and your **real data i
 
 ---
 
-## Phase 1 — Real accounts + security (the urgent one)
+## Phase 1 — Real accounts + security
 
-**Why first:** Right now anyone who knows a "sync code" can read/write that data.
-That's fine for personal use but you can't sell a product with that hole. This phase
-replaces sync codes with real logins and locks the database down per-user.
+Google sign-in and per-account storage are live. All three existing account records have
+their own `users/{uid}/data` collection. The legacy sync-code client has been retired.
 
-### What YOU do (Firebase console — Claude can't do these)
-
-1. Go to https://console.firebase.google.com → pick the **daily-grind-370cd** project.
-2. Left sidebar → **Build → Authentication** → click **Get started** (if not already).
-3. **Sign-in method** tab → enable these providers:
-   - **Google** → toggle on → pick a support email → Save. (Free, instant.)
-   - **Email/Password** → open it → also toggle **Email link (passwordless sign-in)** → Save.
-4. **Settings → Authorized domains** → make sure these are listed (add if missing):
-   - `feroakdemir-arch.github.io`
-   - `localhost`
-5. Tell Claude "auth is enabled" — Claude adds the login screen next.
-
-### What CLAUDE does (in code)
-
-- Add a **Sign in** screen (Google button + "email me a link").
-- Keep your current sync working **alongside** it so nothing breaks mid-migration.
-- After you log in once, **migrate your existing data** to your account (your `uid`).
-- Move Firestore data from `sync/{code}/...` to `users/{uid}/...`.
-
-### The security rules (apply LAST, after login works)
-
-Firebase console → **Build → Firestore Database → Rules** tab → replace everything with:
+The source-controlled security policy is in `firestore.rules`. The active Firebase policy
+must match it:
 
 ```
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Each user can only read/write their own data
     match /users/{uid}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
     }
-    // (Old sync-code data — leave readable until migration is done, then delete this block)
+    // Keep the old migration archive, but make it administrator-only.
     match /sync/{code}/{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
     }
   }
 }
 ```
 
-Then click **Publish**. ⚠️ Only do this AFTER Claude confirms login + migration work,
-or you'll lock yourself out.
+The old `/sync` records are retained as an administrator-only emergency archive rather
+than deleted. Client applications cannot read or change them.
 
 ---
 
@@ -98,12 +76,9 @@ Can live at the root of the same GitHub Pages site or a custom domain
 
 ## Current status
 
-- [x] Phase 1 CODE: Google sign-in button (Settings → Account), account storage
-      (`users/{uid}/data`), auto-migration of local data on first sign-in
-- [ ] Phase 1 CONSOLE: **YOU enable Google sign-in in Firebase** ← DO THIS NEXT
-      (console → Authentication → Sign-in method → Google → enable → save,
-       then check Authorized domains includes feroakdemir-arch.github.io)
-- [ ] Phase 1 RULES: apply security rules AFTER login is confirmed working
+- [x] Phase 1 CODE: Google sign-in, account storage, legacy client retirement
+- [x] Phase 1 DATA: all existing account records have account-scoped data collections
+- [ ] Phase 1 RULES: publish `firestore.rules` to close the legacy `/sync` access rule
 - [ ] Phase 2: free/paid split
 - [ ] Phase 3: Stripe payments
 - [ ] Phase 4: landing page
