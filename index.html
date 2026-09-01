@@ -40,6 +40,19 @@
     /* XP bar has a living shimmer */
     @keyframes xpShimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
     .xp-fill { background-size: 200% 100% !important; animation: xpShimmer 3s linear infinite; }
+    .notes-workspace { display: grid; grid-template-columns: 190px 270px minmax(0, 1fr); min-height: 650px; background: #121220; border: 1px solid #2d2d3a; border-radius: 16px; overflow: hidden; box-shadow: 0 12px 36px #00000066; }
+    .notes-sections { background: #11111f; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; }
+    .notes-pages { background: #171726; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; overflow-y: auto; max-height: 760px; }
+    .notes-editor { background: #1a1a2e; min-width: 0; min-height: 650px; display: flex; flex-direction: column; }
+    .note-page-button:hover { background: #25253a !important; }
+    @media (max-width: 760px) {
+      .notes-workspace { display: block; min-height: 0; border-radius: 12px; }
+      .notes-sections { border-right: 0; border-bottom: 1px solid #2d2d3a; padding: 10px; }
+      .notes-section-list { display: flex !important; overflow-x: auto; gap: 6px; padding-bottom: 2px; }
+      .notes-section-list > button { width: auto !important; flex-shrink: 0; }
+      .notes-pages { border-right: 0; border-bottom: 1px solid #2d2d3a; max-height: 260px; padding: 10px; }
+      .notes-editor { min-height: 440px; }
+    }
     @media (prefers-reduced-motion: reduce) { .overlay-pop, .xp-fill { animation: none; } }
   </style>
 </head>
@@ -424,6 +437,11 @@ function makeId(prefix) {
     ? Array.from(window.crypto.getRandomValues(new Uint32Array(2)), (n) => n.toString(36)).join("")
     : Math.random().toString(36).slice(2);
   return `${prefix}_${Date.now()}_${random}`;
+}
+
+function noteSignature(note) {
+  if (!note) return "";
+  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true]);
 }
 
 function localDateStr(d) {
@@ -1249,8 +1267,11 @@ function DailyGrind() {
   const [noteTagFilter, setNoteTagFilter] = useState("all");
   const [noteDraft, setNoteDraft] = useState(null);
   const [noteDraftState, setNoteDraftState] = useState("idle");
+  const [showNewNoteSection, setShowNewNoteSection] = useState(false);
+  const [newNoteSectionName, setNewNoteSectionName] = useState("");
   const noteSaveTimerRef = useRef(null);
   const noteSaveVersionRef = useRef(0);
+  const noteSavedSignatureRef = useRef("");
   const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
@@ -1382,21 +1403,31 @@ function DailyGrind() {
       setNoteDraftState("idle");
       return;
     }
+    const signature = noteSignature(noteDraft);
+    if (signature === noteSavedSignatureRef.current) {
+      setNoteDraftState("saved");
+      return;
+    }
     setNoteDraftState("typing");
     clearTimeout(noteSaveTimerRef.current);
     const snapshot = { ...noteDraft };
     noteSaveTimerRef.current = setTimeout(async () => {
       setNoteDraftState("saving");
       const result = await persistNoteDraft(snapshot);
-      if (version === noteSaveVersionRef.current) setNoteDraftState(result ? "saved" : "error");
+      if (version === noteSaveVersionRef.current) {
+        if (result) noteSavedSignatureRef.current = signature;
+        setNoteDraftState(result ? "saved" : "error");
+      }
     }, 700);
     return () => clearTimeout(noteSaveTimerRef.current);
-  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, persistNoteDraft]);
+  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, persistNoteDraft]);
 
   useEffect(() => {
     if (noteTagFilter === "all" || !data) return;
-    if (!(data.notes || []).some((note) => note.tag === noteTagFilter)) setNoteTagFilter("all");
-  }, [data?.notes, noteTagFilter]);
+    if (noteTagFilter === "__untagged__") return;
+    const sectionStillExists = (data.notes || []).some((note) => note.tag === noteTagFilter) || noteDraft?.tag === noteTagFilter;
+    if (!sectionStillExists) setNoteTagFilter("all");
+  }, [data?.notes, noteTagFilter, noteDraft?.tag]);
 
   const retrySaves = useCallback(() => {
     const jobs = [];
@@ -1752,17 +1783,31 @@ function DailyGrind() {
     save((current) => ({ ...current, taskLists: [...current.taskLists, list] }));
     setNewListName(""); setShowNewList(false); setNewListRepeats(false);
   }
-  function openNewNote() {
+  function openNewNote(section) {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
-    setNoteDraft({ id: makeId("note"), title: "", body: "", tag: "", pinned: false, createdAt: Date.now(), updatedAt: Date.now() });
+    const selectedSection = section !== undefined
+      ? section
+      : noteTagFilter === "all" || noteTagFilter === "__untagged__" ? "" : noteTagFilter;
+    const draft = { id: makeId("note"), title: "", body: "", tag: selectedSection, pinned: false, createdAt: Date.now(), updatedAt: Date.now() };
+    noteSavedSignatureRef.current = noteSignature(draft);
+    setNoteDraft(draft);
     setNoteDraftState("idle");
+  }
+  function createNoteSection() {
+    const section = newNoteSectionName.trim().replace(/^#/, "");
+    if (!section) return;
+    setNoteTagFilter(section);
+    setNewNoteSectionName("");
+    setShowNewNoteSection(false);
+    openNewNote(section);
   }
   async function openNote(note) {
     if (noteDraft?.id === note.id) return;
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     if (noteDraft && (noteDraft.title.trim() || noteDraft.body.trim())) await persistNoteDraft(noteDraft);
+    noteSavedSignatureRef.current = noteSignature(note);
     setNoteDraft({ ...note });
     setNoteDraftState("saved");
   }
@@ -1778,7 +1823,14 @@ function DailyGrind() {
     setNoteDraft(null);
   }
   function toggleNotePin(noteId) {
+    if (noteDraft?.id === noteId) {
+      setNoteDraft((draft) => ({ ...draft, pinned: !draft.pinned }));
+      return;
+    }
     save((current) => ({ ...current, notes: (current.notes || []).map((note) => note.id === noteId ? { ...note, pinned: !note.pinned, updatedAt: Date.now() } : note) }));
+  }
+  function insertNoteText(text) {
+    setNoteDraft((draft) => draft ? { ...draft, body: `${draft.body}${draft.body && !draft.body.endsWith("\n") ? "\n" : ""}${text}` } : draft);
   }
   function deleteNote(note) {
     if (!confirm(`Delete "${note.title || "Untitled note"}"? This cannot be undone.`)) return;
@@ -2076,7 +2128,8 @@ function DailyGrind() {
   const noteTags = [...new Set(notes.map((note) => (note.tag || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const noteNeedle = noteSearch.trim().toLowerCase();
   const visibleNotes = notes.filter((note) => {
-    if (noteTagFilter !== "all" && note.tag !== noteTagFilter) return false;
+    if (noteTagFilter === "__untagged__" && note.tag) return false;
+    if (noteTagFilter !== "all" && noteTagFilter !== "__untagged__" && note.tag !== noteTagFilter) return false;
     if (!noteNeedle) return true;
     return `${note.title || ""}\n${note.body || ""}\n${note.tag || ""}`.toLowerCase().includes(noteNeedle);
   }).sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -2103,7 +2156,7 @@ function DailyGrind() {
   // MAIN
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
-      <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : S.box}>
+      <div style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : page === "notes" ? { ...S.box, maxWidth: 1320, padding: "14px 12px 80px" } : S.box}>
         {page !== "calendar" && winAnim && <div className="overlay-pop" style={S.win}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\u26A1"}</div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
         {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ fontSize: 48, marginBottom: 12 }}>{"\uD83C\uDFC6"}</div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
 
@@ -2265,80 +2318,106 @@ function DailyGrind() {
         )}
 
         {page === "notes" && (
-          <div data-notes-section>
-            <div style={{ background: "linear-gradient(145deg,#1a1a2e,#151528)", border: "1px solid #7c3aed44", borderRadius: 16, padding: "18px", marginBottom: 14, boxShadow: "0 8px 28px #00000055" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 4, color: "#a78bfa", marginBottom: 5 }}>NOTES</div>
-                  <div style={{ fontSize: 12, lineHeight: 1.6, color: "#8b8b9e" }}>{notes.length ? `${notes.length} note${notes.length === 1 ? "" : "s"} saved and synced.` : "Capture ideas before they disappear."}</div>
+          <div data-notes-section className="notes-workspace">
+            <aside className="notes-sections" aria-label="Notebook sections">
+              <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
+                <div style={{ width: 34, height: 38, borderRadius: "5px 9px 9px 5px", background: "linear-gradient(145deg,#7c3aed,#4c1d95)", boxShadow: "inset 4px 0 #c4b5fd55,0 5px 16px #7c3aed44", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 15, fontWeight: 900 }}>N</div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, color: "#f0f0f4", lineHeight: 1.4 }}>GRIND NOTEBOOK</div>
+                  <div style={{ fontSize: 9, color: "#666677", marginTop: 2 }}>{notes.length} page{notes.length === 1 ? "" : "s"} · synced</div>
                 </div>
-                {!noteDraft && <button onClick={openNewNote} style={{ ...S.okBtn, flex: "none", padding: "10px 14px", whiteSpace: "nowrap" }}>+ NEW NOTE</button>}
               </div>
-            </div>
 
-            {noteDraft && (
-              <div data-note-editor style={{ background: "#1a1a2e", border: "1px solid #7c3aed88", borderRadius: 14, padding: "16px", marginBottom: 14, boxShadow: "0 0 30px #7c3aed18" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 }}>
-                  <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: 3, color: "#a78bfa" }}>{notes.some((note) => note.id === noteDraft.id) ? "EDIT NOTE" : "NEW NOTE"}</span>
-                  <span aria-live="polite" style={{ fontSize: 9, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e", letterSpacing: 1 }}>
-                    {noteDraftState === "typing" ? "CHANGES PENDING" : noteDraftState === "saving" ? "SAVING..." : noteDraftState === "saved" ? "SAVED" : noteDraftState === "error" ? "SAVE FAILED" : "AUTO-SAVES"}
-                  </span>
-                </div>
-                <input aria-label="Note title" value={noteDraft.title} onChange={(e) => setNoteDraft((draft) => ({ ...draft, title: e.target.value }))} placeholder="Note title" autoFocus style={{ ...S.inp, fontSize: 16, fontWeight: 800, marginBottom: 10 }} />
-                <textarea aria-label="Note body" value={noteDraft.body} onChange={(e) => setNoteDraft((draft) => ({ ...draft, body: e.target.value }))} onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") finishNoteEditing(); }} placeholder="Write anything... ideas, plans, reminders, reflections." rows="10" style={{ ...S.inp, resize: "vertical", minHeight: 190, lineHeight: 1.65, fontSize: 13 }} />
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
-                  <input aria-label="Note tag" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Tag (optional)" maxLength="30" style={{ ...S.inp, flex: 1 }} />
-                  <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "11px 20px" }}>DONE</button>
-                </div>
-                <div style={{ color: "#555566", fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>Your note saves automatically while you type. Press Ctrl/⌘ + Enter to finish.</div>
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <div style={{ position: "relative", flex: 1 }}>
-                <span aria-hidden="true" style={{ position: "absolute", left: 12, top: 10, color: "#555566", fontSize: 14 }}>⌕</span>
-                <input aria-label="Search notes" value={noteSearch} onChange={(e) => setNoteSearch(e.target.value)} placeholder="Search notes..." style={{ ...S.inp, paddingLeft: 34 }} />
-              </div>
-              {noteSearch && <button onClick={() => setNoteSearch("")} aria-label="Clear note search" style={{ ...S.cBtn, flex: "none", width: 42, padding: 0 }}>×</button>}
-            </div>
-
-            {noteTags.length > 0 && (
-              <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 10, marginBottom: 2 }}>
-                {["all", ...noteTags].map((tag) => (
-                  <button key={tag} onClick={() => setNoteTagFilter(tag)} style={{ flexShrink: 0, padding: "7px 11px", borderRadius: 20, border: noteTagFilter === tag ? "1px solid #a78bfa" : "1px solid #2d2d3a", background: noteTagFilter === tag ? "#7c3aed2b" : "#12122a", color: noteTagFilter === tag ? "#c4b5fd" : "#8b8b9e", fontSize: 9, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>
-                    {tag === "all" ? "ALL" : `#${tag}`}
+              <div className="notes-section-list" style={{ display: "block" }}>
+                <button onClick={() => setNoteTagFilter("all")} style={{ ...S.noteSectionBtn, background: noteTagFilter === "all" ? "#7c3aed2d" : "transparent", color: noteTagFilter === "all" ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === "all" ? "#7c3aed55" : "transparent" }}>
+                  <span style={{ color: "#a78bfa" }}>▣</span><span style={{ flex: 1, textAlign: "left" }}>All Pages</span><span style={S.noteSectionCount}>{notes.length}</span>
+                </button>
+                <button onClick={() => setNoteTagFilter("__untagged__")} style={{ ...S.noteSectionBtn, background: noteTagFilter === "__untagged__" ? "#7c3aed2d" : "transparent", color: noteTagFilter === "__untagged__" ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === "__untagged__" ? "#7c3aed55" : "transparent" }}>
+                  <span style={{ color: "#ffd43b" }}>◆</span><span style={{ flex: 1, textAlign: "left" }}>Quick Notes</span><span style={S.noteSectionCount}>{notes.filter((note) => !note.tag).length}</span>
+                </button>
+                {noteTags.map((tag, index) => (
+                  <button key={tag} onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, background: noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
+                    <span style={{ color: ["#00d9ff","#00ff87","#ff922b","#f472b6","#a78bfa"][index % 5] }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
                   </button>
                 ))}
               </div>
-            )}
 
-            {visibleNotes.filter((note) => note.id !== noteDraft?.id).map((note) => (
-              <article key={note.id} data-note-card={note.id} role="button" tabIndex="0" aria-label={`Edit note: ${note.title || "Untitled note"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ background: note.pinned ? "linear-gradient(145deg,#211d39,#1a1a2e)" : "#1a1a2e", border: note.pinned ? "1px solid #a78bfa66" : "1px solid #2d2d3a", borderRadius: 14, padding: "15px 16px", marginBottom: 10, cursor: "pointer", boxShadow: "0 4px 18px #00000044" }}>
-                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", lineHeight: 1.4, overflowWrap: "anywhere" }}>{note.title || "Untitled note"}</div>
-                    {note.body && <div style={{ marginTop: 7, color: "#a0a0b0", fontSize: 11, lineHeight: 1.6, whiteSpace: "pre-wrap", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" }}>{note.body}</div>}
+              {showNewNoteSection ? (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
+                  <input aria-label="New section name" value={newNoteSectionName} onChange={(e) => setNewNoteSectionName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createNoteSection(); if (e.key === "Escape") setShowNewNoteSection(false); }} placeholder="Section name" autoFocus style={{ ...S.inp, fontSize: 11, padding: "9px" }} />
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}><button onClick={createNoteSection} style={{ ...S.okBtn, padding: 8, fontSize: 9 }}>CREATE</button><button onClick={() => { setShowNewNoteSection(false); setNewNoteSectionName(""); }} style={{ ...S.cBtn, padding: 8, fontSize: 9 }}>CANCEL</button></div>
+                </div>
+              ) : (
+                <button onClick={() => setShowNewNoteSection(true)} style={{ width: "100%", marginTop: 12, padding: "9px", background: "transparent", border: "1px dashed #3b3b4e", borderRadius: 8, color: "#77778a", fontSize: 9, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>+ NEW SECTION</button>
+              )}
+            </aside>
+
+            <section className="notes-pages" aria-label="Notebook pages">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 12px" }}>
+                <div><div style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 3, fontWeight: 900 }}>PAGES</div><div style={{ color: "#555566", fontSize: 9, marginTop: 3 }}>{visibleNotes.length} shown</div></div>
+                <button onClick={() => openNewNote()} aria-label="New page" title="New page" style={{ width: 34, height: 34, borderRadius: 9, border: "none", background: "linear-gradient(135deg,#7c3aed,#a78bfa)", color: "#fff", fontSize: 20, cursor: "pointer", fontFamily: "inherit" }}>+</button>
+              </div>
+              <div style={{ position: "relative", marginBottom: 10 }}>
+                <span aria-hidden="true" style={{ position: "absolute", left: 11, top: 9, color: "#555566", fontSize: 13 }}>⌕</span>
+                <input aria-label="Search notes" value={noteSearch} onChange={(e) => setNoteSearch(e.target.value)} placeholder="Search pages..." style={{ ...S.inp, paddingLeft: 32, paddingRight: noteSearch ? 32 : 10, fontSize: 11, background: "#10101d" }} />
+                {noteSearch && <button onClick={() => setNoteSearch("")} aria-label="Clear note search" style={{ position: "absolute", right: 7, top: 5, width: 26, height: 26, background: "none", border: "none", color: "#77778a", cursor: "pointer", fontSize: 15 }}>×</button>}
+              </div>
+
+              {visibleNotes.map((note) => {
+                const selected = noteDraft?.id === note.id;
+                return (
+                  <article key={note.id} className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 11px 11px 15px", marginBottom: 5, cursor: "pointer", outline: "none" }}>
+                    <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
+                    <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
+                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{note.body || "Empty page"}</div>
+                  </article>
+                );
+              })}
+              {visibleNotes.length === 0 && (
+                <div style={{ textAlign: "center", padding: "34px 12px", color: "#555566", fontSize: 10, lineHeight: 1.7 }}>
+                  {notes.length ? "No pages match this section or search." : "No pages yet."}
+                  <button onClick={() => openNewNote()} style={{ display: "block", margin: "12px auto 0", background: "none", border: "none", color: "#a78bfa", fontSize: 10, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>CREATE A PAGE</button>
+                </div>
+              )}
+            </section>
+
+            <section className="notes-editor" data-note-editor aria-label="Page editor">
+              {noteDraft ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "10px 14px", borderBottom: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
+                    <button onClick={() => insertNoteText("• ")} title="Insert bullet" style={S.noteToolBtn}>• List</button>
+                    <button onClick={() => insertNoteText("☐ ")} title="Insert checklist item" style={S.noteToolBtn}>☐ Task</button>
+                    <button onClick={() => insertNoteText("──────────")} title="Insert divider" style={S.noteToolBtn}>— Divider</button>
+                    <span style={{ flex: 1 }} />
+                    <span aria-live="polite" style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
+                      {noteDraftState === "typing" ? "UNSAVED" : noteDraftState === "saving" ? "SAVING..." : noteDraftState === "saved" ? "SAVED" : noteDraftState === "error" ? "SAVE FAILED" : "AUTO-SAVE ON"}
+                    </span>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); toggleNotePin(note.id); }} aria-label={note.pinned ? "Unpin note" : "Pin note"} title={note.pinned ? "Unpin note" : "Pin note"} style={{ background: "none", border: "none", color: note.pinned ? "#ffd43b" : "#555566", fontSize: 17, cursor: "pointer", padding: "1px 4px", lineHeight: 1 }}>⌖</button>
-                  <button onClick={(e) => { e.stopPropagation(); deleteNote(note); }} aria-label="Delete note" title="Delete note" style={{ ...S.tX, fontSize: 18 }}>×</button>
+                  <div style={{ flex: 1, padding: "28px clamp(18px,4vw,48px) 20px", display: "flex", flexDirection: "column", minHeight: 0 }}>
+                    <input aria-label="Note title" value={noteDraft.title} onChange={(e) => setNoteDraft((draft) => ({ ...draft, title: e.target.value }))} placeholder="Page title" autoFocus style={{ width: "100%", background: "transparent", border: "none", borderBottom: "1px solid #3a3a4e", color: "#f7f7fb", fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, fontFamily: "inherit", padding: "5px 0 13px", outline: "none" }} />
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 18px", flexWrap: "wrap" }}>
+                      <span style={{ color: "#666677", fontSize: 9 }}>{new Date(noteDraft.updatedAt || noteDraft.createdAt || Date.now()).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+                      <span style={{ color: "#3d3d50" }}>·</span>
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#77778a", fontSize: 9 }}>SECTION
+                        <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 9, fontFamily: "inherit", outline: "none" }} />
+                      </label>
+                    </div>
+                    <textarea aria-label="Note body" value={noteDraft.body} onChange={(e) => setNoteDraft((draft) => ({ ...draft, body: e.target.value }))} onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") finishNoteEditing(); }} placeholder="Start writing..." style={{ flex: 1, width: "100%", minHeight: 360, resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
+                    <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteDraft.body.trim() ? noteDraft.body.trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
+                    <button onClick={() => toggleNotePin(noteDraft.id)} style={{ ...S.noteToolBtn, color: noteDraft.pinned ? "#ffd43b" : "#8b8b9e", borderColor: noteDraft.pinned ? "#ffd43b55" : "#353548" }}>{noteDraft.pinned ? "◆ PINNED" : "◇ PIN"}</button>
+                    {notes.some((note) => note.id === noteDraft.id) && <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, color: "#ff6b7a", borderColor: "#ff475744" }}>DELETE</button>}
+                    <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "8px 14px", fontSize: 9 }}>CLOSE</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 30 }}>
+                  <div><div style={{ width: 56, height: 62, margin: "0 auto 18px", borderRadius: "7px 13px 13px 7px", background: "linear-gradient(145deg,#292944,#1f1f35)", boxShadow: "inset 6px 0 #7c3aed55", display: "flex", alignItems: "center", justifyContent: "center", color: "#a78bfa", fontSize: 24, fontWeight: 900 }}>N</div><div style={{ color: "#c9c9d4", fontSize: 12, fontWeight: 900, letterSpacing: 2 }}>SELECT A PAGE</div><div style={{ color: "#666677", fontSize: 10, lineHeight: 1.7, marginTop: 8, maxWidth: 300 }}>Choose a page from the list or create a new one to start writing.</div><button onClick={() => openNewNote()} style={{ ...S.okBtn, display: "inline-block", flex: "none", marginTop: 16, padding: "10px 16px" }}>+ NEW PAGE</button></div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 11, paddingTop: 9, borderTop: "1px solid #2d2d3a" }}>
-                  <span style={{ color: "#555566", fontSize: 9, letterSpacing: 1 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
-                  {note.tag && <span style={{ color: "#a78bfa", background: "#7c3aed1f", borderRadius: 12, padding: "3px 8px", fontSize: 9, fontWeight: 800 }}>#{note.tag}</span>}
-                </div>
-              </article>
-            ))}
-
-            {!noteDraft && notes.length === 0 && (
-              <button onClick={openNewNote} style={{ width: "100%", background: "#12122a", border: "1px dashed #7c3aed66", borderRadius: 14, padding: "34px 18px", color: "#8b8b9e", cursor: "pointer", fontFamily: "inherit" }}>
-                <div style={{ fontSize: 28, color: "#7c3aed", marginBottom: 10 }}>+</div>
-                <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: 3, color: "#c9c9d4" }}>CREATE YOUR FIRST NOTE</div>
-                <div style={{ fontSize: 10, marginTop: 7 }}>Ideas, plans, reminders—keep them with your grind.</div>
-              </button>
-            )}
-            {notes.length > 0 && visibleNotes.length === 0 && (
-              <div style={{ textAlign: "center", padding: "34px 16px", color: "#555566", fontSize: 11, lineHeight: 1.7 }}>No notes match this search or tag.</div>
-            )}
+              )}
+            </section>
           </div>
         )}
 
@@ -3242,6 +3321,9 @@ const S = {
   cardDesc: { fontSize: 11, color: "#a0a0b0", lineHeight: 1.6, marginBottom: 12, whiteSpace: "pre-wrap", background: "#12122a", borderRadius: 8, padding: "8px 10px", border: "1px solid #2d2d3a" },
   noteRow: { marginTop: 10, paddingTop: 8, borderTop: "1px solid #2d2d3a" },
   noteInp: { width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 12, fontFamily: "inherit", padding: "8px 10px", outline: "none", boxSizing: "border-box" },
+  noteSectionBtn: { width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "9px 8px", marginBottom: 4, background: "transparent", border: "1px solid transparent", borderRadius: 8, color: "#a0a0b0", fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" },
+  noteSectionCount: { minWidth: 20, height: 18, padding: "2px 5px", borderRadius: 9, background: "#2d2d3a", color: "#8b8b9e", fontSize: 8, textAlign: "center" },
+  noteToolBtn: { padding: "7px 9px", background: "#202034", border: "1px solid #353548", borderRadius: 7, color: "#b0b0be", fontSize: 9, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" },
   textarea: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 },
   week: { display: "flex", justifyContent: "space-between", gap: 2 },
   picker: { display: "flex", justifyContent: "center", gap: 10 },
