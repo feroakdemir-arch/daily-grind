@@ -1098,17 +1098,13 @@ function SaveIndicator({ info, onRetry }) {
   );
 }
 
-function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onReorder, onEdit, onReorderList, onDeleteCompleted }) {
+function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
   const [text, setText] = useState("");
   const [pts, setPts] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [completedShown, setCompletedShown] = useState(10);
   const inputRef = useRef(null);
   const dragRef = useRef(null);
-  const [dragIdx, setDragIdx] = useState(null);
-  const [dropIdx, setDropIdx] = useState(null);
-  const [dragOffset, setDragOffset] = useState(0);
-  const rowRects = useRef([]);
   const [listDragOffset, setListDragOffset] = useState(0);
   const [listDragging, setListDragging] = useState(false);
   const listDragRef = useRef(null);
@@ -1174,48 +1170,51 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
   const completedAll = [...completedLive, ...completedArchived].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const completedView = completedAll.slice(0, completedShown);
 
-  function getPendingRealIndex(pendingIdx) {
-    let count = 0;
-    for (let i = 0; i < list.items.length; i++) {
-      if (!list.items[i].done) { if (count === pendingIdx) return i; count++; }
-    }
-    return -1;
-  }
-
   function handleDragStart(e, idx) {
+    if (dragRef.current || !onMoveTask || !setTaskDrag) return;
+    if (typeof e.button === "number" && e.button !== 0) return;
     e.preventDefault();
+    const task = pending[idx];
+    if (!task) return;
     const startY = e.touches ? e.touches[0].clientY : e.clientY;
     const startScrollY = window.scrollY;
     let currentY = startY;
-    // Snapshot row positions at drag start, in document coords
-    const rows = document.querySelectorAll(`[data-tasklist="${list.id}"] [data-taskrow]`);
-    const rects = [];
-    rows.forEach((row) => {
-      const r = row.getBoundingClientRect();
-      rects.push({ mid: r.top + r.height / 2 + window.scrollY });
-    });
-    rowRects.current = rects;
-    dragRef.current = { fromIdx: idx, toIdx: idx, startY };
-    setDragIdx(idx);
-    setDropIdx(idx);
-    setDragOffset(0);
+    dragRef.current = { sourceListId: list.id, taskId: task.id, targetListId: list.id, targetIndex: idx, startY };
 
     const applyMove = () => {
       const scrollDelta = window.scrollY - startScrollY;
-      setDragOffset(currentY - startY + scrollDelta);
-      const compareY = currentY + window.scrollY;
-      let closest = idx;
-      let minDist = Infinity;
-      rowRects.current.forEach((r, i) => {
-        const dist = Math.abs(compareY - r.mid);
-        if (dist < minDist) { minDist = dist; closest = i; }
+      const cards = Array.from(document.querySelectorAll("[data-tasklists-container] [data-tasklist]"));
+      let targetCard = null;
+      let nearestDistance = Infinity;
+      cards.forEach((card) => {
+        const rect = card.getBoundingClientRect();
+        const distance = currentY < rect.top ? rect.top - currentY : currentY > rect.bottom ? currentY - rect.bottom : 0;
+        if (distance < nearestDistance) { nearestDistance = distance; targetCard = card; }
       });
-      dragRef.current.toIdx = closest;
-      setDropIdx(closest);
+      if (!targetCard) return;
+      const targetListId = targetCard.getAttribute("data-tasklist");
+      const targetRows = Array.from(targetCard.querySelectorAll("[data-taskrow]"))
+        .filter((row) => row.getAttribute("data-task-id") !== task.id);
+      let targetIndex = targetRows.length;
+      for (let rowIndex = 0; rowIndex < targetRows.length; rowIndex++) {
+        const rect = targetRows[rowIndex].getBoundingClientRect();
+        if (currentY < rect.top + rect.height / 2) { targetIndex = rowIndex; break; }
+      }
+      dragRef.current.targetListId = targetListId;
+      dragRef.current.targetIndex = targetIndex;
+      setTaskDrag({
+        sourceListId: list.id,
+        taskId: task.id,
+        targetListId,
+        targetIndex,
+        offset: currentY - startY + scrollDelta,
+      });
     };
+    applyMove();
     const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
 
     const onMove = (ev) => {
+      if (ev.cancelable) ev.preventDefault();
       currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
       applyMove();
     };
@@ -1223,23 +1222,23 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
       stopAutoScroll();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onEnd);
+      document.removeEventListener("pointercancel", onEnd);
       document.removeEventListener("touchmove", onMove);
       document.removeEventListener("touchend", onEnd);
-      const from = dragRef.current.fromIdx;
-      const to = dragRef.current.toIdx;
-      setDragIdx(null);
-      setDropIdx(null);
-      setDragOffset(0);
+      document.removeEventListener("touchcancel", onEnd);
+      const finished = dragRef.current;
       dragRef.current = null;
-      rowRects.current = [];
-      if (from !== to) {
-        onReorder(list.id, getPendingRealIndex(from), getPendingRealIndex(to));
+      setTaskDrag(null);
+      if (finished && finished.targetListId) {
+        onMoveTask(finished.sourceListId, finished.taskId, finished.targetListId, finished.targetIndex);
       }
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onEnd);
+    document.addEventListener("pointercancel", onEnd);
     document.addEventListener("touchmove", onMove, { passive: false });
     document.addEventListener("touchend", onEnd);
+    document.addEventListener("touchcancel", onEnd);
   }
 
   function handleAdd() {
@@ -1249,12 +1248,17 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
+  const isTaskDropTarget = !!taskDrag && taskDrag.targetListId === list.id;
+  const pendingDropItems = taskDrag ? pending.filter((item) => item.id !== taskDrag.taskId) : pending;
+
   return (
     <div data-tasklist={list.id} data-tasklistrow={listIdx} style={{
       ...S.taskList,
+      border: isTaskDropTarget ? "2px solid #7c3aed" : S.taskList.border,
+      background: isTaskDropTarget ? "#201d35" : S.taskList.background,
       transform: listDragging ? `translateY(${listDragOffset}px) scale(1.01)` : "none",
       transition: listDragging ? "none" : "transform 0.15s",
-      boxShadow: listDragging ? "0 14px 32px rgba(124,58,237,0.45)" : (S.taskList.boxShadow || "none"),
+      boxShadow: listDragging || isTaskDropTarget ? "0 14px 32px rgba(124,58,237,0.32)" : (S.taskList.boxShadow || "none"),
       zIndex: listDragging ? 50 : "auto",
       position: "relative",
       opacity: listDragging ? 0.95 : 1,
@@ -1271,14 +1275,14 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
       </div>
 
       {pending.map((t, i) => {
-        const isMe = dragIdx === i;
-        const isDragging = dragIdx !== null;
+        const isMe = !!taskDrag && taskDrag.sourceListId === list.id && taskDrag.taskId === t.id;
+        const isDragging = !!taskDrag;
+        const showDropBefore = isTaskDropTarget && taskDrag.targetIndex === pendingDropItems.findIndex((item) => item.id === t.id);
         return (
-        <div key={t.id} data-taskrow={i} style={{
+        <div key={t.id} data-taskrow={i} data-task-id={t.id} style={{
           ...S.tRow,
-          borderTop: dropIdx === i && isDragging && dragIdx !== i && dragIdx > i ? "2px solid #7c3aed" : "none",
-          borderBottom: dropIdx === i && isDragging && dragIdx !== i && dragIdx < i ? "2px solid #7c3aed" : "none",
-          transform: isMe ? `translateY(${dragOffset}px) scale(1.02)` : "none",
+          borderTop: showDropBefore && !isMe ? "2px solid #a78bfa" : "none",
+          transform: isMe ? `translateY(${taskDrag.offset}px) scale(1.02)` : "none",
           transition: isMe ? "none" : "transform 0.15s",
           boxShadow: isMe ? "0 10px 24px rgba(124,58,237,0.45)" : "none",
           background: isMe ? "#1a1a2e" : (S.tRow.background || "transparent"),
@@ -1287,12 +1291,14 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
           opacity: isMe ? 0.95 : 1,
           pointerEvents: isDragging && !isMe ? "none" : "auto",
         }}>
-          <span
+          <button
+            type="button"
+            aria-label={`Drag ${t.name} to reorder or move lists`}
             onPointerDown={(e) => handleDragStart(e, i)}
             onTouchStart={(e) => handleDragStart(e, i)}
-            style={{ cursor: "grab", color: "#8b8b9e", fontSize: 18, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900 }}
-            title="Drag to reorder"
-          >{"\u22ee"}</span>
+            style={{ cursor: "grab", color: "#8b8b9e", fontSize: 18, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900, background: "none", border: "none", fontFamily: "inherit" }}
+            title="Drag to reorder or move to another list"
+          >{"\u22ee"}</button>
           <button onClick={() => onToggle(list.id, t.id)} style={S.tCircle} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -1307,6 +1313,13 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
         </div>
         );
       })}
+
+      {isTaskDropTarget && pendingDropItems.length === 0 && (
+        <div style={{ margin: "8px 0", padding: "14px", border: "2px dashed #a78bfa", borderRadius: 10, color: "#c4b5fd", fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textAlign: "center" }}>DROP TASK HERE</div>
+      )}
+      {isTaskDropTarget && taskDrag.targetIndex === pendingDropItems.length && pendingDropItems.length > 0 && (
+        <div style={{ height: 2, background: "#a78bfa", borderRadius: 2, margin: "2px 0 8px", boxShadow: "0 0 10px #7c3aed" }} />
+      )}
 
       <div style={S.tAddRow}>
         <span style={S.tAddIcon}>+</span>
@@ -1731,6 +1744,7 @@ function DailyGrind() {
   const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
   const [calDragging, setCalDragging] = useState(null);
   const [habitDrag, setHabitDrag] = useState(null); // shared {secId, dragIdx, dropIdx, offset} so all cards see the drag
+  const [taskDrag, setTaskDrag] = useState(null); // shared across task-list cards so tasks can move between lists
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
   const pomoDeadlineRef = useRef(null);
@@ -2181,14 +2195,28 @@ function DailyGrind() {
     const task = { id: makeId("t"), name, points, done: false };
     save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) }));
   }, [save]);
-  const reorderTask = useCallback((listId, fromIndex, toIndex) => {
-    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => {
-        if (l.id !== listId) return l;
-        const items = [...l.items];
-        const [moved] = items.splice(fromIndex, 1);
-        items.splice(toIndex, 0, moved);
-        return { ...l, items };
-      }) }));
+  const moveTaskBetweenLists = useCallback((sourceListId, taskId, targetListId, targetPendingIndex) => {
+    save((prev) => {
+      const sourceList = prev.taskLists.find((list) => list.id === sourceListId);
+      const targetList = prev.taskLists.find((list) => list.id === targetListId);
+      const movedTask = sourceList?.items.find((task) => task.id === taskId && !task.done);
+      if (!movedTask || !targetList) return prev;
+      const withoutMoved = prev.taskLists.map((list) => ({
+        ...list,
+        items: list.items.filter((task) => !(task.id === taskId && (list.id === sourceListId || list.id === targetListId))),
+      }));
+      return {
+        ...prev,
+        taskLists: withoutMoved.map((list) => {
+          if (list.id !== targetListId) return list;
+          const pendingItems = list.items.filter((task) => !task.done);
+          const completedItems = list.items.filter((task) => task.done);
+          const insertAt = Math.min(pendingItems.length, Math.max(0, Number.isFinite(targetPendingIndex) ? targetPendingIndex : pendingItems.length));
+          pendingItems.splice(insertAt, 0, movedTask);
+          return { ...list, items: [...pendingItems, ...completedItems] };
+        }),
+      };
+    });
   }, [save]);
   const reorderTaskList = useCallback((fromIdx, toIdx) => {
     if (fromIdx === toIdx) return;
@@ -2905,8 +2933,13 @@ function DailyGrind() {
 
         {page === "tasks" && (
           <div data-tasklists-container>
+            {data.taskLists.length > 1 && data.taskLists.some((list) => list.items.some((task) => !task.done)) && (
+              <div style={{ margin: "0 2px 10px", color: taskDrag ? "#c4b5fd" : "#555566", fontSize: 9, fontWeight: 800, letterSpacing: 1.5, textAlign: "right" }}>
+                {taskDrag ? "RELEASE TO MOVE TASK" : "DRAG ⋮ TO MOVE TASKS BETWEEN LISTS"}
+              </div>
+            )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onReorder={reorderTask} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
