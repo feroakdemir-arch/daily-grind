@@ -84,9 +84,19 @@
     const fbAuth = firebase.auth();
     const fbDb = firebase.firestore();
 
+    // Keep acknowledged and still-pending Firestore writes in IndexedDB so a
+    // tab or app session can close without discarding a queued change. Multi-
+    // tab synchronization lets every open Daily Grind tab share that queue.
+    const _firestoreCacheReady = fbDb.enablePersistence({ synchronizeTabs: true })
+      .then(() => true)
+      .catch((error) => {
+        console.warn("Firestore durable cache unavailable; local recovery remains active:", error);
+        return false;
+      });
+
     // Auth: prefer a real signed-in account; fall back to anonymous.
     window._user = null;
-    let _fbReady = new Promise((resolve) => {
+    const _authReady = new Promise((resolve) => {
       let resolved = false;
       fbAuth.onAuthStateChanged((user) => {
         if (user) {
@@ -101,6 +111,7 @@
         }
       });
     });
+    let _fbReady = Promise.all([_authReady, _firestoreCacheReady]).then(([authReady]) => authReady);
     window._signInWithGoogle = async () => {
       const provider = new firebase.auth.GoogleAuthProvider();
       const res = await fbAuth.signInWithPopup(provider);
@@ -186,6 +197,7 @@
     const _cloudWriteQueues = {};
     const _pendingStorageWrites = {};
     const _storageStatusListeners = new Set();
+    const _storageBroadcast = typeof BroadcastChannel === "function" ? new BroadcastChannel("daily-grind-storage-v1") : null;
     function _emitStorageStatus(state, key, error) {
       const detail = { state, key, at: Date.now(), error: error ? String(error.message || error) : "" };
       _storageStatusListeners.forEach((listener) => { try { listener(detail); } catch (e) {} });
@@ -194,6 +206,11 @@
       const stored = parseInt(localStorage.getItem(key + "_ts") || "0");
       const last = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
       return Math.max(Date.now(), stored + 1, last + 1);
+    }
+    function _announceStorageWrite(key, value, localTs) {
+      if (!_storageBroadcast) return;
+      try { _storageBroadcast.postMessage({ key, value, localTs, identity: _identity() }); }
+      catch (error) { console.warn("Cross-tab sync announcement failed:", error); }
     }
     function _queueCloudWrite(key, ref, payload) {
       const previous = _cloudWriteQueues[key] || Promise.resolve();
@@ -435,6 +452,143 @@
       cloudEnabled() { return !!window._user; },
     };
 
+    // Each task also gets an independent cloud safety record. The main app
+    // document is still fast to load, while these records prevent a stale tab
+    // or interrupted whole-document write from making an added task disappear.
+    function _taskLedgerCollection() {
+      return window._user ? fbDb.collection("users").doc(window._user.uid).collection("data") : null;
+    }
+    async function _taskLedgerDocId(taskId) {
+      const hash = await _sha256(String(taskId || ""));
+      return "dg-task-item-" + (hash || encodeURIComponent(String(taskId || "missing")).slice(0, 500));
+    }
+    function _taskLedgerEntries(data) {
+      const entries = new Map();
+      const lists = data && Array.isArray(data.taskLists) ? data.taskLists : [];
+      lists.forEach((list) => {
+        const items = list && Array.isArray(list.items) ? list.items : [];
+        items.forEach((task) => {
+          if (!task || typeof task !== "object" || typeof task.id !== "string" || !task.id) return;
+          const entry = {
+            taskId: task.id,
+            listId: typeof list.id === "string" ? list.id : "recovered_tasks",
+            listTitle: typeof list.title === "string" ? list.title : "Recovered Tasks",
+            resetsDaily: list.resetsDaily === true,
+            task: JSON.parse(JSON.stringify(task)),
+          };
+          entry.signature = JSON.stringify(entry);
+          entries.set(task.id, entry);
+        });
+      });
+      return entries;
+    }
+    function _parseTaskLedgerSnapshot(snapshot) {
+      const entries = [];
+      snapshot.forEach((doc) => {
+        const value = doc.data() || {};
+        if (value.kind !== "daily-grind-task-v1" || typeof value.taskId !== "string" || !value.taskId) return;
+        if (value.deleted === true) {
+          entries.push({ taskId: value.taskId, deleted: true });
+          return;
+        }
+        if (!value.task || typeof value.task !== "object" || Array.isArray(value.task) || value.task.id !== value.taskId) return;
+        entries.push({
+          taskId: value.taskId,
+          deleted: false,
+          listId: typeof value.listId === "string" && value.listId ? value.listId : "recovered_tasks",
+          listTitle: typeof value.listTitle === "string" && value.listTitle ? value.listTitle : "Recovered Tasks",
+          resetsDaily: value.resetsDaily === true,
+          task: value.task,
+        });
+      });
+      return entries;
+    }
+    async function _writeTaskLedger(entry, deleted) {
+      await _fbReady;
+      const collection = _taskLedgerCollection();
+      if (!collection) return true;
+      const ref = collection.doc(await _taskLedgerDocId(entry.taskId));
+      const payload = deleted ? {
+        kind: "daily-grind-task-v1",
+        taskId: entry.taskId,
+        deleted: true,
+        clientUpdatedAt: Date.now(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      } : {
+        kind: "daily-grind-task-v1",
+        taskId: entry.taskId,
+        deleted: false,
+        listId: entry.listId,
+        listTitle: entry.listTitle,
+        resetsDaily: entry.resetsDaily === true,
+        task: entry.task,
+        clientUpdatedAt: Date.now(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      };
+      await _queueCloudWrite("task-ledger:" + entry.taskId, ref, payload);
+      return true;
+    }
+    window.taskLedger = {
+      async list() {
+        await _fbReady;
+        const collection = _taskLedgerCollection();
+        if (!collection) return [];
+        const snapshot = await collection.where("kind", "==", "daily-grind-task-v1").get();
+        return _parseTaskLedgerSnapshot(snapshot);
+      },
+      async syncChanges(before, after) {
+        const previous = _taskLedgerEntries(before);
+        const next = _taskLedgerEntries(after);
+        const jobs = [];
+        next.forEach((entry, taskId) => {
+          if (!previous.has(taskId) || previous.get(taskId).signature !== entry.signature) jobs.push(_writeTaskLedger(entry, false));
+        });
+        previous.forEach((entry, taskId) => {
+          if (!next.has(taskId)) jobs.push(_writeTaskLedger(entry, true));
+        });
+        if (!jobs.length) return true;
+        await Promise.all(jobs);
+        return true;
+      },
+      async seed(data, knownEntries) {
+        const current = _taskLedgerEntries(data);
+        const known = new Map();
+        (Array.isArray(knownEntries) ? knownEntries : []).forEach((entry) => {
+          if (!entry || !entry.taskId) return;
+          const signature = entry.deleted === true ? "deleted" : JSON.stringify({
+            taskId: entry.taskId,
+            listId: entry.listId,
+            listTitle: entry.listTitle,
+            resetsDaily: entry.resetsDaily === true,
+            task: entry.task,
+          });
+          known.set(entry.taskId, { ...entry, signature });
+        });
+        const jobs = [];
+        current.forEach((entry, taskId) => {
+          if (!known.has(taskId) || known.get(taskId).signature !== entry.signature) jobs.push(_writeTaskLedger(entry, false));
+        });
+        known.forEach((entry, taskId) => {
+          if (entry.deleted !== true && !current.has(taskId)) jobs.push(_writeTaskLedger(entry, true));
+        });
+        if (jobs.length) await Promise.all(jobs);
+        return true;
+      },
+      subscribe(callback) {
+        let cancelled = false;
+        let unsubscribe = () => {};
+        _fbReady.then(() => {
+          if (cancelled) return;
+          const collection = _taskLedgerCollection();
+          if (!collection) return;
+          unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
+            if (!cancelled) callback(_parseTaskLedgerSnapshot(snapshot));
+          }, (error) => console.warn("Task recovery sync failed:", error));
+        });
+        return () => { cancelled = true; try { unsubscribe(); } catch (error) {} };
+      },
+    };
+
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
     window.storage = {
@@ -559,6 +713,7 @@
           localStorage.setItem(key + "_ts", String(ts));
           window._lastLocalTs = window._lastLocalTs || {};
           window._lastLocalTs[key] = ts;
+          _announceStorageWrite(key, value, ts);
         } catch (e) {
           _emitStorageStatus("error", key, e);
           throw e;
@@ -602,6 +757,7 @@
         if (_docRef(key)) localStorage.setItem("dg-owner", _identity());
         window._lastLocalTs = window._lastLocalTs || {};
         window._lastLocalTs[key] = ts;
+        _announceStorageWrite(key, value, ts);
         return { key, value };
       },
       onStatus(callback) {
@@ -612,6 +768,26 @@
       subscribe(key, callback) {
         let unsub = () => {};
         let cancelled = false;
+        const applyExternalWrite = (value, localTs, identity) => {
+          if (cancelled || (identity && identity !== _identity()) || !_validStorageValue(key, value)) return;
+          const knownTs = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
+          if (!Number.isFinite(localTs) || localTs <= knownTs) return;
+          window._lastLocalTs = window._lastLocalTs || {};
+          window._lastLocalTs[key] = localTs;
+          try { callback(value); } catch (error) { console.warn(error); }
+        };
+        const onBroadcast = (event) => {
+          const message = event && event.data;
+          if (!message || message.key !== key) return;
+          applyExternalWrite(message.value, Number(message.localTs), message.identity);
+        };
+        const onStorage = (event) => {
+          if (event.key !== key + "_ts") return;
+          const value = localStorage.getItem(key);
+          if (value !== null) applyExternalWrite(value, Number(event.newValue), localStorage.getItem("dg-owner"));
+        };
+        if (_storageBroadcast) _storageBroadcast.addEventListener("message", onBroadcast);
+        window.addEventListener("storage", onStorage);
         _fbReady.then(() => {
           if (cancelled) return;
           const ref = _docRef(key);
@@ -644,7 +820,12 @@
               }
             }, (err) => console.warn("Firestore subscribe failed:", err));
         });
-        return () => { cancelled = true; try { unsub(); } catch(e) {} };
+        return () => {
+          cancelled = true;
+          if (_storageBroadcast) _storageBroadcast.removeEventListener("message", onBroadcast);
+          window.removeEventListener("storage", onStorage);
+          try { unsub(); } catch(e) {}
+        };
       }
     };
   </script>
@@ -876,6 +1057,42 @@ function clearTaskDraft(listId) {
     if (Object.keys(parsed).length) localStorage.setItem(TASK_DRAFTS_KEY, JSON.stringify(parsed));
     else localStorage.removeItem(TASK_DRAFTS_KEY);
   } catch (error) { console.warn("Task draft cleanup failed:", error); }
+}
+
+function reconcileTaskLedger(data, ledgerEntries) {
+  if (!data || !Array.isArray(data.taskLists) || !Array.isArray(ledgerEntries) || !ledgerEntries.length) {
+    return { data, changed: false };
+  }
+  let changed = false;
+  let taskLists = data.taskLists.map((list) => ({ ...list, items: [...list.items] }));
+  const deletedIds = new Set(ledgerEntries.filter((entry) => entry && entry.deleted === true).map((entry) => entry.taskId));
+  if (deletedIds.size) {
+    taskLists = taskLists.map((list) => {
+      const items = list.items.filter((task) => !deletedIds.has(task.id));
+      if (items.length !== list.items.length) changed = true;
+      return items.length === list.items.length ? list : { ...list, items };
+    });
+  }
+  const existingIds = new Set(taskLists.flatMap((list) => list.items.map((task) => task.id)));
+  ledgerEntries.forEach((entry) => {
+    if (!entry || entry.deleted === true || !entry.task || existingIds.has(entry.taskId)) return;
+    let listIndex = taskLists.findIndex((list) => list.id === entry.listId);
+    if (listIndex < 0) {
+      taskLists.push({
+        id: entry.listId || `recovered_${entry.taskId}`,
+        title: entry.listTitle || "Recovered Tasks",
+        resetsDaily: entry.resetsDaily === true,
+        items: [],
+        completedLog: [],
+      });
+      listIndex = taskLists.length - 1;
+    }
+    taskLists[listIndex] = { ...taskLists[listIndex], items: [...taskLists[listIndex].items, entry.task] };
+    existingIds.add(entry.taskId);
+    changed = true;
+  });
+  if (!changed) return { data, changed: false };
+  return { data: parseMainData(JSON.stringify({ ...data, taskLists })), changed: true };
 }
 
 function textByteSize(text) {
@@ -1151,6 +1368,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
   if (initialDraftRef.current === undefined) initialDraftRef.current = readTaskDraft(list.id);
   const [text, setText] = useState(() => initialDraftRef.current?.name || "");
   const [pts, setPts] = useState(() => initialDraftRef.current?.points || "");
+  const [taskSaving, setTaskSaving] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const [completedShown, setCompletedShown] = useState(10);
   const inputRef = useRef(null);
@@ -1158,6 +1376,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
   const ptsRef = useRef(initialDraftRef.current?.points || "");
   const draftIdRef = useRef(initialDraftRef.current?.id || makeId("t"));
   const restoreDraftRef = useRef(!!initialDraftRef.current);
+  const taskSavingRef = useRef(false);
   const dragRef = useRef(null);
   const [listDragOffset, setListDragOffset] = useState(0);
   const [listDragging, setListDragging] = useState(false);
@@ -1295,16 +1514,36 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
     document.addEventListener("touchcancel", onEnd);
   }
 
-  const commitDraft = useCallback(() => {
+  const commitDraft = useCallback(async () => {
+    if (taskSavingRef.current) return null;
     const name = textRef.current.trim();
     if (!name) return null;
-    const result = onAdd(list.id, name, Math.max(0, parseInt(ptsRef.current) || 0), draftIdRef.current);
-    clearTaskDraft(list.id);
+    const pendingDraft = { id: draftIdRef.current, name, points: ptsRef.current };
+    writeTaskDraft(list.id, pendingDraft);
+    taskSavingRef.current = true;
+    setTaskSaving(true);
     textRef.current = "";
     ptsRef.current = "";
-    draftIdRef.current = makeId("t");
     setText(""); setPts("");
-    setTimeout(() => inputRef.current?.focus(), 50);
+    let result = null;
+    try {
+      result = await onAdd(list.id, pendingDraft.name, Math.max(0, parseInt(pendingDraft.points) || 0), pendingDraft.id);
+    } catch (error) {
+      console.warn("Task cloud save failed:", error);
+    }
+    if (result) {
+      clearTaskDraft(list.id);
+      draftIdRef.current = makeId("t");
+    } else {
+      textRef.current = pendingDraft.name;
+      ptsRef.current = pendingDraft.points;
+      setText(pendingDraft.name);
+      setPts(pendingDraft.points);
+      writeTaskDraft(list.id, pendingDraft);
+    }
+    taskSavingRef.current = false;
+    setTaskSaving(false);
+    if (document.visibilityState === "visible") setTimeout(() => inputRef.current?.focus(), 50);
     return result;
   }, [list.id, onAdd]);
 
@@ -1323,10 +1562,17 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") flushDraft();
     };
+    const warnBeforeClose = (event) => {
+      if (!taskSavingRef.current && !textRef.current.trim()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
     window.addEventListener("pagehide", flushDraft);
+    window.addEventListener("beforeunload", warnBeforeClose);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("pagehide", flushDraft);
+      window.removeEventListener("beforeunload", warnBeforeClose);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [commitDraft]);
@@ -1407,8 +1653,8 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
       <div style={S.tAddRow} onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) commitDraft();
       }}>
-        <button type="button" onClick={commitDraft} style={{ ...S.tAddIcon, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }} aria-label={`Save task in ${list.title}`}>+</button>
-        <input ref={inputRef} style={S.tAddInp} placeholder="Add a task" value={text}
+        <button type="button" onClick={commitDraft} disabled={taskSaving} style={{ ...S.tAddIcon, background: "none", border: "none", cursor: taskSaving ? "wait" : "pointer", fontFamily: "inherit", opacity: taskSaving ? 0.5 : 1 }} aria-label={`Save task in ${list.title}`}>+</button>
+        <input ref={inputRef} style={S.tAddInp} placeholder={taskSaving ? "Saving task to cloud..." : "Add a task"} value={text} disabled={taskSaving}
           onChange={(e) => {
             const next = e.target.value;
             textRef.current = next;
@@ -1417,7 +1663,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
             else clearTaskDraft(list.id);
           }}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
-        <input style={S.tAddPts} placeholder="pts" type="number" value={pts}
+        <input style={S.tAddPts} placeholder="pts" type="number" value={pts} disabled={taskSaving}
           onChange={(e) => {
             const next = e.target.value;
             ptsRef.current = next;
@@ -1425,7 +1671,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
             if (textRef.current.trim()) writeTaskDraft(list.id, { id: draftIdRef.current, name: textRef.current, points: next });
           }}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
-        <button type="button" onClick={commitDraft} disabled={!text.trim()} style={{ background: text.trim() ? "#7c3aed" : "#2d2d3a", color: text.trim() ? "#fff" : "#666677", border: "none", borderRadius: 7, padding: "7px 10px", cursor: text.trim() ? "pointer" : "default", fontFamily: "inherit", fontSize: 9, fontWeight: 900, letterSpacing: 1 }}>ADD</button>
+        <button type="button" onClick={commitDraft} disabled={taskSaving || !text.trim()} style={{ background: taskSaving || !text.trim() ? "#2d2d3a" : "#7c3aed", color: taskSaving || !text.trim() ? "#666677" : "#fff", border: "none", borderRadius: 7, padding: "7px 10px", cursor: taskSaving ? "wait" : text.trim() ? "pointer" : "default", fontFamily: "inherit", fontSize: 9, fontWeight: 900, letterSpacing: 1, minWidth: 48 }}>{taskSaving ? "SAVING" : "ADD"}</button>
       </div>
 
       {completedAll.length > 0 && (
@@ -1764,6 +2010,7 @@ function DailyGrind() {
   const [vaultLoading, setVaultLoading] = useState(false);
   const [vaultMessage, setVaultMessage] = useState("");
   const dataRef = useRef(null);
+  const taskLedgerRef = useRef([]);
   const backupFileRef = useRef(null);
   const initialVaultRef = useRef(false);
   const [page, setPage] = useState("habits");
@@ -1875,18 +2122,21 @@ function DailyGrind() {
           setLoadError("We couldn't safely load your saved data. Nothing has been overwritten.");
           break;
         }
-        if (r?.value) {
-          const parsed = parseMainData(r.value);
-          dataRef.current = parsed;
-          setData(parsed);
-          setGoalInput(String(parsed.dailyGoal || 100));
-          setHasSavedData(true);
-        } else {
-          const starter = mkDefault();
-          dataRef.current = starter;
-          setData(starter);
-          setHasSavedData(false);
+        const base = r?.value ? parseMainData(r.value) : mkDefault();
+        let ledgerEntries = [];
+        try { ledgerEntries = await window.taskLedger.list(); }
+        catch (error) { console.warn("Task recovery records could not be loaded yet:", error); }
+        taskLedgerRef.current = ledgerEntries;
+        const reconciled = reconcileTaskLedger(base, ledgerEntries);
+        const parsed = reconciled.data;
+        dataRef.current = parsed;
+        setData(parsed);
+        setGoalInput(String(parsed.dailyGoal || 100));
+        setHasSavedData(!!r?.value || ledgerEntries.some((entry) => entry && entry.deleted !== true));
+        if (reconciled.changed) {
+          window.storage.set(STORAGE_KEY, JSON.stringify(parsed)).catch((error) => console.warn("Recovered tasks could not be merged to the main cloud copy yet:", error));
         }
+        window.taskLedger.seed(parsed, ledgerEntries).catch((error) => console.warn("Existing task recovery seeding failed:", error));
         loaded = true;
         break;
       } catch (e) {
@@ -1925,7 +2175,15 @@ function DailyGrind() {
     dataRef.current = validated;
     setData(validated);
     setHasSavedData(true);
-    return window.storage.set(STORAGE_KEY, serialized).catch((e) => { console.error(e); return null; });
+    const mainSave = window.storage.set(STORAGE_KEY, serialized);
+    const taskSave = window.taskLedger.syncChanges(current, validated);
+    return Promise.all([mainSave, taskSave])
+      .then(([result]) => result)
+      .catch((error) => {
+        console.error(error);
+        setSaveInfo({ state: "error", key: STORAGE_KEY, error: "Your change is safe on this device, but cloud confirmation is still needed." });
+        return null;
+      });
   }, []);
 
   const protectBeforeDestructive = useCallback(async (reason) => {
@@ -2024,7 +2282,10 @@ function DailyGrind() {
 
   const retrySaves = useCallback(() => {
     const jobs = [];
-    if (dataRef.current) jobs.push(window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)));
+    if (dataRef.current) {
+      jobs.push(window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)));
+      jobs.push(window.taskLedger.seed(dataRef.current, taskLedgerRef.current));
+    }
     if (calEventsLoaded && !calLoadError) jobs.push(window.storage.set("dg-cal-events", JSON.stringify(calEventsRef.current)));
     Promise.allSettled(jobs);
   }, [calEventsLoaded, calLoadError]);
@@ -2034,16 +2295,41 @@ function DailyGrind() {
     if (!window.storage.subscribe) return;
     const unsub = window.storage.subscribe(STORAGE_KEY, (newValue) => {
       try {
-        const parsed = parseMainData(newValue);
+        const reconciled = reconcileTaskLedger(parseMainData(newValue), taskLedgerRef.current);
+        const parsed = reconciled.data;
         dataRef.current = parsed;
         setData(parsed);
         setGoalInput(String(parsed.dailyGoal || 100));
+        if (reconciled.changed) {
+          window.storage.set(STORAGE_KEY, JSON.stringify(parsed)).catch((error) => console.warn("Task recovery repair is waiting to sync:", error));
+        }
       } catch(e) {
         console.warn("Live sync parse failed:", e);
         setSaveInfo({ state: "error", key: STORAGE_KEY, error: "An invalid cloud update was blocked. Your current data was kept safe." });
       }
     });
     return unsub;
+  }, []);
+
+  // Independent task records are merged into every incoming main document.
+  // This repairs a missing task even if an older tab or interrupted save wrote
+  // a whole-document snapshot that did not contain it.
+  useEffect(() => {
+    if (!window.taskLedger?.subscribe) return;
+    return window.taskLedger.subscribe((entries) => {
+      taskLedgerRef.current = entries;
+      if (!dataRef.current) return;
+      try {
+        const reconciled = reconcileTaskLedger(dataRef.current, entries);
+        if (!reconciled.changed) return;
+        dataRef.current = reconciled.data;
+        setData(reconciled.data);
+        setGoalInput(String(reconciled.data.dailyGoal || 100));
+        window.storage.set(STORAGE_KEY, JSON.stringify(reconciled.data)).catch((error) => console.warn("Recovered task merge is waiting to sync:", error));
+      } catch (error) {
+        console.warn("Task recovery merge failed:", error);
+      }
+    });
   }, []);
 
   // Real-time cloud sync subscription for calendar events
