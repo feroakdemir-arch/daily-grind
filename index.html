@@ -112,7 +112,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -834,6 +834,50 @@ function makeId(prefix) {
   return `${prefix}_${Date.now()}_${random}`;
 }
 
+const TASK_DRAFTS_KEY = "dg-task-drafts-v1";
+
+function taskDraftOwner() {
+  try { return typeof _identity === "function" ? _identity() : "anon"; }
+  catch (error) { return "anon"; }
+}
+
+function readTaskDraft(listId) {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(TASK_DRAFTS_KEY) || "{}");
+    const draft = drafts && typeof drafts === "object" ? drafts[`${taskDraftOwner()}::${listId}`] : null;
+    if (!draft || typeof draft !== "object" || typeof draft.name !== "string" || !draft.name.trim()) return null;
+    return {
+      id: typeof draft.id === "string" && draft.id ? draft.id : makeId("t"),
+      name: draft.name,
+      points: typeof draft.points === "string" ? draft.points : String(draft.points || ""),
+    };
+  } catch (error) { return null; }
+}
+
+function writeTaskDraft(listId, draft) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TASK_DRAFTS_KEY) || "{}");
+    const drafts = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    drafts[`${taskDraftOwner()}::${listId}`] = {
+      id: draft.id,
+      name: draft.name,
+      points: draft.points,
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(TASK_DRAFTS_KEY, JSON.stringify(drafts));
+  } catch (error) { console.warn("Task draft save failed:", error); }
+}
+
+function clearTaskDraft(listId) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TASK_DRAFTS_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    delete parsed[`${taskDraftOwner()}::${listId}`];
+    if (Object.keys(parsed).length) localStorage.setItem(TASK_DRAFTS_KEY, JSON.stringify(parsed));
+    else localStorage.removeItem(TASK_DRAFTS_KEY);
+  } catch (error) { console.warn("Task draft cleanup failed:", error); }
+}
+
 function textByteSize(text) {
   try { return new TextEncoder().encode(text).length; }
   catch (e) { return new Blob([text]).size; }
@@ -1103,11 +1147,17 @@ function SaveIndicator({ info, onRetry }) {
 }
 
 function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
-  const [text, setText] = useState("");
-  const [pts, setPts] = useState("");
+  const initialDraftRef = useRef(undefined);
+  if (initialDraftRef.current === undefined) initialDraftRef.current = readTaskDraft(list.id);
+  const [text, setText] = useState(() => initialDraftRef.current?.name || "");
+  const [pts, setPts] = useState(() => initialDraftRef.current?.points || "");
   const [showDone, setShowDone] = useState(false);
   const [completedShown, setCompletedShown] = useState(10);
   const inputRef = useRef(null);
+  const textRef = useRef(initialDraftRef.current?.name || "");
+  const ptsRef = useRef(initialDraftRef.current?.points || "");
+  const draftIdRef = useRef(initialDraftRef.current?.id || makeId("t"));
+  const restoreDraftRef = useRef(!!initialDraftRef.current);
   const dragRef = useRef(null);
   const [listDragOffset, setListDragOffset] = useState(0);
   const [listDragging, setListDragging] = useState(false);
@@ -1245,12 +1295,41 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
     document.addEventListener("touchcancel", onEnd);
   }
 
-  function handleAdd() {
-    if (!text.trim()) return;
-    onAdd(list.id, text.trim(), Math.max(0, parseInt(pts) || 0));
+  const commitDraft = useCallback(() => {
+    const name = textRef.current.trim();
+    if (!name) return null;
+    const result = onAdd(list.id, name, Math.max(0, parseInt(ptsRef.current) || 0), draftIdRef.current);
+    clearTaskDraft(list.id);
+    textRef.current = "";
+    ptsRef.current = "";
+    draftIdRef.current = makeId("t");
     setText(""); setPts("");
     setTimeout(() => inputRef.current?.focus(), 50);
-  }
+    return result;
+  }, [list.id, onAdd]);
+
+  // Recover a task that was being typed if the browser previously closed
+  // before Enter/blur could commit it to the main task list.
+  useEffect(() => {
+    if (!restoreDraftRef.current) return;
+    restoreDraftRef.current = false;
+    commitDraft();
+  }, [commitDraft]);
+
+  // Closing or hiding the page must not discard an in-progress task. The
+  // parent save writes to the device synchronously before cloud sync begins.
+  useEffect(() => {
+    const flushDraft = () => { commitDraft(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushDraft();
+    };
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [commitDraft]);
 
   const isTaskDropTarget = !!taskDrag && taskDrag.targetListId === list.id;
   const pendingDropItems = taskDrag ? pending.filter((item) => item.id !== taskDrag.taskId) : pending;
@@ -1325,14 +1404,28 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
         <div style={{ height: 2, background: "#a78bfa", borderRadius: 2, margin: "2px 0 8px", boxShadow: "0 0 10px #7c3aed" }} />
       )}
 
-      <div style={S.tAddRow}>
-        <span style={S.tAddIcon}>+</span>
+      <div style={S.tAddRow} onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) commitDraft();
+      }}>
+        <button type="button" onClick={commitDraft} style={{ ...S.tAddIcon, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }} aria-label={`Save task in ${list.title}`}>+</button>
         <input ref={inputRef} style={S.tAddInp} placeholder="Add a task" value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }} />
+          onChange={(e) => {
+            const next = e.target.value;
+            textRef.current = next;
+            setText(next);
+            if (next.trim()) writeTaskDraft(list.id, { id: draftIdRef.current, name: next, points: ptsRef.current });
+            else clearTaskDraft(list.id);
+          }}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
         <input style={S.tAddPts} placeholder="pts" type="number" value={pts}
-          onChange={(e) => setPts(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }} />
+          onChange={(e) => {
+            const next = e.target.value;
+            ptsRef.current = next;
+            setPts(next);
+            if (textRef.current.trim()) writeTaskDraft(list.id, { id: draftIdRef.current, name: textRef.current, points: next });
+          }}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
+        <button type="button" onClick={commitDraft} disabled={!text.trim()} style={{ background: text.trim() ? "#7c3aed" : "#2d2d3a", color: text.trim() ? "#fff" : "#666677", border: "none", borderRadius: 7, padding: "7px 10px", cursor: text.trim() ? "pointer" : "default", fontFamily: "inherit", fontSize: 9, fontWeight: 900, letterSpacing: 1 }}>ADD</button>
       </div>
 
       {completedAll.length > 0 && (
@@ -2196,9 +2289,12 @@ function DailyGrind() {
     if (!(await protectBeforeDestructive("before-task-history-delete"))) return;
     await save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, completedLog: (l.completedLog || []).filter((e) => e.id !== entryId) } : l) }));
   }, [save, protectBeforeDestructive]);
-  const addTaskItem = useCallback((listId, name, points) => {
-    const task = { id: makeId("t"), name, points, done: false };
-    save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? { ...l, items: [...l.items, task] } : l) }));
+  const addTaskItem = useCallback((listId, name, points, taskId) => {
+    const task = { id: taskId || makeId("t"), name, points, done: false };
+    return save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => {
+      if (l.id !== listId || l.items.some((item) => item.id === task.id)) return l;
+      return { ...l, items: [...l.items, task] };
+    }) }));
   }, [save]);
   const moveTaskBetweenLists = useCallback((sourceListId, taskId, targetListId, targetPendingIndex) => {
     save((prev) => {
