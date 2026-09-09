@@ -7,15 +7,15 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Organized Me</title>
-  <link rel="icon" type="image/svg+xml" href="icon.svg?v=organized-me" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg?v=classic-g" />
   <!-- PWA / Add-to-Home-Screen: makes the site open fullscreen like a native app -->
   <link rel="manifest" href="manifest.json" />
-  <meta name="theme-color" content="#09090b" />
+  <meta name="theme-color" content="#1a1a2e" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Organized Me" />
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=classic-g" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html { background: #0b0b14; }
@@ -3297,8 +3297,8 @@ function DailyGrind() {
     return (
       <div style={{ ...S.shell, background: "#12122a", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
         <div style={{ maxWidth: 360, width: "100%", textAlign: "center" }}>
-          <img src="icon.svg?v=organized-me" alt="Organized Me logo" width="80" height="80" style={{ display: "block", margin: "0 auto 20px", borderRadius: 18 }} />
-          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 4, color: "#ef233c", marginBottom: 8 }}>ORGANIZED ME</h1>
+          <img src="icon.svg?v=classic-g" alt="Organized Me logo" width="80" height="80" style={{ display: "block", margin: "0 auto 20px", borderRadius: 18 }} />
+          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 4, color: "#f0f0f4", marginBottom: 8 }}>ORGANIZED ME</h1>
           <div style={{ fontSize: 12, color: "#8b8b9e", letterSpacing: 1, marginBottom: 28 }}>Score your day. Build streaks. Level up.</div>
           <div style={{ textAlign: "left", margin: "0 auto 28px", display: "inline-block" }}>
             <div style={{ fontSize: 12, color: "#c9c9d4", marginBottom: 10 }}>{"⚡"} Habits, tasks, notes &amp; calendar in one place</div>
@@ -3469,7 +3469,7 @@ function DailyGrind() {
 
         {page !== "calendar" && <div style={{ marginBottom: page === "notes" ? 12 : 20, padding: page === "notes" ? "0 16px" : 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 3, color: "#ef233c" }}><img src="icon.svg?v=organized-me" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
+            <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 3, color: "#f0f0f4" }}><img src="icon.svg?v=classic-g" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
             <SaveIndicator info={saveInfo} onRetry={retrySaves} />
           </div>
@@ -3633,7 +3633,7 @@ function DailyGrind() {
           <div data-notes-section className="notes-workspace">
             <aside className="notes-sections" aria-label="Notebook sections">
               <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
-                <img src="icon.svg?v=organized-me" alt="" width="38" height="38" style={{ flexShrink: 0, borderRadius: 8 }} />
+                <img src="icon.svg?v=classic-g" alt="" width="38" height="38" style={{ flexShrink: 0, borderRadius: 8 }} />
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, color: "#f0f0f4", lineHeight: 1.4 }}>MY NOTEBOOK</div>
                   <div style={{ fontSize: 9, color: "#666677", marginTop: 2 }}>{notes.length} page{notes.length === 1 ? "" : "s"} · synced</div>
