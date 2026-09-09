@@ -129,3 +129,28 @@ test("pixel positions and paper width survive saving, reopening and points below
   assert.equal(saved.noteDrawings.sketch[0].pageWidth, 800);
   assert.equal(context.notePaperHeight(100, saved.notes[0].drawing), 1848);
 });
+test("an open clean note adopts remote drawing updates", () => {
+  const draft = { id: "page", title: "Page", body: "Text", tag: "", pinned: false, drawing: [] };
+  const incoming = { ...draft, drawing: sampleDrawing() };
+  const merged = context.mergeLiveNote(draft, incoming, context.noteSignature(draft));
+  assert.equal(merged.drawing.length, 1);
+  assert.equal(context.noteSignature(merged), context.noteSignature(incoming));
+});
+test("incoming ink preserves unsaved local text and incoming text preserves local ink", () => {
+  const base = { id: "page", title: "Page", body: "Old", tag: "", pinned: false, drawing: [] };
+  const signature = context.noteSignature(base);
+  const merged = context.mergeLiveNote({ ...base, body: "Typing on desktop" }, { ...base, drawing: sampleDrawing() }, signature);
+  assert.equal(merged.body, "Typing on desktop"); assert.equal(merged.drawing.length, 1);
+  const reverse = context.mergeLiveNote({ ...base, drawing: sampleDrawing() }, { ...base, body: "New remote text" }, signature);
+  assert.equal(reverse.body, "New remote text"); assert.equal(reverse.drawing.length, 1);
+});
+test("new strokes merge by ID, erasures apply, and a growing local stroke is not truncated", () => {
+  const base = { id: "page", title: "Page", body: "", tag: "", pinned: false, drawing: sampleDrawing() };
+  const signature = context.noteSignature(base);
+  const localStroke = { ...sampleDrawing()[0], id: "local" }, remoteStroke = { ...sampleDrawing()[0], id: "remote" };
+  const merged = context.mergeLiveNote({ ...base, drawing: [...base.drawing, localStroke] }, { ...base, drawing: [...base.drawing, remoteStroke] }, signature);
+  assert.equal(merged.drawing.length, 3);
+  assert.equal(context.mergeLiveNote(base, { ...base, drawing: [] }, signature).drawing.length, 0);
+  const growing = { ...base, drawing: [{ ...base.drawing[0], points: [...base.drawing[0].points, [500, 400]] }] };
+  assert.equal(context.mergeLiveNote(growing, base, signature).drawing[0].points.length, 4);
+});

@@ -1227,6 +1227,29 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
   };
 }
 
+function mergeLiveNote(draft, incoming, savedSignature) {
+  if (!draft || !incoming || draft.id !== incoming.id) return draft;
+  let base;
+  try { base = JSON.parse(savedSignature); } catch { return draft; }
+  if (!Array.isArray(base)) return draft;
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const merged = { ...incoming };
+  ["title", "body", "tag", "pinned"].forEach((key, index) => {
+    merged[key] = same(draft[key], base[index]) ? incoming[key] : draft[key];
+  });
+  const before = new Map((base[4] || []).map(stroke => [stroke.id, stroke]));
+  const local = new Map((draft.drawing || []).map(stroke => [stroke.id, stroke]));
+  const remote = new Map((incoming.drawing || []).map(stroke => [stroke.id, stroke]));
+  merged.drawing = [...new Set([...remote.keys(), ...local.keys()])].flatMap(id => {
+    const old = before.get(id), ours = local.get(id), theirs = remote.get(id);
+    if (!old) return [ours || theirs];
+    if (!ours) return []; // Preserve a local erasure.
+    if (!theirs) return same(ours, old) ? [] : [ours];
+    return [same(ours, old) ? theirs : ours];
+  });
+  return merged;
+}
+
 function noteSignature(note) {
   if (!note) return "";
   return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || []]);
@@ -1498,12 +1521,14 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
   const textRef = useRef(null);
   const legacySize = useRef(null);
   const drawingRef = useRef(drawing);
+  const lastPublishedDrawing = useRef(drawing);
   drawingRef.current = drawing;
   const gesture = useRef(null);
   const publish = next => {
     try {
       normalizeNoteDrawing(next);
       if (onDrawingChange(next) === false) throw new Error("Your notes are at the save limit. Remove some drawing before adding more.");
+      lastPublishedDrawing.current = next;
       drawingRef.current = next; setMessage(""); return true;
     } catch (error) { setMessage(error.message); return false; }
   };
@@ -1518,6 +1543,16 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       }
     }
   }, []);
+  useLayoutEffect(() => {
+    const incomingWidth = drawing.find(stroke => stroke.space === "page")?.pageWidth;
+    if (pageWidth === null && incomingWidth) setPageWidth(incomingWidth);
+    if (drawing !== lastPublishedDrawing.current) {
+      // Old undo snapshots must not remove strokes received from another device.
+      setHistory({ undo: [], redo: [] });
+      if (gesture.current) gesture.current.before = drawing.filter(stroke => stroke.id !== gesture.current.id);
+      lastPublishedDrawing.current = drawing;
+    }
+  }, [drawing, pageWidth]);
   useLayoutEffect(() => {
     const text = textRef.current;
     // Measure the full text instead of allowing an independent textarea scroll.
@@ -2364,6 +2399,7 @@ function DailyGrind() {
   const noteSaveTimerRef = useRef(null);
   const noteSaveVersionRef = useRef(0);
   const noteSavedSignatureRef = useRef("");
+  const noteLiveSavePendingRef = useRef(false);
   const noteDraftRef = useRef(null);
   noteDraftRef.current = noteDraft;
   const [newListRepeats, setNewListRepeats] = useState(false);
@@ -2563,6 +2599,30 @@ function DailyGrind() {
     return () => clearTimeout(noteSaveTimerRef.current);
   }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, persistNoteDraft]);
 
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const draft = noteDraftRef.current;
+      if (!draft || noteLiveSavePendingRef.current || !noteCanSave(draft, dataRef.current)) return;
+      const baseSignature = noteSavedSignatureRef.current;
+      let base;
+      try { base = JSON.parse(baseSignature); } catch { return; }
+      if (JSON.stringify(draft.drawing || []) === JSON.stringify(base[4] || [])) return;
+      const snapshot = { ...draft }, signature = noteSignature(snapshot);
+      noteLiveSavePendingRef.current = true;
+      try {
+        const result = await persistNoteDraft(snapshot);
+        if (result && noteDraftRef.current?.id === snapshot.id && noteSavedSignatureRef.current === baseSignature) {
+          noteSavedSignatureRef.current = signature;
+          if (noteSignature(noteDraftRef.current) === signature) setNoteDraftState("saved");
+        }
+      } catch (error) {
+        console.warn("Drawing sync is waiting to reconnect", error);
+        if (noteDraftRef.current?.id === snapshot.id) setNoteDraftState("error");
+      } finally { noteLiveSavePendingRef.current = false; }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [persistNoteDraft]);
+
   // The normal note save is intentionally debounced, but closing or hiding a
   // tab can happen inside that short window. Save the latest draft to the
   // device synchronously; the normal load path uploads its newer timestamp.
@@ -2624,6 +2684,26 @@ function DailyGrind() {
       try {
         const reconciled = reconcileTaskLedger(parseMainData(newValue), taskLedgerRef.current);
         const parsed = reconciled.data;
+        const draft = noteDraftRef.current;
+        if (draft) {
+          const incoming = (parsed.notes || []).find(note => note.id === draft.id);
+          if (incoming) {
+            const merged = mergeLiveNote(draft, incoming, noteSavedSignatureRef.current);
+            const changed = noteSignature(merged) !== noteSignature(draft);
+            if (changed || noteSignature(merged) === noteSignature(incoming)) {
+              clearTimeout(noteSaveTimerRef.current);
+              noteSaveVersionRef.current += 1;
+            }
+            noteSavedSignatureRef.current = noteSignature(incoming);
+            if (changed) { noteDraftRef.current = merged; setNoteDraft(merged); }
+            setNoteDraftState(noteSignature(merged) === noteSignature(incoming) ? "saved" : "typing");
+          } else if (noteSignature(draft) === noteSavedSignatureRef.current) {
+            clearTimeout(noteSaveTimerRef.current);
+            noteSaveVersionRef.current += 1;
+            noteDraftRef.current = null;
+            setNoteDraft(null);
+          }
+        }
         dataRef.current = parsed;
         setData(parsed);
         setGoalInput(String(parsed.dailyGoal || 100));
