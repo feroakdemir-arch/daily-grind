@@ -71,3 +71,38 @@ test("empty and legacy tag-only sections can be removed without reappearing", ()
   assert.equal(context.noteSectionNames(reload(legacy)).length, 0);
   assert.equal(legacy.notes[0].tag, "");
 });
+const sampleDrawing = () => [{ id: "stroke-1", color: "#a78bfa", width: 3, points: [[10, 20], [200, 100], [450, 300]] }];
+test("drawing-only pages save and survive JSON backup/reload", () => {
+  const draft = { id: "sketch", title: "", body: "", tag: "School", drawing: sampleDrawing() };
+  assert.equal(context.noteCanSave(draft, base()), true);
+  const saved = reload(context.addNoteSection(base(), "School", draft));
+  assert.equal(saved.notes[0].drawing[0].points.length, 3);
+  assert.equal(saved.noteDrawings.sketch[0].color, "#a78bfa");
+  const reloaded = reload(saved);
+  assert.equal(reloaded.notes[0].drawing[0].points[2][0], 450);
+});
+test("drawing map survives older clients that omit drawing fields from note objects", () => {
+  const oldClient = { ...base(), notes: [{ id: "sketch", title: "Title edited elsewhere", body: "Text" }], noteDrawings: { sketch: sampleDrawing() } };
+  const loaded = reload(oldClient);
+  assert.equal(loaded.notes[0].drawing.length, 1);
+  assert.equal(loaded.notes[0].title, "Title edited elsewhere");
+});
+test("erasing the last stroke can save an existing page and changes its save signature", () => {
+  const previous = { id: "sketch", title: "", body: "", drawing: sampleDrawing() };
+  const erased = { ...previous, drawing: [] };
+  assert.equal(context.noteCanSave(erased, { notes: [previous] }), true);
+  assert.notEqual(context.noteSignature(previous), context.noteSignature(erased));
+  const saved = reload({ ...base(), notes: [erased], noteDrawings: { sketch: [] } });
+  assert.equal(saved.notes[0].drawing.length, 0);
+});
+test("invalid or oversized drawings fail closed and eraser checks line segments", () => {
+  assert.throws(() => context.normalizeNoteDrawing([{ ...sampleDrawing()[0], points: [[NaN, 2]] }]));
+  assert.throws(() => context.normalizeNoteDrawing([{ ...sampleDrawing()[0], points: Array.from({length:6001}, () => [1, 2]) }]));
+  assert.equal(context.drawingStrokeHit({ width: 3, points: [[0, 0], [100, 100]] }, [50, 50]), true);
+  assert.equal(context.drawingStrokeHit({ width: 3, points: [[0, 0], [100, 100]] }, [200, 10]), false);
+});
+test("section deletion preserves drawings when keeping pages and removes them when deleting pages", () => {
+  const data = { ...base(), notes: [{ id: "sketch", tag: "School", drawing: sampleDrawing() }], noteDrawings: { sketch: sampleDrawing() } };
+  assert.equal(context.removeNoteSection(data, "School", false).noteDrawings.sketch.length, 1);
+  assert.equal(context.removeNoteSection(data, "School", true).noteDrawings.sketch, undefined);
+});

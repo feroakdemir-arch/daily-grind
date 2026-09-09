@@ -857,6 +857,7 @@ const mkDefault = () => ({
   taskLists: JSON.parse(JSON.stringify(DEFAULT_TASK_LISTS)),
   notes: [],
   noteSections: [],
+  noteDrawings: {},
   dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
@@ -948,15 +949,19 @@ function parseMainData(raw) {
   })) : [];
   const calStartHour = Math.min(10, Math.max(4, Math.floor(finiteNumber(parsed.calStartHour, 6))));
   const calEndHour = Math.min(28, Math.max(21, Math.floor(finiteNumber(parsed.calEndHour, 23))));
+  if (parsed.noteDrawings !== undefined && !objectOnly(parsed.noteDrawings)) throw new Error("Saved note drawings are invalid");
+  const noteDrawings = Object.fromEntries(Object.entries(parsed.noteDrawings || {}).map(([id, strokes]) => [id, normalizeNoteDrawing(strokes)]));
   return {
     ...parsed,
     habitSections: habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
+    noteDrawings,
     notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note) => note && typeof note === "object").map((note, index) => ({
       id: typeof note.id === "string" && note.id ? note.id : `note_legacy_${index}`,
       title: typeof note.title === "string" ? note.title : "",
       body: typeof note.body === "string" ? note.body : "",
+      drawing: normalizeNoteDrawing(Object.prototype.hasOwnProperty.call(noteDrawings, note.id) ? noteDrawings[note.id] : note.drawing),
       tag: typeof note.tag === "string" ? note.tag : "",
       pinned: note.pinned === true,
       createdAt: Number.isFinite(note.createdAt) ? note.createdAt : 0,
@@ -1143,6 +1148,36 @@ function normalizeNoteSections(sections) {
     .filter(name => typeof name === "string").map(name => name.trim()).filter(Boolean))];
 }
 
+function normalizeNoteDrawing(strokes) {
+  if (strokes === undefined) return [];
+  if (!Array.isArray(strokes) || strokes.length > 300) throw new Error("This drawing has too many strokes. Erase a stroke or use another page.");
+  let pointCount = 0;
+  const ids = new Set();
+  return strokes.map(stroke => {
+    if (!stroke || typeof stroke.id !== "string" || !stroke.id || ids.has(stroke.id) || !/^#[0-9a-f]{6}$/i.test(stroke.color || "") ||
+        !Number.isFinite(stroke.width) || stroke.width < 1 || stroke.width > 12 || !Array.isArray(stroke.points) || !stroke.points.length) throw new Error("Saved drawing data is invalid");
+    ids.add(stroke.id); pointCount += stroke.points.length;
+    if (pointCount > 6000) throw new Error("This drawing is full. Erase a stroke or use another page.");
+    return { id: stroke.id, color: stroke.color, width: stroke.width, points: stroke.points.map(point => {
+      if (!Array.isArray(point) || point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[0] > 1000 || point[1] < 0 || point[1] > 700) throw new Error("Saved drawing points are invalid");
+      return point.slice();
+    }) };
+  });
+}
+
+function noteCanSave(note, current) {
+  return !!note && (!!note.title.trim() || !!note.body.trim() || !!note.drawing?.length || (current?.notes || []).some(saved => saved.id === note.id));
+}
+
+function drawingStrokeHit(stroke, point, radius = 12) {
+  return stroke.points.some((end, i) => {
+    const start = stroke.points[Math.max(0, i - 1)];
+    const dx = end[0] - start[0], dy = end[1] - start[1];
+    const t = dx || dy ? Math.max(0, Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / (dx * dx + dy * dy))) : 0;
+    return Math.hypot(point[0] - start[0] - t * dx, point[1] - start[1] - t * dy) <= radius + stroke.width / 2;
+  });
+}
+
 function noteSectionNames(data) {
   return normalizeNoteSections([...(data.noteSections || []), ...(data.notes || []).map(note => note.tag)])
     .sort((a, b) => a.localeCompare(b));
@@ -1151,12 +1186,12 @@ function noteSectionNames(data) {
 function addNoteSection(current, section, draft) {
   // Preserve the open page in the same save before replacing its editor draft.
   let notes = current.notes || [];
-  if (draft && (draft.title.trim() || draft.body.trim())) {
+  if (noteCanSave(draft, current)) {
     const note = normalizedNoteDraft(draft);
     notes = notes.some(entry => entry.id === note.id)
       ? notes.map(entry => entry.id === note.id ? note : entry) : [note, ...notes];
   }
-  return { ...current, notes, noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
+  return { ...current, notes, noteDrawings: noteCanSave(draft, current) ? { ...(current.noteDrawings || {}), [draft.id]: normalizeNoteDrawing(draft.drawing) } : current.noteDrawings || {}, noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
 }
 
 function removeNoteSection(current, section, deletePages, now = Date.now()) {
@@ -1169,6 +1204,7 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
   return {
     ...current,
     noteSections: normalizeNoteSections(current.noteSections).filter(name => name !== section),
+    noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => !deletedIds.has(id))),
     notes: deletePages ? (current.notes || []).filter(note => !belongs(note))
       : (current.notes || []).map(note => belongs(note) ? { ...note, tag: "", updatedAt: now } : note),
     taskLists: (current.taskLists || []).map(list => ({ ...list,
@@ -1178,7 +1214,7 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
 
 function noteSignature(note) {
   if (!note) return "";
-  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true]);
+  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || []]);
 }
 
 function normalizedNoteDraft(draft, now = Date.now()) {
@@ -1186,6 +1222,7 @@ function normalizedNoteDraft(draft, now = Date.now()) {
     ...draft,
     title: draft.title.trim() || "Untitled note",
     body: draft.body,
+    drawing: normalizeNoteDrawing(draft.drawing),
     tag: draft.tag.trim(),
     pinned: draft.pinned === true,
     createdAt: draft.createdAt || now,
@@ -1431,6 +1468,91 @@ function TaskWorkTimer({ task, onToggle }) {
       </span>
     </div>
   );
+}
+
+function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange, onFinish }) {
+  const [mode, setMode] = useState("text");
+  const [color, setColor] = useState("#f8fafc");
+  const [width, setWidth] = useState(3);
+  const [message, setMessage] = useState("");
+  const [history, setHistory] = useState({ undo: [], redo: [] });
+  const drawingRef = useRef(drawing);
+  drawingRef.current = drawing;
+  const gesture = useRef(null);
+  const publish = next => {
+    try {
+      normalizeNoteDrawing(next);
+      if (onDrawingChange(next) === false) throw new Error("Your notes are at the save limit. Remove some drawing before adding more.");
+      drawingRef.current = next; setMessage(""); return true;
+    } catch (error) { setMessage(error.message); return false; }
+  };
+  const pointAt = event => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [Math.round(Math.max(0, Math.min(1000, (event.clientX - rect.left) * 1000 / rect.width)) * 10) / 10,
+      Math.round(Math.max(0, Math.min(700, (event.clientY - rect.top) * 700 / rect.height)) * 10) / 10];
+  };
+  const finishGesture = () => {
+    const active = gesture.current;
+    if (!active) return;
+    gesture.current = null;
+    if (active.before !== drawingRef.current) setHistory(current => ({ undo: [...current.undo.slice(-29), active.before], redo: [] }));
+  };
+  const move = event => {
+    const active = gesture.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const point = pointAt(event);
+    if (mode === "erase") {
+      const next = drawingRef.current.filter(stroke => !drawingStrokeHit(stroke, point));
+      if (next.length !== drawingRef.current.length) publish(next);
+    } else {
+      const current = drawingRef.current.find(stroke => stroke.id === active.id);
+      if (!current) return;
+      const last = current.points[current.points.length - 1];
+      if (Math.hypot(last[0] - point[0], last[1] - point[1]) < 2) return;
+      publish(drawingRef.current.map(stroke => stroke.id === active.id ? { ...stroke, points: [...stroke.points, point] } : stroke));
+    }
+  };
+  const travel = direction => {
+    const stack = history[direction];
+    if (!stack.length) return;
+    const previous = drawingRef.current;
+    if (!publish(stack[stack.length - 1])) return;
+    setHistory(current => direction === "undo"
+      ? { undo: current.undo.slice(0, -1), redo: [...current.redo, previous] }
+      : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
+  };
+  return <div style={{ display: "flex", flexDirection: "column", flex: "1 0 420px", minHeight: 420 }}>
+    <div role="toolbar" aria-label="Drawing tools" style={{ position: "sticky", top: 0, zIndex: 2, background: "#1a1a2e", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: "6px 0", marginBottom: 10 }}>
+      {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
+      <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>
+      <button type="button" aria-label="Redo drawing" disabled={!history.redo.length} onClick={() => travel("redo")} style={{ ...S.noteToolBtn, opacity: history.redo.length ? 1 : 0.4 }}>Redo</button>
+      {mode !== "text" && <>
+        <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: "#b5b5c9" }}>Ink <input aria-label="Pen color" type="color" value={color} onChange={event => setColor(event.target.value)} style={{ width: 30, height: 28, border: 0, padding: 0, background: "transparent" }} /></label>
+        <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
+      </>}
+      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : "Type normally; drawings stay visible"}</span>
+    </div>
+    {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
+    <div style={{ position: "relative", flex: 1, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
+      <textarea aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" ? 0 : -1} placeholder={mode === "text" ? "Start writing..." : ""} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      <svg aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing viewBox="0 0 1000 700" preserveAspectRatio="none"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
+        onPointerDown={event => {
+          if (event.button !== 0 || gesture.current) return;
+          event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
+          const point = pointAt(event), id = makeId("stroke");
+          gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current };
+          if (mode === "pen") publish([...drawingRef.current, { id, color, width, points: [point] }]);
+          else move(event);
+        }} onPointerMove={move} onPointerUp={event => { if (gesture.current?.pointerId === event.pointerId) { move(event); finishGesture(); } }} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture}
+        onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(event.shiftKey ? "redo" : "undo"); } }}>
+        {drawing.map(stroke => stroke.points.length === 1
+          ? <circle key={stroke.id} data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
+          : <polyline key={stroke.id} data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />)}
+      </svg>
+    </div>
+  </div>;
 }
 
 function TrashIcon() {
@@ -2352,7 +2474,7 @@ function DailyGrind() {
   }, []);
 
   const persistNoteDraft = useCallback((draft) => {
-    if (!draft || (!draft.title.trim() && !draft.body.trim())) return Promise.resolve(null);
+    if (!noteCanSave(draft, dataRef.current)) return Promise.resolve(null);
     const now = Date.now();
     const note = normalizedNoteDraft(draft, now);
     return save((current) => {
@@ -2361,13 +2483,14 @@ function DailyGrind() {
       return {
         ...current,
         notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
+        noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
       };
     });
   }, [save]);
 
   useEffect(() => {
     const version = ++noteSaveVersionRef.current;
-    if (!noteDraft || (!noteDraft.title.trim() && !noteDraft.body.trim())) {
+    if (!noteCanSave(noteDraft, dataRef.current)) {
       setNoteDraftState("idle");
       return;
     }
@@ -2388,7 +2511,7 @@ function DailyGrind() {
       }
     }, 700);
     return () => clearTimeout(noteSaveTimerRef.current);
-  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, persistNoteDraft]);
+  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, persistNoteDraft]);
 
   // The normal note save is intentionally debounced, but closing or hiding a
   // tab can happen inside that short window. Save the latest draft to the
@@ -2397,7 +2520,7 @@ function DailyGrind() {
     const persistLastDraftLocally = () => {
       const draft = noteDraftRef.current;
       const current = dataRef.current;
-      if (!draft || !current || (!draft.title.trim() && !draft.body.trim())) return;
+      if (!current || !noteCanSave(draft, current)) return;
       if (noteSignature(draft) === noteSavedSignatureRef.current) return;
       try {
         const note = normalizedNoteDraft(draft);
@@ -2406,6 +2529,7 @@ function DailyGrind() {
         const next = parseMainData(JSON.stringify({
           ...current,
           notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
+          noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
         }));
         const serialized = JSON.stringify(next);
         if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) return;
@@ -2891,6 +3015,12 @@ function DailyGrind() {
     setNewListName(""); setShowNewList(false); setNewListRepeats(false);
   }
   function openNewNote(section) {
+    const previous = noteDraftRef.current;
+    if (noteCanSave(previous, dataRef.current)) {
+      persistNoteDraft(previous);
+      const saved = dataRef.current.notes.find(note => note.id === previous.id);
+      if (noteSignature(saved) !== noteSignature(normalizedNoteDraft(previous))) { setNoteDraftState("error"); return; }
+    }
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     const selectedSection = section !== undefined
@@ -2925,7 +3055,7 @@ function DailyGrind() {
     if (noteDraft?.id === note.id) return;
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
-    if (noteDraft && (noteDraft.title.trim() || noteDraft.body.trim())) await persistNoteDraft(noteDraft);
+    if (noteCanSave(noteDraft, dataRef.current)) await persistNoteDraft(noteDraft);
     noteSavedSignatureRef.current = noteSignature(note);
     setNoteDraft({ ...note });
     setNoteDraftState("saved");
@@ -2934,7 +3064,7 @@ function DailyGrind() {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     const draft = noteDraft;
-    if (draft && (draft.title.trim() || draft.body.trim())) {
+    if (noteCanSave(draft, dataRef.current)) {
       setNoteDraftState("saving");
       const result = await persistNoteDraft(draft);
       setNoteDraftState(result ? "saved" : "error");
@@ -2999,6 +3129,7 @@ function DailyGrind() {
       return {
         ...current,
         notes: (current.notes || []).filter((entry) => entry.id !== note.id),
+        noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => id !== note.id)),
         taskLists: current.taskLists.map((list) => ({
           ...list,
           items: list.items.map(unlinkNote),
@@ -3058,7 +3189,7 @@ function DailyGrind() {
   async function flushCurrentNote() {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
-    if (!noteDraft || (!noteDraft.title.trim() && !noteDraft.body.trim())) return;
+    if (!noteCanSave(noteDraft, dataRef.current)) return;
     const signature = noteSignature(noteDraft);
     if (signature === noteSavedSignatureRef.current) return;
     const result = await persistNoteDraft({ ...noteDraft });
@@ -3687,7 +3818,7 @@ function DailyGrind() {
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
                     <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
-                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{note.body || "Empty page"}</div>
+                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{note.body || (note.drawing?.length ? "Drawing" : "Empty page")}</div>
                   </article>
                   <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7, color: "#ff8793" }}><TrashIcon /></button>
                   </div>
@@ -3725,7 +3856,7 @@ function DailyGrind() {
                       <button onClick={() => { setPage("tasks"); openEditTask(linkedTaskContext.list.id, linkedTaskContext.task); }} style={{ ...S.noteToolBtn, color: "#c4b5fd", borderColor: "#7c3aed77" }}>OPEN TASK</button>
                     </div>
                   )}
-                  <div style={{ flex: 1, padding: "28px clamp(18px,4vw,48px) 20px", display: "flex", flexDirection: "column", minHeight: 0 }}>
+                  <div style={{ flex: 1, padding: "28px clamp(18px,4vw,48px) 20px", display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto" }}>
                     <input aria-label="Note title" value={noteDraft.title} onChange={(e) => setNoteDraft((draft) => ({ ...draft, title: e.target.value }))} placeholder="Page title" autoFocus style={{ width: "100%", background: "transparent", border: "none", borderBottom: "1px solid #3a3a4e", color: "#f7f7fb", fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, fontFamily: "inherit", padding: "5px 0 13px", outline: "none" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 18px", flexWrap: "wrap" }}>
                       <span style={{ color: "#666677", fontSize: 9 }}>{new Date(noteDraft.updatedAt || noteDraft.createdAt || Date.now()).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</span>
@@ -3734,7 +3865,21 @@ function DailyGrind() {
                         <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 9, fontFamily: "inherit", outline: "none" }} />
                       </label>
                     </div>
-                    <textarea aria-label="Note body" value={noteDraft.body} onChange={(e) => setNoteDraft((draft) => ({ ...draft, body: e.target.value }))} onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") finishNoteEditing(); }} placeholder="Start writing..." style={{ flex: 1, width: "100%", minHeight: 360, resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+                    <NoteDrawingSurface key={noteDraft.id} drawing={noteDraft.drawing || []} body={noteDraft.body}
+                      onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing}
+                      onDrawingChange={drawing => {
+                        const current = noteDraftRef.current;
+                        if (!current || current.id !== noteDraft.id) return false;
+                        const next = { ...current, drawing };
+                        const note = normalizedNoteDraft(next);
+                        const source = dataRef.current;
+                        const existing = source.notes.some(entry => entry.id === note.id);
+                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing } };
+                        if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        noteDraftRef.current = next;
+                        setNoteDraft(next);
+                        return true;
+                      }} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteDraft.body.trim() ? noteDraft.body.trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
