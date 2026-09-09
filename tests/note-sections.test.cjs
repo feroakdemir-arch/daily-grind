@@ -106,3 +106,26 @@ test("section deletion preserves drawings when keeping pages and removes them wh
   assert.equal(context.removeNoteSection(data, "School", false).noteDrawings.sketch.length, 1);
   assert.equal(context.removeNoteSection(data, "School", true).noteDrawings.sketch, undefined);
 });
+test("legacy drawings are anchored once and never rescaled by later page growth", () => {
+  const old = sampleDrawing();
+  const fixed = context.anchorNoteDrawing(old, 800, 350);
+  assert.equal(fixed[0].space, "page"); assert.equal(fixed[0].pageWidth, 800);
+  assert.equal(fixed[0].points[2][0], 360); assert.equal(fixed[0].points[2][1], 150);
+  assert.equal(context.anchorNoteDrawing(fixed, 400, 2000), fixed);
+  assert.equal(old[0].points[2][1], 300);
+});
+test("page expansion changes only page height, not drawing coordinates", () => {
+  const drawing = context.anchorNoteDrawing(sampleDrawing(), 800, 350);
+  const before = JSON.stringify(drawing);
+  assert.equal(context.notePaperHeight(100, drawing), 360);
+  assert.equal(context.notePaperHeight(1500, drawing), 1548);
+  assert.equal(JSON.stringify(drawing), before);
+});
+test("pixel positions and paper width survive saving, reopening and points below the old canvas", () => {
+  const drawing = [{ ...sampleDrawing()[0], space: "page", pageWidth: 800, points: [[400, 100], [500, 1800]] }];
+  const saved = reload({ ...base(), notes: [{ id: "sketch", title: "Page", body: "Long text" }], noteDrawings: { sketch: drawing } });
+  assert.equal(saved.notes[0].drawing[0].points[1][1], 1800);
+  assert.equal(saved.noteDrawings.sketch[0].space, "page");
+  assert.equal(saved.noteDrawings.sketch[0].pageWidth, 800);
+  assert.equal(context.notePaperHeight(100, saved.notes[0].drawing), 1848);
+});

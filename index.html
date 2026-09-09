@@ -833,7 +833,7 @@
   </script>
   <script src="calendar-reminders.js"></script>
   <script type="text/babel">
-const { useState, useEffect, useCallback, useRef } = React;
+const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
 
 const STORAGE_KEY = "daily-grind-v13";
 const MAX_SAFE_DOC_BYTES = 900000;
@@ -1154,15 +1154,30 @@ function normalizeNoteDrawing(strokes) {
   let pointCount = 0;
   const ids = new Set();
   return strokes.map(stroke => {
+    const anchored = stroke?.space === "page";
     if (!stroke || typeof stroke.id !== "string" || !stroke.id || ids.has(stroke.id) || !/^#[0-9a-f]{6}$/i.test(stroke.color || "") ||
-        !Number.isFinite(stroke.width) || stroke.width < 1 || stroke.width > 12 || !Array.isArray(stroke.points) || !stroke.points.length) throw new Error("Saved drawing data is invalid");
+        !Number.isFinite(stroke.width) || stroke.width < (anchored ? 0.5 : 1) || stroke.width > 12 || !Array.isArray(stroke.points) || !stroke.points.length ||
+        (stroke.space !== undefined && !anchored) || (anchored && (!Number.isFinite(stroke.pageWidth) || stroke.pageWidth <= 0 || stroke.pageWidth > 10000))) throw new Error("Saved drawing data is invalid");
     ids.add(stroke.id); pointCount += stroke.points.length;
     if (pointCount > 6000) throw new Error("This drawing is full. Erase a stroke or use another page.");
-    return { id: stroke.id, color: stroke.color, width: stroke.width, points: stroke.points.map(point => {
-      if (!Array.isArray(point) || point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[0] > 1000 || point[1] < 0 || point[1] > 700) throw new Error("Saved drawing points are invalid");
+    return { id: stroke.id, color: stroke.color, width: stroke.width, ...(anchored ? { space: "page", pageWidth: stroke.pageWidth } : {}), points: stroke.points.map(point => {
+      if (!Array.isArray(point) || point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[0] > (anchored ? 10000 : 1000) || point[1] < 0 || point[1] > (anchored ? 200000 : 700)) throw new Error("Saved drawing points are invalid");
       return point.slice();
     }) };
   });
+}
+
+function anchorNoteDrawing(strokes, pageWidth, originalHeight) {
+  if (strokes.every(stroke => stroke.space === "page")) return strokes;
+  return strokes.map(stroke => stroke.space === "page" ? stroke : {
+    ...stroke, space: "page", pageWidth,
+    width: Math.max(0.5, Math.min(12, stroke.width * Math.min(pageWidth / 1000, originalHeight / 700))),
+    points: stroke.points.map(([x, y]) => [Math.round(x * pageWidth / 1000 * 10) / 10, Math.round(y * originalHeight / 700 * 10) / 10]),
+  });
+}
+
+function notePaperHeight(textHeight, strokes) {
+  return Math.ceil(strokes.reduce((height, stroke) => stroke.points.reduce((last, point) => Math.max(last, point[1] + 48), height), Math.max(360, textHeight + 48)));
 }
 
 function noteCanSave(note, current) {
@@ -1476,6 +1491,12 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
   const [width, setWidth] = useState(3);
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState({ undo: [], redo: [] });
+  const [pageWidth, setPageWidth] = useState(() => drawing.find(stroke => stroke.space === "page")?.pageWidth || null);
+  const [paperHeight, setPaperHeight] = useState(null);
+  const surfaceRef = useRef(null);
+  const svgRef = useRef(null);
+  const textRef = useRef(null);
+  const legacySize = useRef(null);
   const drawingRef = useRef(drawing);
   drawingRef.current = drawing;
   const gesture = useRef(null);
@@ -1486,10 +1507,32 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       drawingRef.current = next; setMessage(""); return true;
     } catch (error) { setMessage(error.message); return false; }
   };
+  useLayoutEffect(() => {
+    const rect = svgRef.current.getBoundingClientRect();
+    if (!legacySize.current) {
+      legacySize.current = { width: pageWidth || rect.width, height: rect.height };
+      if (drawingRef.current.length) {
+        setPageWidth(legacySize.current.width);
+        const anchored = anchorNoteDrawing(drawingRef.current, legacySize.current.width, rect.height);
+        if (anchored !== drawingRef.current) publish(anchored);
+      }
+    }
+  }, []);
+  useLayoutEffect(() => {
+    const text = textRef.current;
+    // Measure the full text instead of allowing an independent textarea scroll.
+    text.style.height = "0px";
+    const textHeight = text.scrollHeight;
+    text.style.height = "100%";
+    text.scrollTop = 0;
+    const size = legacySize.current;
+    const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
+    setPaperHeight(notePaperHeight(textHeight, strokes));
+  }, [body, drawing, pageWidth]);
   const pointAt = event => {
     const rect = event.currentTarget.getBoundingClientRect();
-    return [Math.round(Math.max(0, Math.min(1000, (event.clientX - rect.left) * 1000 / rect.width)) * 10) / 10,
-      Math.round(Math.max(0, Math.min(700, (event.clientY - rect.top) * 700 / rect.height)) * 10) / 10];
+    return [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
+      Math.round(Math.max(0, Math.min(rect.height, event.clientY - rect.top)) * 10) / 10];
   };
   const finishGesture = () => {
     const active = gesture.current;
@@ -1522,7 +1565,7 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       ? { undo: current.undo.slice(0, -1), redo: [...current.redo, previous] }
       : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
   };
-  return <div style={{ display: "flex", flexDirection: "column", flex: "1 0 420px", minHeight: 420 }}>
+  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: pageWidth ? pageWidth + 2 : "100%", minWidth: pageWidth ? pageWidth + 2 : 0 }}>
     <div role="toolbar" aria-label="Drawing tools" style={{ position: "sticky", top: 0, zIndex: 2, background: "#1a1a2e", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: "6px 0", marginBottom: 10 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
       <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>
@@ -1534,22 +1577,29 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : "Type normally; drawings stay visible"}</span>
     </div>
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
-    <div style={{ position: "relative", flex: 1, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
-      <textarea aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" ? 0 : -1} placeholder={mode === "text" ? "Start writing..." : ""} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
-      <svg aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing viewBox="0 0 1000 700" preserveAspectRatio="none"
+    <div ref={surfaceRef} data-note-paper style={{ position: "relative", flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
+      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" ? 0 : -1} placeholder={mode === "text" ? "Start writing..." : ""} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      <svg ref={svgRef} aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
         onPointerDown={event => {
           if (event.button !== 0 || gesture.current) return;
+          const size = legacySize.current;
+          const anchored = anchorNoteDrawing(drawingRef.current, size.width, size.height);
+          if (anchored !== drawingRef.current && !publish(anchored)) return;
           event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
           const point = pointAt(event), id = makeId("stroke");
+          const fixedWidth = pageWidth || event.currentTarget.getBoundingClientRect().width;
+          setPageWidth(fixedWidth);
           gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current };
-          if (mode === "pen") publish([...drawingRef.current, { id, color, width, points: [point] }]);
+          if (mode === "pen") publish([...drawingRef.current, { id, color, width, space: "page", pageWidth: fixedWidth, points: [point] }]);
           else move(event);
         }} onPointerMove={move} onPointerUp={event => { if (gesture.current?.pointerId === event.pointerId) { move(event); finishGesture(); } }} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture}
         onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(event.shiftKey ? "redo" : "undo"); } }}>
-        {drawing.map(stroke => stroke.points.length === 1
-          ? <circle key={stroke.id} data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
-          : <polyline key={stroke.id} data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />)}
+        {drawing.map(stroke => <g key={stroke.id} transform={stroke.space === "page" ? undefined : `scale(${(legacySize.current?.width || pageWidth || 1000) / 1000} ${(legacySize.current?.height || 700) / 700})`}>
+          {stroke.points.length === 1
+            ? <circle data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
+            : <polyline data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />}
+        </g>)}
       </svg>
     </div>
   </div>;
