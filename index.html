@@ -118,6 +118,7 @@
       return res.user;
     };
     window._signOut = async () => {
+      if (window.calendarReminders) await window.calendarReminders.disable();
       localStorage.removeItem("dg-was-signed-in");
       await fbAuth.signOut();
       // Signing out must also remove this account's device cache. The cloud
@@ -829,6 +830,7 @@
       }
     };
   </script>
+  <script src="calendar-reminders.js"></script>
   <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
 
@@ -1345,6 +1347,55 @@ function TaskWorkTimer({ task, onToggle }) {
       </span>
     </div>
   );
+}
+
+function CalendarReminders() {
+  const [status, setStatus] = useState({ state: "loading" });
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    let mounted = true;
+    window.calendarReminders.status().then(value => { if (mounted) setStatus(value); })
+      .catch(error => { if (mounted) { setStatus({ state: "error" }); setMessage(error.message); } });
+    return () => { mounted = false; };
+  }, []);
+  async function perform(action) {
+    setBusy(true); setMessage("");
+    try {
+      // Do not await before enable(): iPhone requires the original click gesture.
+      const result = await window.calendarReminders[action]();
+      if (result) setStatus(result);
+      if (action === "test") setMessage("Test sent. Check this device’s notifications.");
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(false); }
+  }
+  const on = status.state === "on";
+  const buttonStyle = { padding: "10px 12px", borderRadius: 8, border: "1px solid #6550ab", background: "#7c3aed22", color: "#ddd3ff", fontSize: 12, cursor: busy ? "wait" : "pointer", fontFamily: "inherit" };
+  return <section aria-label="Calendar reminders" style={{ borderTop: "1px solid #343447", marginTop: 18, paddingTop: 16, marginBottom: 18 }}>
+    <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#f0f0f4" }}>Calendar reminders</h4>
+    <p style={{ fontSize: 12, color: "#b5b5c9", lineHeight: 1.6, margin: "0 0 12px" }}>Get a notification on this device 10 minutes before each calendar event, including repeating events. Enable this separately on your iPhone and computer.</p>
+    {status.state === "install" ? <p style={{ fontSize: 12, color: "#ddd3ff", lineHeight: 1.6 }}>On iPhone: open DailyGrind in Safari, tap Share → Add to Home Screen, then open that icon and enable reminders here.</p>
+      : status.state === "unsupported" ? <p style={{ fontSize: 12 }}>This browser does not support push notifications. Try Safari, Chrome, Edge, or Firefox on a supported device.</p>
+      : status.state === "blocked" ? <p style={{ fontSize: 12, color: "#f3c794" }}>Notifications are blocked. Allow them in your browser or device notification settings, then reopen DailyGrind.</p>
+      : <>
+        <div role="status" style={{ fontSize: 12, color: on ? "#8cdeb2" : "#b5b5c9", marginBottom: 10 }}>{status.state === "loading" ? "Checking reminders…" : on ? "Reminders are on for this device" : "Reminders are off for this device"}</div>
+        {status.timeZone && <div style={{ fontSize: 11, color: "#b5b5c9", marginBottom: 12 }}>Calendar time zone: {status.timeZone}. Both devices use this time zone for reminders.</div>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {status.state === "error" ? <button disabled={busy} onClick={() => perform("status")} style={buttonStyle}>Retry setup check</button>
+            : <button disabled={busy || status.state === "loading"} onClick={() => perform(on ? "disable" : "enable")} style={buttonStyle}>{busy ? "Working…" : on ? "Turn off on this device" : "Enable on this device"}</button>}
+          {on && <button disabled={busy} onClick={() => perform("test")} style={buttonStyle}>Send test notification</button>}
+        </div>
+      </>}
+    {message && <p role="status" style={{ fontSize: 12, color: "#f3c794", lineHeight: 1.6, marginBottom: 0 }}>{message}</p>}
+  </section>;
+}
+
+function reminderWeekOffset(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return 0;
+  const target = new Date(date + "T12:00:00");
+  if (!Number.isFinite(target.getTime())) return 0;
+  const monday = (day) => Date.UTC(day.getFullYear(), day.getMonth(), day.getDate() - (day.getDay() + 6) % 7);
+  return Math.round((monday(target) - monday(new Date())) / 604800000);
 }
 
 function SaveIndicator({ info, onRetry }) {
@@ -2013,7 +2064,7 @@ function DailyGrind() {
   const taskLedgerRef = useRef([]);
   const backupFileRef = useRef(null);
   const initialVaultRef = useRef(false);
-  const [page, setPage] = useState("habits");
+  const [page, setPage] = useState(() => new URLSearchParams(location.search).has("calendar") ? "calendar" : "habits");
   const [view, setView] = useState("main");
   const [editItem, setEditItem] = useState(null);
   const [editSection, setEditSection] = useState(null);
@@ -2067,7 +2118,7 @@ function DailyGrind() {
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
   const [pomoTask, setPomoTask] = useState("");
   const [showScoreDetail, setShowScoreDetail] = useState(false);
-  const [calWeekOffset, setCalWeekOffset] = useState(0);
+  const [calWeekOffset, setCalWeekOffset] = useState(() => reminderWeekOffset(new URLSearchParams(location.search).get("date")));
   const [showCalSettings, setShowCalSettings] = useState(false);
   const [calEvents, setCalEvents] = useState([]);
   const [calEventsLoaded, setCalEventsLoaded] = useState(false);
@@ -2105,6 +2156,16 @@ function DailyGrind() {
   const [hasSavedData, setHasSavedData] = useState(true);
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => { calEventsRef.current = calEvents; }, [calEvents]);
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const openCalendar = event => {
+      if (event.data?.type !== "OPEN_CALENDAR") return;
+      setPage("calendar");
+      setCalWeekOffset(reminderWeekOffset(event.data.date));
+    };
+    navigator.serviceWorker.addEventListener("message", openCalendar);
+    return () => navigator.serviceWorker.removeEventListener("message", openCalendar);
+  }, []);
   useEffect(() => window.storage.onStatus ? window.storage.onStatus(setSaveInfo) : undefined, []);
   useEffect(() => window.dataVault?.onStatus ? window.dataVault.onStatus(setVaultInfo) : undefined, []);
 
@@ -4172,9 +4233,10 @@ function DailyGrind() {
               {showCalSettings && (
                 <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
                   onClick={() => setShowCalSettings(false)}>
-                  <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 360, width: "100%" }}
+                  <div role="dialog" aria-label="Calendar settings" style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 420, width: "100%", maxHeight: "85dvh", overflowY: "auto" }}
                     onClick={(e) => e.stopPropagation()}>
                     <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 6 }}>CALENDAR SETTINGS</h3>
+                    <CalendarReminders />
                     <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 16, lineHeight: 1.5 }}>Adjust when your day starts and how late it runs. Hours past midnight will appear at the bottom of the same day's column — so 1 AM stays inside your day.</div>
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY STARTS AT</label>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
@@ -4390,7 +4452,7 @@ function DailyGrind() {
             <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 12, lineHeight: 1.5 }}>Your data is saved to your account and syncs on every device you sign in on.</div>
             <div style={S.fAct}>
               <button onClick={() => { alert("Pulling latest from cloud..."); location.reload(); }} style={S.cBtn}>Pull from Cloud</button>
-              <button onClick={async () => { await window._signOut(); location.reload(); }} style={S.dBtn}>Sign out</button>
+              <button onClick={async () => { try { await window._signOut(); location.reload(); } catch (error) { alert(error.message || "Sign-out could not finish. Please try again."); } }} style={S.dBtn}>Sign out</button>
             </div>
           </div>
         ) : (
