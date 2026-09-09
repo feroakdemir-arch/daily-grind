@@ -45,3 +45,29 @@ test("empty sections count as real account data for the anti-clobber guard", () 
   assert.equal(context._mainRichness(JSON.stringify(sectionOnly)), 3);
   assert.equal(reload(JSON.parse(JSON.stringify(sectionOnly))).noteSections[0], "School");
 });
+test("deleting a section alone moves its pages to Quick Notes and preserves task links", () => {
+  const current = { ...base(), noteSections: ["Classes", "Work"], notes: [{ id: "p", title: "Math", body: "Keep this", tag: "Classes" }, { id: "q", tag: "Work" }], taskLists: [{ id: "tasks", items: [{ id: "t", noteId: "p" }] }] };
+  const before = JSON.stringify(current);
+  const next = context.removeNoteSection(current, "Classes", false, 123);
+  assert.equal(next.notes.length, 2); assert.equal(next.notes[0].tag, "");
+  assert.equal(next.notes[0].body, "Keep this"); assert.equal(next.notes[0].updatedAt, 123);
+  assert.equal(next.taskLists[0].items[0].noteId, "p");
+  assert.equal(context.noteSectionNames(next).join(","), "Work"); assert.equal(JSON.stringify(current), before);
+});
+test("deleting section and pages removes only matching pages and unlinks active and completed tasks", () => {
+  const current = { ...base(), noteSections: ["Classes", "Work"], notes: [{ id: "p", tag: "Classes" }, { id: "q", tag: "Work" }], taskLists: [{ id: "tasks", items: [{ id: "t", noteId: "p", name: "Keep task" }, { id: "u", noteId: "q" }], completedLog: [{ id: "v", noteId: "p" }] }] };
+  const next = reload(context.removeNoteSection(current, "Classes", true));
+  assert.equal(next.notes.length, 1); assert.equal(next.notes[0].id, "q");
+  assert.equal(next.taskLists[0].items[0].name, "Keep task");
+  assert.equal(next.taskLists[0].items[0].noteId, undefined);
+  assert.equal(next.taskLists[0].completedLog[0].noteId, undefined);
+  assert.equal(next.taskLists[0].items[1].noteId, "q");
+  assert.equal(context.noteSectionNames(next).join(","), "Work");
+});
+test("empty and legacy tag-only sections can be removed without reappearing", () => {
+  const empty = context.removeNoteSection({ ...base(), noteSections: ["Empty"] }, "Empty", false);
+  assert.equal(context.noteSectionNames(reload(empty)).length, 0);
+  const legacy = context.removeNoteSection({ ...base(), notes: [{ id: "p", tag: "Legacy" }] }, "Legacy", false);
+  assert.equal(context.noteSectionNames(reload(legacy)).length, 0);
+  assert.equal(legacy.notes[0].tag, "");
+});

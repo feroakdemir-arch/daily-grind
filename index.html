@@ -50,7 +50,7 @@
       .notes-workspace { display: block; min-height: 0; overflow-y: auto; }
       .notes-sections { border-right: 0; border-bottom: 1px solid #2d2d3a; padding: 10px; }
       .notes-section-list { display: flex !important; overflow-x: auto; gap: 6px; padding-bottom: 2px; }
-      .notes-section-list > button { width: auto !important; flex-shrink: 0; }
+      .notes-section-list > button, .notes-section-row { width: auto !important; flex-shrink: 0; }
       .notes-pages { border-right: 0; border-bottom: 1px solid #2d2d3a; max-height: 260px; padding: 10px; }
       .notes-editor { min-height: 440px; }
     }
@@ -1132,6 +1132,23 @@ function addNoteSection(current, section, draft) {
   return { ...current, notes, noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
 }
 
+function removeNoteSection(current, section, deletePages, now = Date.now()) {
+  const belongs = note => (note.tag || "").trim() === section;
+  const deletedIds = new Set(deletePages ? (current.notes || []).filter(belongs).map(note => note.id) : []);
+  const unlink = task => {
+    if (!deletedIds.has(task.noteId)) return task;
+    const next = { ...task }; delete next.noteId; return next;
+  };
+  return {
+    ...current,
+    noteSections: normalizeNoteSections(current.noteSections).filter(name => name !== section),
+    notes: deletePages ? (current.notes || []).filter(note => !belongs(note))
+      : (current.notes || []).map(note => belongs(note) ? { ...note, tag: "", updatedAt: now } : note),
+    taskLists: (current.taskLists || []).map(list => ({ ...list,
+      items: list.items.map(unlink), completedLog: (list.completedLog || []).map(unlink) })),
+  };
+}
+
 function noteSignature(note) {
   if (!note) return "";
   return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true]);
@@ -1387,6 +1404,10 @@ function TaskWorkTimer({ task, onToggle }) {
       </span>
     </div>
   );
+}
+
+function TrashIcon() {
+  return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg>;
 }
 
 function CalendarReminders() {
@@ -2138,6 +2159,9 @@ function DailyGrind() {
   const [showNewNoteSection, setShowNewNoteSection] = useState(false);
   const [newNoteSectionName, setNewNoteSectionName] = useState("");
   const [newNoteSectionError, setNewNoteSectionError] = useState("");
+  const [deleteSectionTarget, setDeleteSectionTarget] = useState(null);
+  const [deleteSectionBusy, setDeleteSectionBusy] = useState(false);
+  const [deleteSectionError, setDeleteSectionError] = useState("");
   const noteSaveTimerRef = useRef(null);
   const noteSaveVersionRef = useRef(0);
   const noteSavedSignatureRef = useRef("");
@@ -2900,6 +2924,32 @@ function DailyGrind() {
   function insertNoteText(text) {
     setNoteDraft((draft) => draft ? { ...draft, body: `${draft.body}${draft.body && !draft.body.endsWith("\n") ? "\n" : ""}${text}` } : draft);
   }
+  async function deleteNoteSection(deletePages) {
+    if (!deleteSectionTarget || deleteSectionBusy) return;
+    const section = deleteSectionTarget;
+    setDeleteSectionBusy(true); setDeleteSectionError("");
+    try {
+      await flushCurrentNote();
+      await window.dataVault.capture(JSON.stringify(dataRef.current), "before-note-section-delete", true);
+      clearTimeout(noteSaveTimerRef.current);
+      noteSaveVersionRef.current += 1;
+      const saving = save(current => removeNoteSection(current, section, deletePages));
+      if (noteSectionNames(dataRef.current).includes(section)) throw new Error("The section could not be removed. Please try again.");
+      const draft = noteDraftRef.current;
+      if (draft && (draft.tag || "").trim() === section) {
+        const next = deletePages ? null : { ...draft, tag: "" };
+        noteDraftRef.current = next;
+        noteSavedSignatureRef.current = noteSignature(next);
+        setNoteDraft(next);
+      }
+      if (noteTagFilter === section) setNoteTagFilter(deletePages ? "all" : "__untagged__");
+      setNoteSearch("");
+      await saving;
+      setDeleteSectionTarget(null);
+    } catch (error) {
+      setDeleteSectionError("Could not finish deleting the section. " + (error.message || "Please check your connection and try again."));
+    } finally { setDeleteSectionBusy(false); }
+  }
   async function deleteNote(note) {
     if (!confirm(`Delete "${note.title || "Untitled note"}"? A safety copy will be kept first.`)) return;
     clearTimeout(noteSaveTimerRef.current);
@@ -2911,7 +2961,7 @@ function DailyGrind() {
       alert("The safety copy could not be created, so the note was not deleted. Check your connection and try again.");
       return;
     }
-    if (noteDraft?.id === note.id) setNoteDraft(null);
+    if (noteDraftRef.current?.id === note.id) { noteDraftRef.current = null; setNoteDraft(null); }
     save((current) => {
       const unlinkNote = (task) => {
         if (task.noteId !== note.id) return task;
@@ -3571,9 +3621,12 @@ function DailyGrind() {
                   <span style={{ color: "#ffd43b" }}>◆</span><span style={{ flex: 1, textAlign: "left" }}>Quick Notes</span><span style={S.noteSectionCount}>{notes.filter((note) => !note.tag).length}</span>
                 </button>
                 {noteTags.map((tag, index) => (
-                  <button key={tag} onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, background: noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
+                  <div key={tag} className="notes-section-row" style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4, minWidth: 0 }}>
+                  <button onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, flex: 1, minWidth: 0, marginBottom: 0, background: noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
                     <span style={{ color: ["#00d9ff","#00ff87","#ff922b","#f472b6","#a78bfa"][index % 5] }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
                   </button>
+                  <button type="button" aria-label={`Delete section: ${tag}`} title={`Delete section: ${tag}`} onClick={() => { setDeleteSectionTarget(tag); setDeleteSectionError(""); }} style={{ ...S.noteToolBtn, color: "#ff8793", padding: 7, flexShrink: 0 }}><TrashIcon /></button>
+                  </div>
                 ))}
               </div>
 
@@ -3602,12 +3655,15 @@ function DailyGrind() {
               {visibleNotes.map((note) => {
                 const selected = noteDraft?.id === note.id;
                 return (
-                  <article key={note.id} className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 11px 11px 15px", marginBottom: 5, cursor: "pointer", outline: "none" }}>
+                  <div key={note.id} style={{ position: "relative" }}>
+                  <article className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 44px 11px 15px", marginBottom: 5, cursor: "pointer", outline: "none" }}>
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
                     <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
                     <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{note.body || "Empty page"}</div>
                   </article>
+                  <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7, color: "#ff8793" }}><TrashIcon /></button>
+                  </div>
                 );
               })}
               {visibleNotes.length === 0 && (
@@ -3625,6 +3681,7 @@ function DailyGrind() {
                     <button onClick={() => insertNoteText("• ")} title="Insert bullet" style={S.noteToolBtn}>• List</button>
                     <button onClick={() => insertNoteText("☐ ")} title="Insert checklist item" style={S.noteToolBtn}>☐ Task</button>
                     <button onClick={() => insertNoteText("──────────")} title="Insert divider" style={S.noteToolBtn}>— Divider</button>
+                    <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
                     <span style={{ flex: 1 }} />
                     <span aria-live="polite" style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
                       {noteDraftState === "typing" ? "UNSAVED" : noteDraftState === "saving" ? "SAVING..." : noteDraftState === "saved" ? "SAVED" : noteDraftState === "error" ? "SAVE FAILED" : "AUTO-SAVE ON"}
@@ -3667,6 +3724,19 @@ function DailyGrind() {
             </section>
           </div>
         )}
+
+        {deleteSectionTarget && <div style={{ position: "fixed", inset: 0, background: "#000b", zIndex: 250, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="delete-section-heading" style={{ width: "100%", maxWidth: 420, background: "#171726", border: "1px solid #39394b", borderRadius: 14, padding: 22 }}>
+            <h2 id="delete-section-heading" style={{ fontSize: 17, marginBottom: 12 }}>Delete “{deleteSectionTarget}”?</h2>
+            <p style={{ fontSize: 12, color: "#b5b5c9", lineHeight: 1.7, marginBottom: 18 }}>Keep its pages in Quick Notes, or delete the section and its pages. A recovery copy will be saved first.</p>
+            {deleteSectionError && <p role="alert" style={{ color: "#fca5a5", fontSize: 12, marginBottom: 12 }}>{deleteSectionError}</p>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <button disabled={deleteSectionBusy} onClick={() => deleteNoteSection(false)} style={{ ...S.cBtn, padding: 12 }}>{deleteSectionBusy ? "Saving recovery copy…" : "Delete section, keep pages"}</button>
+              <button disabled={deleteSectionBusy} onClick={() => deleteNoteSection(true)} style={{ ...S.dBtn, padding: 12 }}>Delete section and pages</button>
+              <button autoFocus disabled={deleteSectionBusy} onClick={() => setDeleteSectionTarget(null)} style={{ ...S.cBtn, padding: 12 }}>Cancel</button>
+            </div>
+          </div>
+        </div>}
 
         {page === "timer" && (() => {
           const fmtSec = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
