@@ -96,7 +96,7 @@ exports.calendarPushTest = onCall({ ...options, secrets: [privateKey] }, async (
     return d;
   });
   try {
-    await sendPush(device, { title: "DailyGrind reminders are ready", body: "Calendar events will remind you 10 minutes before they start.",
+    await sendPush(device, { title: "Organized Me reminders are ready", body: "Calendar events will remind you 10 minutes before they start.",
       tag: "dailygrind-test", url: SITE + "?calendar=1" }, 60);
   } catch (error) {
     if ([404, 410].includes(error.statusCode)) await disableExpired(id, device.subscription);

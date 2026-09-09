@@ -24,7 +24,7 @@ self.addEventListener("push", event => {
     if (url.origin !== self.location.origin || !url.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
     await self.registration.showNotification(String(data.title || "Calendar reminder"), {
       body: String(data.body || "").slice(0, 240), tag: String(data.tag || "dailygrind-calendar"),
-      data: { url: url.href }, icon: new URL("icon.svg", self.registration.scope).href
+      data: { url: url.href }, icon: new URL("icon-192.png", self.registration.scope).href
     });
   })());
 });

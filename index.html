@@ -6,16 +6,16 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Daily Grind</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231a1a2e'/%3E%3Ctext x='50' y='68' font-size='55' text-anchor='middle' font-weight='900' font-family='monospace' fill='%237c3aed'%3EG%3C/text%3E%3C/svg%3E" />
+  <title>Organized Me</title>
+  <link rel="icon" type="image/svg+xml" href="icon.svg?v=organized-me" />
   <!-- PWA / Add-to-Home-Screen: makes the site open fullscreen like a native app -->
   <link rel="manifest" href="manifest.json" />
-  <meta name="theme-color" content="#1a1a2e" />
+  <meta name="theme-color" content="#09090b" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="apple-mobile-web-app-title" content="Daily Grind" />
-  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231a1a2e'/%3E%3Ctext x='50' y='68' font-size='55' text-anchor='middle' font-weight='900' font-family='monospace' fill='%237c3aed'%3EG%3C/text%3E%3C/svg%3E" />
+  <meta name="apple-mobile-web-app-title" content="Organized Me" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html { background: #0b0b14; }
@@ -86,7 +86,7 @@
 
     // Keep acknowledged and still-pending Firestore writes in IndexedDB so a
     // tab or app session can close without discarding a queued change. Multi-
-    // tab synchronization lets every open Daily Grind tab share that queue.
+    // tab synchronization lets every open Organized Me tab share that queue.
     const _firestoreCacheReady = fbDb.enablePersistence({ synchronizeTabs: true })
       .then(() => true)
       .catch((error) => {
@@ -226,7 +226,7 @@
 
     // Versioned recovery vault. The live document remains the fast source of
     // truth, while these independent copies make accidental deletion or a bad
-    // overwrite recoverable. Daily Grind never deletes vault documents.
+    // overwrite recoverable. Organized Me never deletes vault documents.
     const VAULT_PREFIX = "dg-vault-main-";
     const VAULT_CAL_PREFIX = "dg-vault-calendar-";
     const VAULT_INDEX_PREFIX = "dg-vault-index-";
@@ -863,7 +863,7 @@ const mkDefault = () => ({
 function parseMainData(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
-    throw new Error("Saved Daily Grind data has an invalid shape");
+    throw new Error("Saved Organized Me data has an invalid shape");
   }
   const objectOnly = (value) => value && typeof value === "object" && !Array.isArray(value);
   const finiteNumber = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -1414,9 +1414,9 @@ function CalendarReminders() {
   return <section aria-label="Calendar reminders" style={{ borderTop: "1px solid #343447", marginTop: 18, paddingTop: 16, marginBottom: 18 }}>
     <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#f0f0f4" }}>Calendar reminders</h4>
     <p style={{ fontSize: 12, color: "#b5b5c9", lineHeight: 1.6, margin: "0 0 12px" }}>Get a notification on this device 10 minutes before each calendar event, including repeating events. Enable this separately on your iPhone and computer.</p>
-    {status.state === "install" ? <p style={{ fontSize: 12, color: "#ddd3ff", lineHeight: 1.6 }}>On iPhone: open DailyGrind in Safari, tap Share → Add to Home Screen, then open that icon and enable reminders here.</p>
+    {status.state === "install" ? <p style={{ fontSize: 12, color: "#ddd3ff", lineHeight: 1.6 }}>On iPhone: open Organized Me in Safari, tap Share → Add to Home Screen, then open that icon and enable reminders here.</p>
       : status.state === "unsupported" ? <p style={{ fontSize: 12 }}>This browser does not support push notifications. Try Safari, Chrome, Edge, or Firefox on a supported device.</p>
-      : status.state === "blocked" ? <p style={{ fontSize: 12, color: "#f3c794" }}>Notifications are blocked. Allow them in your browser or device notification settings, then reopen DailyGrind.</p>
+      : status.state === "blocked" ? <p style={{ fontSize: 12, color: "#f3c794" }}>Notifications are blocked. Allow them in your browser or device notification settings, then reopen Organized Me.</p>
       : <>
         <div role="status" style={{ fontSize: 12, color: on ? "#8cdeb2" : "#b5b5c9", marginBottom: 10 }}>{status.state === "loading" ? "Checking reminders…" : on ? "Reminders are on for this device" : "Reminders are off for this device"}</div>
         {status.timeZone && <div style={{ fontSize: 11, color: "#b5b5c9", marginBottom: 12 }}>Calendar time zone: {status.timeZone}. Both devices use this time zone for reminders.</div>}
@@ -2266,7 +2266,7 @@ function DailyGrind() {
     let serialized;
     try {
       serialized = JSON.stringify(next);
-      if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) throw new Error("Daily Grind data reached the safe cloud size limit. Download a backup before adding more data.");
+      if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) throw new Error("Organized Me data reached the safe cloud size limit. Download a backup before adding more data.");
       validated = parseMainData(serialized);
       serialized = JSON.stringify(validated);
     } catch (error) {
@@ -2995,7 +2995,7 @@ function DailyGrind() {
     try {
       await flushCurrentNote();
       const mainData = dataRef.current;
-      if (!mainData) throw new Error("Daily Grind data is not loaded");
+      if (!mainData) throw new Error("Organized Me data is not loaded");
       const exportedAt = new Date().toISOString();
       const mainText = JSON.stringify(mainData);
       const calendarText = JSON.stringify(calEventsRef.current);
@@ -3016,12 +3016,12 @@ function DailyGrind() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `daily-grind-backup-${exportedAt.slice(0, 10)}.json`;
+      link.download = `organized-me-backup-${exportedAt.slice(0, 10)}.json`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setVaultMessage("Backup downloaded. Keep a copy somewhere outside DailyGrind.");
+      setVaultMessage("Backup downloaded. Keep a copy somewhere outside Organized Me.");
     } catch (error) {
       setVaultMessage(`Backup failed: ${error.message || error}`);
     }
@@ -3073,7 +3073,7 @@ function DailyGrind() {
       const items = await window.dataVault.list();
       setVaultItems(items);
       setVaultSelectedId((current) => current && items.some((item) => item.id === current) ? current : (items[0]?.id || ""));
-      setVaultMessage(items.length ? `${items.length} recovery copies found.` : "No recovery copies yet. Make an edit and DailyGrind will create them automatically.");
+      setVaultMessage(items.length ? `${items.length} recovery copies found.` : "No recovery copies yet. Make an edit and Organized Me will create them automatically.");
     } catch (error) {
       setVaultMessage(`Cloud history could not be loaded: ${error.message || error}`);
     } finally {
@@ -3165,14 +3165,14 @@ function DailyGrind() {
   // Update browser tab title with Pomodoro timer
   useEffect(() => {
     if (pomoAlarmRinging) {
-      document.title = "🔔 TIME'S UP | Daily Grind";
+      document.title = "🔔 TIME'S UP | Organized Me";
     } else if (pomoRunning) {
       const m = Math.floor(pomoSeconds / 60);
       const s = pomoSeconds % 60;
       const label = pomoIsBreak ? "Break" : (pomoTask || "Focus");
-      document.title = `${m}:${s.toString().padStart(2, "0")} - ${label} | Daily Grind`;
+      document.title = `${m}:${s.toString().padStart(2, "0")} - ${label} | Organized Me`;
     } else {
-      document.title = "Daily Grind";
+      document.title = "Organized Me";
     }
   }, [pomoRunning, pomoSeconds, pomoIsBreak, pomoTask, pomoAlarmRinging]);
 
@@ -3220,8 +3220,8 @@ function DailyGrind() {
     return (
       <div style={{ ...S.shell, background: "#12122a", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
         <div style={{ maxWidth: 360, width: "100%", textAlign: "center" }}>
-          <div style={{ width: 72, height: 72, borderRadius: 18, background: "#1a1a2e", border: "1px solid #2d2d3a", margin: "0 auto 20px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38, fontWeight: 900, color: "#7c3aed", fontFamily: "inherit" }}>G</div>
-          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 6, color: "#f0f0f4", marginBottom: 8 }}>DAILY GRIND</h1>
+          <img src="icon.svg?v=organized-me" alt="Organized Me logo" width="80" height="80" style={{ display: "block", margin: "0 auto 20px", borderRadius: 18 }} />
+          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 4, color: "#ef233c", marginBottom: 8 }}>ORGANIZED ME</h1>
           <div style={{ fontSize: 12, color: "#8b8b9e", letterSpacing: 1, marginBottom: 28 }}>Score your day. Build streaks. Level up.</div>
           <div style={{ textAlign: "left", margin: "0 auto 28px", display: "inline-block" }}>
             <div style={{ fontSize: 12, color: "#c9c9d4", marginBottom: 10 }}>{"⚡"} Habits, tasks, notes &amp; calendar in one place</div>
@@ -3392,7 +3392,7 @@ function DailyGrind() {
 
         {page !== "calendar" && <div style={{ marginBottom: page === "notes" ? 12 : 20, padding: page === "notes" ? "0 16px" : 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <h1 style={S.title}>DAILY GRIND</h1>
+            <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 3, color: "#ef233c" }}><img src="icon.svg?v=organized-me" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
             <SaveIndicator info={saveInfo} onRetry={retrySaves} />
           </div>
@@ -3556,9 +3556,9 @@ function DailyGrind() {
           <div data-notes-section className="notes-workspace">
             <aside className="notes-sections" aria-label="Notebook sections">
               <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
-                <div style={{ width: 34, height: 38, borderRadius: "5px 9px 9px 5px", background: "linear-gradient(145deg,#7c3aed,#4c1d95)", boxShadow: "inset 4px 0 #c4b5fd55,0 5px 16px #7c3aed44", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 15, fontWeight: 900 }}>N</div>
+                <img src="icon.svg?v=organized-me" alt="" width="38" height="38" style={{ flexShrink: 0, borderRadius: 8 }} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, color: "#f0f0f4", lineHeight: 1.4 }}>GRIND NOTEBOOK</div>
+                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, color: "#f0f0f4", lineHeight: 1.4 }}>MY NOTEBOOK</div>
                   <div style={{ fontSize: 9, color: "#666677", marginTop: 2 }}>{notes.length} page{notes.length === 1 ? "" : "s"} · synced</div>
                 </div>
               </div>
@@ -4562,7 +4562,7 @@ function DailyGrind() {
           </div>
           <div style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6 }}>
             {window.dataVault?.cloudEnabled()
-              ? "DailyGrind keeps paired main-data and calendar recovery copies: latest, hourly, daily, and weekly. The app never automatically deletes them."
+              ? "Organized Me keeps paired main-data and calendar recovery copies: latest, hourly, daily, and weekly. The app never automatically deletes them."
               : "Your device keeps the current copy. Sign in for long-term cloud history across devices."}
           </div>
           {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 9, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
