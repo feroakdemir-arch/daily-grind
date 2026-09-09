@@ -1252,6 +1252,22 @@ function getStreak(id, log, today) {
 function getOverall(id, log) { const ds = Object.keys(log); if (!ds.length) return 0; return Math.round((ds.filter((d) => log[d]?.[id] === "done").length / ds.length) * 100); }
 const statusCycle = [undefined, "done", "skip", "neutral"];
 
+function taskDeadlinesForDate(taskLists, dateStr) {
+  const deadlines = [];
+  for (const list of taskLists || []) {
+    for (const task of list.items || []) {
+      if (task.done || typeof task.deadline !== "string") continue;
+      const match = /^(\d{4}-\d{2}-\d{2})(?:T([01]\d|2[0-3]):([0-5]\d))?$/.exec(task.deadline);
+      if (!match || match[1] !== dateStr) continue;
+      const [year, month, day] = match[1].split("-").map(Number);
+      const date = new Date(year, month - 1, day);
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) continue;
+      deadlines.push({ listId: list.id, task, time: match[2] ? `${match[2]}:${match[3]}` : "" });
+    }
+  }
+  return deadlines.sort((a, b) => a.time.localeCompare(b.time) || a.task.name.localeCompare(b.task.name));
+}
+
 function deadlineChip(deadline) {
   if (!deadline) return null;
   const hasTime = deadline.includes("T");
@@ -3726,6 +3742,7 @@ function DailyGrind() {
           const HOUR_H = 60; // pixels per hour
           const todayStr = getToday(resetHour);
           const dayNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+          const weekDeadlines = calDates.map(d => taskDeadlinesForDate(data.taskLists, localDateStr(d)));
 
           function timeToMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
           function fmtHour(h) { const hr = ((h % 24) + 24) % 24; if (hr === 0) return "12 AM"; if (hr < 12) return hr + " AM"; if (hr === 12) return "12 PM"; return (hr - 12) + " PM"; }
@@ -3785,6 +3802,26 @@ function DailyGrind() {
                   );
                 })}
               </div>
+
+              {weekDeadlines.some(items => items.length > 0) && (
+                <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 8, borderBottom: "1px solid #ef444433", paddingBottom: 6 }}>
+                  <div style={{ fontSize: 8, color: "#fca5a5", fontWeight: 800, paddingTop: 8 }}>DUE</div>
+                  {weekDeadlines.map((deadlines, di) => (
+                    <div key={localDateStr(calDates[di])} data-deadline-date={localDateStr(calDates[di])} style={{ minWidth: 0, maxHeight: 128, overflowY: "auto", padding: "0 2px", display: "flex", flexDirection: "column", gap: 4 }}>
+                      {deadlines.map(({ listId, task, time }) => (
+                        <button key={`${listId}:${task.id}`} type="button" data-task-deadline={task.id}
+                          aria-label={`Task deadline: ${task.name}, ${localDateStr(calDates[di])}${time ? ` at ${time}` : ""}`}
+                          title={`${task.name} — ${time ? `Due at ${time}` : "Due this day"}. Click to edit task.`}
+                          onClick={() => openEditTask(listId, task)}
+                          style={{ display: "block", flexShrink: 0, width: "100%", minWidth: 0, minHeight: 40, background: "#dc2626", color: "#fff", border: "1px solid #f87171", borderRadius: 4, padding: "5px 4px", textAlign: "left", fontFamily: "inherit", cursor: "pointer", lineHeight: 1.35 }}>
+                          <span style={{ display: "block", fontSize: 9, fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.name}</span>
+                          <span style={{ display: "block", fontSize: 8, opacity: 0.9 }}>{time || "All day"}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Time grid */}
               <div style={{ overflowX: "auto", overflowY: "auto", height: "calc(100vh - 130px)", background: "#1a1a2e", border: "none", borderRadius: 0 }}>
