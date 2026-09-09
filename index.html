@@ -858,6 +858,7 @@ const mkDefault = () => ({
   notes: [],
   noteSections: [],
   noteDrawings: {},
+  noteTextBoxes: {},
   dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
@@ -951,17 +952,21 @@ function parseMainData(raw) {
   const calEndHour = Math.min(28, Math.max(21, Math.floor(finiteNumber(parsed.calEndHour, 23))));
   if (parsed.noteDrawings !== undefined && !objectOnly(parsed.noteDrawings)) throw new Error("Saved note drawings are invalid");
   const noteDrawings = Object.fromEntries(Object.entries(parsed.noteDrawings || {}).map(([id, strokes]) => [id, normalizeNoteDrawing(strokes)]));
+  if (parsed.noteTextBoxes !== undefined && !objectOnly(parsed.noteTextBoxes)) throw new Error("Saved text boxes are invalid");
+  const noteTextBoxes = Object.fromEntries(Object.entries(parsed.noteTextBoxes || {}).map(([id, boxes]) => [id, normalizeNoteTextBoxes(boxes)]));
   return {
     ...parsed,
     habitSections: habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
     noteDrawings,
+    noteTextBoxes,
     notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note) => note && typeof note === "object").map((note, index) => ({
       id: typeof note.id === "string" && note.id ? note.id : `note_legacy_${index}`,
       title: typeof note.title === "string" ? note.title : "",
       body: typeof note.body === "string" ? note.body : "",
       drawing: normalizeNoteDrawing(Object.prototype.hasOwnProperty.call(noteDrawings, note.id) ? noteDrawings[note.id] : note.drawing),
+      textBoxes: normalizeNoteTextBoxes(Object.prototype.hasOwnProperty.call(noteTextBoxes, note.id) ? noteTextBoxes[note.id] : note.textBoxes),
       tag: typeof note.tag === "string" ? note.tag : "",
       pinned: note.pinned === true,
       createdAt: Number.isFinite(note.createdAt) ? note.createdAt : 0,
@@ -1180,8 +1185,25 @@ function notePaperHeight(textHeight, strokes) {
   return Math.ceil(strokes.reduce((height, stroke) => stroke.points.reduce((last, point) => Math.max(last, point[1] + 48), height), Math.max(360, textHeight + 48)));
 }
 
+function normalizeNoteTextBoxes(boxes) {
+  if (boxes === undefined) return [];
+  if (!Array.isArray(boxes) || boxes.length > 300) throw new Error("This page has too many text boxes.");
+  const ids = new Set();
+  return boxes.map(box => {
+    if (!box || typeof box.id !== "string" || !box.id || ids.has(box.id) || typeof box.text !== "string" || box.text.length > 20000 ||
+        !Number.isFinite(box.x) || box.x < 0 || box.x > 10000 || !Number.isFinite(box.y) || box.y < 0 || box.y > 200000 ||
+        !Number.isFinite(box.width) || box.width < 40 || box.width > 10000 || !Number.isFinite(box.pageWidth) || box.pageWidth <= 0 || box.pageWidth > 10000) throw new Error("Saved text box data is invalid");
+    ids.add(box.id);
+    return { id: box.id, text: box.text, x: box.x, y: box.y, width: box.width, pageWidth: box.pageWidth };
+  });
+}
+
+function noteTextContent(note) {
+  return [note.body || "", ...(note.textBoxes || []).map(box => box.text)].filter(Boolean).join("\n");
+}
+
 function noteCanSave(note, current) {
-  return !!note && (!!note.title.trim() || !!note.body.trim() || !!note.drawing?.length || (current?.notes || []).some(saved => saved.id === note.id));
+  return !!note && (!!note.title.trim() || !!noteTextContent(note).trim() || !!note.drawing?.length || (current?.notes || []).some(saved => saved.id === note.id));
 }
 
 function drawingStrokeHit(stroke, point, radius = 12) {
@@ -1206,7 +1228,10 @@ function addNoteSection(current, section, draft) {
     notes = notes.some(entry => entry.id === note.id)
       ? notes.map(entry => entry.id === note.id ? note : entry) : [note, ...notes];
   }
-  return { ...current, notes, noteDrawings: noteCanSave(draft, current) ? { ...(current.noteDrawings || {}), [draft.id]: normalizeNoteDrawing(draft.drawing) } : current.noteDrawings || {}, noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
+  return { ...current, notes,
+    noteDrawings: noteCanSave(draft, current) ? { ...(current.noteDrawings || {}), [draft.id]: normalizeNoteDrawing(draft.drawing) } : current.noteDrawings || {},
+    noteTextBoxes: noteCanSave(draft, current) ? { ...(current.noteTextBoxes || {}), [draft.id]: normalizeNoteTextBoxes(draft.textBoxes) } : current.noteTextBoxes || {},
+    noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
 }
 
 function removeNoteSection(current, section, deletePages, now = Date.now()) {
@@ -1220,6 +1245,7 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
     ...current,
     noteSections: normalizeNoteSections(current.noteSections).filter(name => name !== section),
     noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => !deletedIds.has(id))),
+    noteTextBoxes: Object.fromEntries(Object.entries(current.noteTextBoxes || {}).filter(([id]) => !deletedIds.has(id))),
     notes: deletePages ? (current.notes || []).filter(note => !belongs(note))
       : (current.notes || []).map(note => belongs(note) ? { ...note, tag: "", updatedAt: now } : note),
     taskLists: (current.taskLists || []).map(list => ({ ...list,
@@ -1237,22 +1263,26 @@ function mergeLiveNote(draft, incoming, savedSignature) {
   ["title", "body", "tag", "pinned"].forEach((key, index) => {
     merged[key] = same(draft[key], base[index]) ? incoming[key] : draft[key];
   });
-  const before = new Map((base[4] || []).map(stroke => [stroke.id, stroke]));
-  const local = new Map((draft.drawing || []).map(stroke => [stroke.id, stroke]));
-  const remote = new Map((incoming.drawing || []).map(stroke => [stroke.id, stroke]));
-  merged.drawing = [...new Set([...remote.keys(), ...local.keys()])].flatMap(id => {
+  const mergeItems = (key, index) => {
+  const before = new Map((base[index] || []).map(stroke => [stroke.id, stroke]));
+  const local = new Map((draft[key] || []).map(stroke => [stroke.id, stroke]));
+  const remote = new Map((incoming[key] || []).map(stroke => [stroke.id, stroke]));
+  return [...new Set([...remote.keys(), ...local.keys()])].flatMap(id => {
     const old = before.get(id), ours = local.get(id), theirs = remote.get(id);
     if (!old) return [ours || theirs];
     if (!ours) return []; // Preserve a local erasure.
     if (!theirs) return same(ours, old) ? [] : [ours];
     return [same(ours, old) ? theirs : ours];
   });
+  };
+  merged.drawing = mergeItems("drawing", 4);
+  merged.textBoxes = mergeItems("textBoxes", 5);
   return merged;
 }
 
 function noteSignature(note) {
   if (!note) return "";
-  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || []]);
+  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || [], note.textBoxes || []]);
 }
 
 function normalizedNoteDraft(draft, now = Date.now()) {
@@ -1261,6 +1291,7 @@ function normalizedNoteDraft(draft, now = Date.now()) {
     title: draft.title.trim() || "Untitled note",
     body: draft.body,
     drawing: normalizeNoteDrawing(draft.drawing),
+    textBoxes: normalizeNoteTextBoxes(draft.textBoxes),
     tag: draft.tag.trim(),
     pinned: draft.pinned === true,
     createdAt: draft.createdAt || now,
@@ -1508,14 +1539,20 @@ function TaskWorkTimer({ task, onToggle }) {
   );
 }
 
-function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange, onFinish }) {
+function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
   const [mode, setMode] = useState("text");
   const [color, setColor] = useState("#f8fafc");
   const [width, setWidth] = useState(3);
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState({ undo: [], redo: [] });
-  const [pageWidth, setPageWidth] = useState(() => drawing.find(stroke => stroke.space === "page")?.pageWidth || null);
+  const [pageWidth, setPageWidth] = useState(() => drawing.find(stroke => stroke.space === "page")?.pageWidth || textBoxes[0]?.pageWidth || null);
   const [paperHeight, setPaperHeight] = useState(null);
+  const [bodySize, setBodySize] = useState({ width: "100%", height: 28 });
+  const [pendingBox, setPendingBox] = useState(null);
+  const [activeTextId, setActiveTextId] = useState(null);
+  const [removingText, setRemovingText] = useState(false);
+  const textBoxesRef = useRef(textBoxes);
+  textBoxesRef.current = textBoxes;
   const surfaceRef = useRef(null);
   const svgRef = useRef(null);
   const textRef = useRef(null);
@@ -1532,6 +1569,27 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       drawingRef.current = next; setMessage(""); return true;
     } catch (error) { setMessage(error.message); return false; }
   };
+  const publishText = next => {
+    try {
+      normalizeNoteTextBoxes(next);
+      if (onTextBoxesChange(next) === false) throw new Error("Your notes are at the save limit. Shorten some text before adding more.");
+      textBoxesRef.current = next; setMessage(""); return true;
+    } catch (error) { setMessage(error.message); return false; }
+  };
+  const startTextBox = event => {
+    if (mode !== "text" || event.button !== 0 || event.target.closest("textarea,button")) return;
+    event.preventDefault();
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = Math.round(Math.max(0, event.clientX - rect.left)), y = Math.round(Math.max(0, event.clientY - rect.top));
+    const fixedWidth = pageWidth || rect.width;
+    const box = { id: makeId("textbox"), text: "", x, y, width: Math.max(100, Math.min(280, fixedWidth - x)), pageWidth: fixedWidth };
+    setPageWidth(fixedWidth); setPendingBox(box); setActiveTextId(box.id);
+  };
+  useLayoutEffect(() => {
+    if (!activeTextId) return;
+    const input = [...surfaceRef.current.querySelectorAll("[data-note-textbox]")].find(node => node.dataset.noteTextbox === activeTextId);
+    input?.focus({ preventScroll: true });
+  }, [activeTextId]);
   useLayoutEffect(() => {
     const rect = svgRef.current.getBoundingClientRect();
     if (!legacySize.current) {
@@ -1544,7 +1602,7 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
     }
   }, []);
   useLayoutEffect(() => {
-    const incomingWidth = drawing.find(stroke => stroke.space === "page")?.pageWidth;
+    const incomingWidth = drawing.find(stroke => stroke.space === "page")?.pageWidth || textBoxes[0]?.pageWidth;
     if (pageWidth === null && incomingWidth) setPageWidth(incomingWidth);
     if (drawing !== lastPublishedDrawing.current) {
       // Old undo snapshots must not remove strokes received from another device.
@@ -1552,18 +1610,32 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
       if (gesture.current) gesture.current.before = drawing.filter(stroke => stroke.id !== gesture.current.id);
       lastPublishedDrawing.current = drawing;
     }
-  }, [drawing, pageWidth]);
+  }, [drawing, textBoxes, pageWidth]);
   useLayoutEffect(() => {
     const text = textRef.current;
     // Measure the full text instead of allowing an independent textarea scroll.
     text.style.height = "0px";
     const textHeight = text.scrollHeight;
-    text.style.height = "100%";
+    text.style.height = `${Math.max(28, textHeight)}px`;
     text.scrollTop = 0;
+    const availableWidth = svgRef.current.getBoundingClientRect().width;
+    const measure = document.createElement("canvas").getContext("2d");
+    measure.font = getComputedStyle(text).font;
+    const contentWidth = body.includes("\t") ? availableWidth : body.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line).width + 8), 80);
+    const nextBodySize = { width: Math.min(availableWidth, contentWidth), height: Math.max(28, textHeight) };
+    setBodySize(previous => previous.width === nextBodySize.width && previous.height === nextBodySize.height ? previous : nextBodySize);
     const size = legacySize.current;
     const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
-    setPaperHeight(notePaperHeight(textHeight, strokes));
-  }, [body, drawing, pageWidth]);
+    let height = notePaperHeight(textHeight, strokes);
+    for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
+      input.style.height = "0px";
+      const boxHeight = Math.max(28, input.scrollHeight + 2);
+      input.style.height = `${boxHeight}px`;
+      input.scrollTop = 0;
+      height = Math.max(height, Number(input.dataset.boxY) + boxHeight + 48);
+    }
+    setPaperHeight(height);
+  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width]);
   const pointAt = event => {
     const rect = event.currentTarget.getBoundingClientRect();
     return [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
@@ -1609,13 +1681,40 @@ function NoteDrawingSurface({ drawing = [], body, onBodyChange, onDrawingChange,
         <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: "#b5b5c9" }}>Ink <input aria-label="Pen color" type="color" value={color} onChange={event => setColor(event.target.value)} style={{ width: 30, height: 28, border: 0, padding: 0, background: "transparent" }} /></label>
         <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
       </>}
-      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : "Type normally; drawings stay visible"}</span>
+      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : "Click any blank spot to type"}</span>
     </div>
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
-    <div ref={surfaceRef} data-note-paper style={{ position: "relative", flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
-      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" ? 0 : -1} placeholder={mode === "text" ? "Start writing..." : ""} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+    <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
+      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && body.length ? 0 : -1} placeholder="" style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && body.length ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].map(box => <div key={box.id} style={{ position: "absolute", left: box.x, top: box.y, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none" }}>
+        <textarea data-note-textbox={box.id} data-box-y={box.y} aria-label="Positioned note text" placeholder="Type here…" value={box.text} readOnly={mode !== "text"} maxLength={20000}
+          onFocus={() => setActiveTextId(box.id)}
+          onChange={event => {
+            const updated = { ...box, text: event.target.value };
+            const exists = textBoxesRef.current.some(item => item.id === box.id);
+            if (publishText(exists ? textBoxesRef.current.map(item => item.id === box.id ? updated : item) : [...textBoxesRef.current, updated])) setPendingBox(current => current?.id === box.id ? null : current);
+          }}
+          onBlur={() => {
+            if (!box.text.trim()) {
+              setPendingBox(current => current?.id === box.id ? null : current);
+              if (textBoxesRef.current.some(item => item.id === box.id)) publishText(textBoxesRef.current.filter(item => item.id !== box.id));
+            }
+          }}
+          onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.blur(); setActiveTextId(null); } }}
+          style={{ display: "block", width: "100%", height: 28, overflow: "hidden", resize: "none", background: "transparent", border: activeTextId === box.id && mode === "text" ? "1px dashed #a78bfa" : "1px solid transparent", borderRadius: 3, padding: 0, color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+        {activeTextId === box.id && mode === "text" && <button type="button" disabled={removingText} aria-label="Remove text box" title="Remove text box" onMouseDown={event => event.preventDefault()} onClick={async () => {
+          if (removingText) return;
+          if (box.text.trim() && !confirm("Remove this text box?")) return;
+          setRemovingText(true);
+          try {
+            if (box.text.trim() && !(await beforeRemoveTextBox())) return;
+            if (!textBoxesRef.current.some(item => item.id === box.id) || publishText(textBoxesRef.current.filter(item => item.id !== box.id))) { setPendingBox(null); setActiveTextId(null); }
+          } catch (error) { setMessage(error.message || "Could not save the recovery copy."); }
+          finally { setRemovingText(false); }
+        }} style={{ position: "absolute", right: -10, top: -16, width: 20, height: 20, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#ff8793", cursor: "pointer" }}>×</button>}
+      </div>)}
       <svg ref={svgRef} aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 2, pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
         onPointerDown={event => {
           if (event.button !== 0 || gesture.current) return;
           const size = legacySize.current;
@@ -2570,6 +2669,7 @@ function DailyGrind() {
         ...current,
         notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
         noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
+        noteTextBoxes: { ...(current.noteTextBoxes || {}), [note.id]: note.textBoxes },
       };
     });
   }, [save]);
@@ -2597,7 +2697,7 @@ function DailyGrind() {
       }
     }, 700);
     return () => clearTimeout(noteSaveTimerRef.current);
-  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, persistNoteDraft]);
+  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, noteDraft?.textBoxes, persistNoteDraft]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -2606,7 +2706,7 @@ function DailyGrind() {
       const baseSignature = noteSavedSignatureRef.current;
       let base;
       try { base = JSON.parse(baseSignature); } catch { return; }
-      if (JSON.stringify(draft.drawing || []) === JSON.stringify(base[4] || [])) return;
+      if (JSON.stringify(draft.drawing || []) === JSON.stringify(base[4] || []) && JSON.stringify(draft.textBoxes || []) === JSON.stringify(base[5] || [])) return;
       const snapshot = { ...draft }, signature = noteSignature(snapshot);
       noteLiveSavePendingRef.current = true;
       try {
@@ -2640,6 +2740,7 @@ function DailyGrind() {
           ...current,
           notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
           noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
+          noteTextBoxes: { ...(current.noteTextBoxes || {}), [note.id]: note.textBoxes },
         }));
         const serialized = JSON.stringify(next);
         if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) return;
@@ -3260,6 +3361,7 @@ function DailyGrind() {
         ...current,
         notes: (current.notes || []).filter((entry) => entry.id !== note.id),
         noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => id !== note.id)),
+        noteTextBoxes: Object.fromEntries(Object.entries(current.noteTextBoxes || {}).filter(([id]) => id !== note.id)),
         taskLists: current.taskLists.map((list) => ({
           ...list,
           items: list.items.map(unlinkNote),
@@ -3696,7 +3798,7 @@ function DailyGrind() {
     if (noteTagFilter === "__untagged__" && note.tag) return false;
     if (noteTagFilter !== "all" && noteTagFilter !== "__untagged__" && note.tag !== noteTagFilter) return false;
     if (!noteNeedle) return true;
-    return `${note.title || ""}\n${note.body || ""}\n${note.tag || ""}`.toLowerCase().includes(noteNeedle);
+    return `${note.title || ""}\n${noteTextContent(note)}\n${note.tag || ""}`.toLowerCase().includes(noteNeedle);
   }).sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.updatedAt || 0) - (a.updatedAt || 0));
   const linkedTaskContext = noteDraft
     ? data.taskLists.map((list) => ({ list, task: list.items.find((task) => task.noteId === noteDraft.id) })).find((entry) => entry.task)
@@ -3948,7 +4050,7 @@ function DailyGrind() {
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
                     <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
-                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{note.body || (note.drawing?.length ? "Drawing" : "Empty page")}</div>
+                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.drawing?.length ? "Drawing" : "Empty page")}</div>
                   </article>
                   <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7, color: "#ff8793" }}><TrashIcon /></button>
                   </div>
@@ -3995,8 +4097,17 @@ function DailyGrind() {
                         <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 9, fontFamily: "inherit", outline: "none" }} />
                       </label>
                     </div>
-                    <NoteDrawingSurface key={noteDraft.id} drawing={noteDraft.drawing || []} body={noteDraft.body}
-                      onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing}
+                    <NoteDrawingSurface key={noteDraft.id} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
+                      onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing} beforeRemoveTextBox={async () => { await flushCurrentNote(); return protectBeforeDestructive("before-text-box-delete"); }}
+                      onTextBoxesChange={textBoxes => {
+                        const current = noteDraftRef.current;
+                        if (!current || current.id !== noteDraft.id) return false;
+                        const next = { ...current, textBoxes }, note = normalizedNoteDraft(next), source = dataRef.current;
+                        const existing = source.notes.some(entry => entry.id === note.id);
+                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: note.drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: textBoxes } };
+                        if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        noteDraftRef.current = next; setNoteDraft(next); return true;
+                      }}
                       onDrawingChange={drawing => {
                         const current = noteDraftRef.current;
                         if (!current || current.id !== noteDraft.id) return false;
@@ -4004,7 +4115,7 @@ function DailyGrind() {
                         const note = normalizedNoteDraft(next);
                         const source = dataRef.current;
                         const existing = source.notes.some(entry => entry.id === note.id);
-                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing } };
+                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: note.textBoxes } };
                         if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
                         noteDraftRef.current = next;
                         setNoteDraft(next);
@@ -4012,7 +4123,7 @@ function DailyGrind() {
                       }} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
-                    <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteDraft.body.trim() ? noteDraft.body.trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
+                    <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
                     <button onClick={() => toggleNotePin(noteDraft.id)} style={{ ...S.noteToolBtn, color: noteDraft.pinned ? "#ffd43b" : "#8b8b9e", borderColor: noteDraft.pinned ? "#ffd43b55" : "#353548" }}>{noteDraft.pinned ? "◆ PINNED" : "◇ PIN"}</button>
                     {notes.some((note) => note.id === noteDraft.id) && <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, color: "#ff6b7a", borderColor: "#ff475744" }}>DELETE</button>}
                     <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "8px 14px", fontSize: 9 }}>CLOSE</button>

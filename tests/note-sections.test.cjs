@@ -154,3 +154,35 @@ test("new strokes merge by ID, erasures apply, and a growing local stroke is not
   const growing = { ...base, drawing: [{ ...base.drawing[0], points: [...base.drawing[0].points, [500, 400]] }] };
   assert.equal(context.mergeLiveNote(growing, base, signature).drawing[0].points.length, 4);
 });
+const textBox = () => ({ id: "box-1", text: "XOR gate", x: 420, y: 800, width: 200, pageWidth: 900 });
+test("positioned text saves on a text-only page and keeps its exact coordinates after reload", () => {
+  const draft = { id: "page", title: "", body: "", tag: "", textBoxes: [textBox()] };
+  assert.equal(context.noteCanSave(draft, base()), true);
+  const saved = reload(context.addNoteSection(base(), "School", draft));
+  assert.equal(saved.notes[0].textBoxes[0].x, 420); assert.equal(saved.notes[0].textBoxes[0].y, 800);
+  assert.equal(saved.noteTextBoxes.page[0].text, "XOR gate");
+  assert.equal(context.noteTextContent(saved.notes[0]), "XOR gate");
+});
+test("text boxes remain recoverable when older clients omit them from note objects", () => {
+  const saved = reload({ ...base(), notes: [{ id: "page", body: "Existing text" }], noteTextBoxes: { page: [textBox()] } });
+  assert.equal(saved.notes[0].textBoxes[0].text, "XOR gate");
+  assert.equal(context.noteTextContent(saved.notes[0]), "Existing text\nXOR gate");
+});
+test("text and drawing content are both retained through saves and section removal", () => {
+  const draft = { id: "page", title: "Page", body: "Original paragraph", tag: "School", drawing: sampleDrawing(), textBoxes: [textBox()] };
+  const saved = reload(context.addNoteSection(base(), "School", draft));
+  const kept = context.removeNoteSection(saved, "School", false);
+  assert.equal(kept.noteTextBoxes.page[0].text, "XOR gate"); assert.equal(kept.noteDrawings.page.length, 1);
+  const removed = context.removeNoteSection(saved, "School", true);
+  assert.equal(removed.noteTextBoxes.page, undefined);
+});
+test("remote text boxes merge with unsaved text and drawing changes", () => {
+  const initial = { id: "page", title: "Page", body: "", tag: "", pinned: false, drawing: [], textBoxes: [] };
+  const merged = context.mergeLiveNote({ ...initial, body: "Local writing", drawing: sampleDrawing() }, { ...initial, textBoxes: [textBox()] }, context.noteSignature(initial));
+  assert.equal(merged.body, "Local writing"); assert.equal(merged.drawing.length, 1); assert.equal(merged.textBoxes[0].text, "XOR gate");
+});
+test("malformed text boxes fail closed and an empty click does not count as content", () => {
+  assert.throws(() => context.normalizeNoteTextBoxes([{ ...textBox(), x: NaN }]));
+  assert.throws(() => context.normalizeNoteTextBoxes([{ ...textBox(), width: -1 }]));
+  assert.equal(context.noteCanSave({ id: "new", title: "", body: "", textBoxes: [{ ...textBox(), text: "" }] }, base()), false);
+});
