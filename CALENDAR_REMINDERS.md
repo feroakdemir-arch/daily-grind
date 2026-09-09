@@ -2,7 +2,7 @@
 
 Sends a Web Push notification to each opted-in device 10 minutes before a calendar event. Enable separately from Calendar → Settings on iPhone and computer. On iPhone (iOS 16.4+), add the site to the Home Screen and open that icon first. Sign into the same Google account on both devices. The first device establishes the account's reminder time zone, displayed in Calendar Settings.
 
-Implementation is prepared; Firebase deployment and real-device delivery still need verification. The GitHub Pages frontend and existing calendar data format remain in place.
+Released September 8, 2026 (New York): all six Firebase functions are deployed, Blaze billing is enabled on the owner's existing billing account, and GitHub Pages published merge `eba6286`. The scheduler is enabled and a live invocation returned HTTP 200. The authenticated setup endpoint works; unauthenticated requests return HTTP 401. Active Firestore rules deny client access to the new top-level notification collections. Physical-device opt-in and delivery checks are still required.
 
 ## How it works
 
@@ -28,7 +28,7 @@ npx.cmd firebase-tools functions:secrets:set CALENDAR_PUSH_PRIVATE_KEY --data-fi
 npx.cmd firebase-tools deploy --only functions:calendar-reminders --project daily-grind-370cd
 ```
 
-`setup-keys.js` refuses to overwrite existing key files. It writes the public key/contact to ignored `functions/.env.daily-grind-370cd`; the private key goes to an ignored file and then Secret Manager. Never publish either generated file or regenerate keys for an existing installation. The worker/browser use the public key obtained from `calendarPushConfig`; private keys never reach the browser.
+`setup-keys.js` refuses to overwrite existing key files. It writes the public key/contact to ignored `functions/.env.daily-grind-370cd`; the private key goes to an ignored file and then Secret Manager. Never publish either generated file or regenerate keys for an existing installation. `firebase.json` explicitly excludes `.env*`, `.secret*`, and the setup script from uploaded source. The worker/browser use the public key obtained from `calendarPushConfig`; private keys never reach the browser.
 
 Deploy the backend first, verify the named functions and once-per-minute scheduler, then merge the frontend branch into `main` to publish through GitHub Pages. Review the resulting function count and scope; this uses the isolated `calendar-reminders` functions codebase. The source-controlled Firebase config intentionally excludes Firestore rules and Hosting.
 
@@ -42,9 +42,9 @@ npm.cmd test --prefix functions
 
 21 automated tests cover scheduling, midnight, time zones/DST, repeat exceptions, rescheduling/deletion, malformed data, endpoint validation, authenticated device ownership, retry/expired endpoints, concurrent delivery, permission denial, reload status, offline disable, and notification click handling. Firestore transactions and push providers are simulated in these tests. The isolated browser preview uses synthetic calendar data and mocked notification-service responses; it is not evidence of production push delivery.
 
-Release checks still required with Firebase access and physical devices:
+Production verification:
 
-1. Confirm active Firestore rules deny client access to all three new top-level collections, and confirm backend deployment succeeds.
+1. Confirmed: active Firestore rules deny client access to all three new top-level collections; all six functions deployed; unauthenticated setup requests return HTTP 401; scheduler invocation returned HTTP 200; Pages deployment `34300317865` succeeded. Function build images are retained for seven days through an Artifact Registry cleanup policy.
 2. On iPhone Home Screen and desktop, enable reminders and receive the test notification on each.
 3. Create an event at least 12 minutes ahead; close the app/tab; confirm both devices receive the reminder approximately 10 minutes before it starts.
 4. Tap the notification; confirm the correct week opens. Check event edits, canceled recurring occurrences, and disabling one device.
