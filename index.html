@@ -1628,6 +1628,14 @@ function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, 
     const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
     let height = notePaperHeight(textHeight, strokes);
     for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
+      const box = [...textBoxes, ...(pendingBox ? [pendingBox] : [])].find(item => item.id === input.dataset.noteTextbox);
+      const frame = input.closest("[data-note-textbox-frame]");
+      if (box && frame) {
+        measure.font = getComputedStyle(input).font;
+        const longestLine = input.value.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line.replace(/\t/g, "        ")).width), 0);
+        const maxWidth = Math.max(box.width, availableWidth - box.x);
+        frame.style.width = `${Math.ceil(Math.min(maxWidth, Math.max(box.width, longestLine + 12)))}px`;
+      }
       input.style.height = "0px";
       const boxHeight = Math.max(28, input.scrollHeight + 2);
       input.style.height = `${boxHeight}px`;
@@ -1686,7 +1694,7 @@ function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, 
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
     <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
       <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && body.length ? 0 : -1} placeholder="" style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && body.length ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
-      {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].map(box => <div key={box.id} style={{ position: "absolute", left: box.x, top: box.y, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none" }}>
+      {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].map(box => <div key={box.id} data-note-textbox-frame={box.id} style={{ position: "absolute", left: box.x, top: box.y, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none" }}>
         <textarea data-note-textbox={box.id} data-box-y={box.y} aria-label="Positioned note text" placeholder="Type here…" value={box.text} readOnly={mode !== "text"} maxLength={20000}
           onFocus={() => setActiveTextId(box.id)}
           onChange={event => {
