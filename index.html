@@ -1494,6 +1494,67 @@ function fmtTaskDuration(seconds) {
     : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function finishedTasksForDay(taskLists, day) {
+  const result = new Map();
+  for (const list of taskLists || []) {
+    for (const task of list.items || []) {
+      if (!task.done || task.doneDate !== day) continue;
+      result.set(`${task.id}:${day}`, { id: `${task.id}:${day}`, name: task.name, listTitle: list.title,
+        points: Math.max(0, Number(task.points) || 0), trackedSeconds: Math.max(0, Number(task.trackedSeconds) || 0) });
+    }
+  }
+  for (const list of taskLists || []) {
+    for (const entry of list.completedLog || []) {
+      if (entry.date !== day) continue;
+      const taskId = entry.id?.startsWith("c_") && entry.id.endsWith(`_${day}`)
+        ? entry.id.slice(2, -(day.length + 1)) : entry.id;
+      const id = `${taskId}:${day}`;
+      if (!result.has(id)) result.set(id, { id, name: entry.name, listTitle: list.title,
+        points: Math.max(0, Number(entry.points) || 0), trackedSeconds: Math.max(0, Number(entry.trackedSeconds) || 0) });
+    }
+  }
+  return [...result.values()];
+}
+
+function nextFinishedTasksReset(resetHour, now = new Date()) {
+  const next = new Date(now);
+  next.setHours(resetHour || 0, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return next.getTime() - now.getTime() + 50;
+}
+
+function TodaysFinishedTasks({ taskLists, resetHour }) {
+  const [day, setDay] = useState(() => getToday(resetHour));
+  useEffect(() => {
+    let timer;
+    const refresh = () => {
+      setDay(getToday(resetHour));
+      clearTimeout(timer);
+      timer = setTimeout(refresh, nextFinishedTasksReset(resetHour));
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearTimeout(timer); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [resetHour]);
+  const finished = finishedTasksForDay(taskLists, day);
+  const points = finished.reduce((total, task) => total + task.points, 0);
+  return <section aria-label="Today's finished tasks" data-today-finished style={{ ...S.card, marginTop: 24, borderColor: "#4cd13744" }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+      <h2 style={{ fontSize: 13, color: "#e8f8ed", letterSpacing: 1 }}>✓ Today’s finished tasks</h2>
+      <span style={{ fontSize: 11, fontWeight: 800, color: "#4cd137" }}>{finished.length} finished · +{points} pts</span>
+    </div>
+    <p style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6, marginBottom: 12 }}>Resets at {resetHour ? `${resetHour} AM` : "midnight"}. Past completions stay in your task history.</p>
+    {finished.length ? <div style={{ maxHeight: 360, overflowY: "auto" }}>
+      {finished.map(task => <div key={task.id} data-finished-task={task.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: "1px solid #2d2d3a" }}>
+        <span aria-hidden="true" style={{ color: "#4cd137", fontWeight: 900 }}>✓</span>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 9, color: "#8b8b9e", marginTop: 4 }}>{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
+        <span style={{ fontSize: 10, color: "#a78bfa", fontWeight: 800 }}>+{task.points}</span>
+      </div>)}
+    </div> : <p style={{ fontSize: 12, color: "#8b8b9e", padding: "12px 0" }}>Nothing finished today yet. Completed tasks will appear here.</p>}
+  </section>;
+}
+
 function TaskWorkTimer({ task, onToggle }) {
   const startedAt = Number(task.timerStartedAt);
   const running = Number.isFinite(startedAt) && startedAt > 0;
@@ -3997,6 +4058,7 @@ function DailyGrind() {
             ) : (
               <button onClick={() => setShowNewList(true)} style={{ ...S.addR, marginTop: 12 }}><span style={S.addI}>+</span> New task list</button>
             )}
+            <TodaysFinishedTasks taskLists={data.taskLists} resetHour={resetHour} />
           </div>
         )}
 
