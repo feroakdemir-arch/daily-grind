@@ -1516,6 +1516,40 @@ function finishedTasksForDay(taskLists, day) {
   return [...result.values()];
 }
 
+function watchCalendarClock(onTick) {
+  let timer, stopped = false;
+  const refresh = () => {
+    if (stopped) return;
+    onTick(Date.now());
+    clearTimeout(timer);
+    // Read the actual clock again each time; suspended tabs must not count missed ticks.
+    timer = setTimeout(refresh, 60000 - (Date.now() % 60000) + 20);
+  };
+  window.addEventListener("focus", refresh);
+  window.addEventListener("pageshow", refresh);
+  document.addEventListener("visibilitychange", refresh);
+  refresh();
+  return () => {
+    stopped = true; clearTimeout(timer);
+    window.removeEventListener("focus", refresh);
+    window.removeEventListener("pageshow", refresh);
+    document.removeEventListener("visibilitychange", refresh);
+  };
+}
+
+function calendarNowPosition(now, dates, startHour, endHour) {
+  const displayDate = new Date(now);
+  let minutes = now.getHours() * 60 + now.getMinutes();
+  if (endHour >= 24 && now.getHours() < endHour - 24 + 1) {
+    displayDate.setDate(displayDate.getDate() - 1);
+    minutes += 1440;
+  }
+  const dayIndex = dates.findIndex(date => localDateStr(date) === localDateStr(displayDate));
+  const offset = minutes - startHour * 60;
+  if (dayIndex < 0 || offset < 0 || offset > (endHour - startHour + 1) * 60) return null;
+  return { dayIndex, offset };
+}
+
 function nextFinishedTasksReset(resetHour, now = new Date()) {
   const next = new Date(now);
   next.setHours(resetHour || 0, 0, 0, 0);
@@ -2617,6 +2651,10 @@ function DailyGrind() {
   const customDeadlineRef = useRef(null);
   const stopwatchStartRef = useRef(null);
   const stopwatchBaseRef = useRef(0);
+  const [calendarNow, setCalendarNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (page === "calendar") return watchCalendarClock(setCalendarNow);
+  }, [page]);
   const resetHour = data?.dayResetHour || 0;
   const today = getToday(resetHour);
   const weekDates = getWeekDates(today);
@@ -4662,19 +4700,13 @@ function DailyGrind() {
                   })}
 
                   {/* Current time indicator */}
-                  {calWeekOffset === 0 && (() => {
-                    const now = new Date();
-                    let nowDay = (now.getDay() + 6) % 7;
-                    let nowMin = now.getHours() * 60 + now.getMinutes();
-                    // If current time is in the post-midnight spillover window, show it in the previous day's column
-                    if (calEndHour >= 24 && now.getHours() < calEndHour - 24 + 1) {
-                      nowMin += 24 * 60;
-                      nowDay = (nowDay + 6) % 7;
-                    }
-                    const topPx = ((nowMin - startMinBase) / 60) * HOUR_H;
-                    if (topPx < 0 || topPx > hours.length * HOUR_H) return null;
+                  {(() => {
+                    const position = calendarNowPosition(new Date(calendarNow), calDates, calStartHour, calEndHour);
+                    if (!position) return null;
+                    const nowDay = position.dayIndex;
+                    const topPx = position.offset / 60 * HOUR_H;
                     return (
-                      <div style={{ position: "absolute", left: `calc(40px + ${nowDay} * ((100% - 40px) / 7))`, width: `calc((100% - 40px) / 7)`, top: topPx, height: 2, background: "#e84118", zIndex: 20, pointerEvents: "none" }}>
+                      <div data-calendar-now aria-label="Current time" style={{ position: "absolute", left: `calc(40px + ${nowDay} * ((100% - 40px) / 7))`, width: `calc((100% - 40px) / 7)`, top: topPx, height: 2, background: "#e84118", zIndex: 20, pointerEvents: "none" }}>
                         <div style={{ position: "absolute", left: -4, top: -4, width: 10, height: 10, borderRadius: "50%", background: "#e84118" }} />
                       </div>
                     );
