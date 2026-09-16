@@ -2256,7 +2256,75 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
   );
 }
 
-function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, setHabitDrag, reorderHabit, openEditHabit }) {
+function moveHabitById(items, habitId, targetId, after) {
+  const source = items.findIndex(item => item.id === habitId);
+  if (source < 0 || habitId === targetId || !items.some(item => item.id === targetId)) return items;
+  const next = [...items];
+  const [moved] = next.splice(source, 1);
+  const target = next.findIndex(item => item.id === targetId);
+  next.splice(target + (after ? 1 : 0), 0, moved);
+  return next;
+}
+
+function startHabitPointerDrag(event, options) {
+  const { sessionRef, sectionId, habitId, onPreview, onDrop } = options;
+  if (sessionRef.current || event.isPrimary === false || event.button !== 0) return null;
+  const handle = event.currentTarget;
+  const section = handle.closest("[data-habitsec]");
+  if (!section) return null;
+  const rows = [...section.querySelectorAll("[data-habit-id]")].map(row => {
+    const rect = row.getBoundingClientRect();
+    return { id: row.dataset.habitId, mid: rect.top + rect.height / 2 + window.scrollY };
+  });
+  const sourceIndex = rows.findIndex(row => row.id === habitId);
+  if (sourceIndex < 0) return null;
+  event.preventDefault(); event.stopPropagation();
+  const pointerId = event.pointerId, startY = event.clientY, startScrollY = window.scrollY;
+  let currentY = startY, targetIndex = sourceIndex, finished = false, moved = false;
+  let stopAutoScroll = () => {};
+  const preview = () => {
+    if (finished) return;
+    const offset = currentY - startY + window.scrollY - startScrollY;
+    if (Math.abs(offset) >= 4) moved = true;
+    if (moved) targetIndex = rows.reduce((closest, row, i) => Math.abs(currentY + window.scrollY - row.mid) < Math.abs(currentY + window.scrollY - rows[closest].mid) ? i : closest, sourceIndex);
+    onPreview({ secId: sectionId, habitId, dragIdx: sourceIndex, dropIdx: targetIndex, dropId: rows[targetIndex].id, offset });
+  };
+  const finish = commit => {
+    if (finished) return;
+    finished = true;
+    stopAutoScroll();
+    document.removeEventListener("pointermove", onMove);
+    document.removeEventListener("pointerup", onUp);
+    document.removeEventListener("pointercancel", onCancel);
+    document.removeEventListener("visibilitychange", onVisibility);
+    handle.removeEventListener("lostpointercapture", onLostCapture);
+    window.removeEventListener("blur", onBlur);
+    if (sessionRef.current === session) sessionRef.current = null;
+    try { if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId); } catch (_) {}
+    onPreview(null);
+    if (commit && moved && targetIndex !== sourceIndex) onDrop(sectionId, habitId, rows[targetIndex].id, targetIndex > sourceIndex);
+  };
+  const onMove = ev => { if (ev.pointerId !== pointerId) return; if (ev.cancelable) ev.preventDefault(); currentY = ev.clientY; preview(); };
+  const onUp = ev => { if (ev.pointerId === pointerId) finish(true); };
+  const onCancel = ev => { if (ev.pointerId === pointerId) finish(false); };
+  const onLostCapture = ev => { if (ev.pointerId === pointerId) finish(false); };
+  const onBlur = () => finish(false);
+  const onVisibility = () => { if (document.visibilityState === "hidden") finish(false); };
+  const session = { habitId, sectionId, cancel: () => finish(false) };
+  sessionRef.current = session;
+  document.addEventListener("pointermove", onMove, { passive: false });
+  document.addEventListener("pointerup", onUp);
+  document.addEventListener("pointercancel", onCancel);
+  document.addEventListener("visibilitychange", onVisibility);
+  handle.addEventListener("lostpointercapture", onLostCapture);
+  window.addEventListener("blur", onBlur);
+  try { handle.setPointerCapture(pointerId); } catch (_) {}
+  preview();
+  stopAutoScroll = startDragAutoScroll(() => currentY, preview);
+  return session.cancel;
+}
+
+function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, habitDragSessionRef, setHabitDrag, reorderHabit, openEditHabit }) {
   const streak = getStreak(item.id, data.log, today);
   const overall = getOverall(item.id, data.log);
   const todayNote = tl[item.id + "_note"] || "";
@@ -2268,52 +2336,12 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
   const [showMonthly, setShowMonthly] = useState(false);
   const [monthOffset, setMonthOffset] = useState(0);
   const [selectedMonthDay, setSelectedMonthDay] = useState(null);
+  const dragCleanupRef = useRef(null);
+  useEffect(() => () => { dragCleanupRef.current?.(); }, []);
 
   function handleHabitDragStart(e) {
-    e.preventDefault();
-    const startY = e.touches ? e.touches[0].clientY : e.clientY;
-    const startScrollY = window.scrollY;
-    let currentY = startY;
-    let toIdx = idx;
-    const rows = document.querySelectorAll(`[data-habitsec="${secId}"] [data-habitrow]`);
-    const rects = [];
-    rows.forEach((row) => {
-      const r = row.getBoundingClientRect();
-      rects.push({ mid: r.top + r.height / 2 + window.scrollY });
-    });
-    setHabitDrag({ secId, dragIdx: idx, dropIdx: idx, offset: 0 });
-
-    const applyMove = () => {
-      const scrollDelta = window.scrollY - startScrollY;
-      const compareY = currentY + window.scrollY;
-      let closest = idx;
-      let minDist = Infinity;
-      rects.forEach((r, i) => {
-        const dist = Math.abs(compareY - r.mid);
-        if (dist < minDist) { minDist = dist; closest = i; }
-      });
-      toIdx = closest;
-      setHabitDrag({ secId, dragIdx: idx, dropIdx: closest, offset: currentY - startY + scrollDelta });
-    };
-    const stopAutoScroll = startDragAutoScroll(() => currentY, applyMove);
-
-    const onMove = (ev) => {
-      currentY = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      applyMove();
-    };
-    const onEnd = () => {
-      stopAutoScroll();
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onEnd);
-      document.removeEventListener("touchmove", onMove);
-      document.removeEventListener("touchend", onEnd);
-      setHabitDrag(null);
-      if (toIdx !== idx) reorderHabit(secId, idx, toIdx);
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onEnd);
-    document.addEventListener("touchmove", onMove, { passive: false });
-    document.addEventListener("touchend", onEnd);
+    const cleanup = startHabitPointerDrag(e, { sessionRef: habitDragSessionRef, sectionId: secId, habitId: item.id, onPreview: setHabitDrag, onDrop: reorderHabit });
+    if (cleanup) dragCleanupRef.current = cleanup;
   }
 
   function pickStatus(st, dateOverride) {
@@ -2351,11 +2379,11 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
   }
 
   const drag = habitDrag && habitDrag.secId === secId ? habitDrag : null;
-  const isMe = !!drag && drag.dragIdx === idx;
-  const showTopMark = !!drag && drag.dropIdx === idx && drag.dragIdx !== idx && drag.dragIdx > idx;
-  const showBotMark = !!drag && drag.dropIdx === idx && drag.dragIdx !== idx && drag.dragIdx < idx;
+  const isMe = !!drag && drag.habitId === item.id;
+  const showTopMark = !!drag && drag.dropId === item.id && !isMe && drag.dragIdx > drag.dropIdx;
+  const showBotMark = !!drag && drag.dropId === item.id && !isMe && drag.dragIdx < drag.dropIdx;
   return (
-    <div data-habitrow={idx} style={{
+    <div data-habitrow={idx} data-habit-id={item.id} style={{
       ...S.card,
       borderTop: showTopMark ? "2px solid #7c3aed" : S.card.borderTop,
       borderBottom: showBotMark ? "2px solid #7c3aed" : S.card.borderBottom,
@@ -2370,7 +2398,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
       <div style={{ display: "flex", alignItems: "flex-start" }}>
         <span
           onPointerDown={handleHabitDragStart}
-          onTouchStart={handleHabitDragStart}
+          data-habit-drag-handle={item.id}
           style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 2px", userSelect: "none", touchAction: "none", lineHeight: 1, alignSelf: "center", fontWeight: 900, letterSpacing: -2 }}
           title="Drag to reorder"
         >{"⋮"}</span>
@@ -2642,6 +2670,7 @@ function DailyGrind() {
   const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
   const [calDragging, setCalDragging] = useState(null);
   const [habitDrag, setHabitDrag] = useState(null); // shared {secId, dragIdx, dropIdx, offset} so all cards see the drag
+  const habitDragSessionRef = useRef(null);
   const [taskDrag, setTaskDrag] = useState(null); // shared across task-list cards so tasks can move between lists
   const calGridRef = useRef(null);
   const prevScoreRef = useRef(0);
@@ -3129,13 +3158,10 @@ function DailyGrind() {
     save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem] : s.items.filter((i) => i.id !== editItem.id) })) }));
     setEditSection(tgt);
   }
-  function reorderHabit(secId, fromIdx, toIdx) {
-    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+  function reorderHabit(secId, habitId, targetId, after) {
     save((current) => ({ ...current, habitSections: current.habitSections.map((s) => {
       if (s.id !== secId) return s;
-      const items = [...s.items];
-      const [moved] = items.splice(fromIdx, 1);
-      items.splice(toIdx, 0, moved);
+      const items = moveHabitById(s.items, habitId, targetId, after);
       return { ...s, items };
     }) }));
   }
@@ -4025,7 +4051,7 @@ function DailyGrind() {
                 </div>
                 <span style={S.secPt}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>
               </div>
-              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} />)}
+              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} habitDragSessionRef={habitDragSessionRef} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} />)}
               <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
           );
