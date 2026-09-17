@@ -1693,7 +1693,7 @@ function NoteScreenshot({ image, onRemove }) {
   </figure>;
 }
 
-function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
+function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
   const [mode, setMode] = useState("text");
   const [color, setColor] = useState("#f8fafc");
   const [width, setWidth] = useState(3);
@@ -1835,7 +1835,7 @@ function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, 
       : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
   };
   return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: pageWidth ? pageWidth + 2 : "100%", minWidth: pageWidth ? pageWidth + 2 : 0 }}>
-    <div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "#1a1a2e", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: "6px 0", marginBottom: 10 }}>
+    {toolbarHost && ReactDOM.createPortal(<div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "transparent", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: 0 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
       <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>
       <button type="button" aria-label="Redo drawing" disabled={!history.redo.length} onClick={() => travel("redo")} style={{ ...S.noteToolBtn, opacity: history.redo.length ? 1 : 0.4 }}>Redo</button>
@@ -1844,7 +1844,7 @@ function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, 
         <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
       </>}
       <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : "Click any blank spot to type"}</span>
-    </div>
+    </div>, toolbarHost)}
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
     <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
       <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && body.length ? 0 : -1} placeholder="" style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && body.length ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
@@ -2680,6 +2680,7 @@ function DailyGrind() {
   const [noteDraft, setNoteDraft] = useState(null);
   const [noteDraftState, setNoteDraftState] = useState("idle");
   const [noteExpanded, setNoteExpanded] = useState(false);
+  const [noteToolsHost, setNoteToolsHost] = useState(null);
   useEffect(() => {
     if (!noteDraft || page !== "notes" || view !== "main") setNoteExpanded(false);
   }, [noteDraft?.id, page, view]);
@@ -4346,10 +4347,11 @@ function DailyGrind() {
             <section className={`notes-editor${noteExpanded ? " notes-editor-expanded" : ""}`} data-note-editor aria-label="Page editor" tabIndex={0} onPaste={pasteNoteImages}>
               {noteDraft ? (
                 <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "10px 14px", borderBottom: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "10px 14px", flexShrink: 0, borderBottom: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <button onClick={() => insertNoteText("• ")} title="Insert bullet" style={S.noteToolBtn}>• List</button>
                     <button onClick={() => insertNoteText("☐ ")} title="Insert checklist item" style={S.noteToolBtn}>☐ Task</button>
                     <button onClick={() => insertNoteText("──────────")} title="Insert divider" style={S.noteToolBtn}>— Divider</button>
+                    <div ref={setNoteToolsHost} data-note-tools-host style={{ display: "flex", alignItems: "center", flexWrap: "wrap", minWidth: 0 }} />
                     <button type="button" disabled={noteImageBusy} onClick={() => noteImageInputRef.current?.click()} style={S.noteToolBtn}>{noteImageBusy ? "Saving image…" : "+ Image"}</button>
                     <input ref={noteImageInputRef} aria-label="Add screenshots" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style={{ display: "none" }} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; addNoteImages(files); }} />
                     <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
@@ -4384,7 +4386,7 @@ function DailyGrind() {
                       <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
                       {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
                     </section>}
-                    <NoteDrawingSurface key={noteDraft.id} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
+                    <NoteDrawingSurface key={noteDraft.id} toolbarHost={noteToolsHost} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
                       onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing} beforeRemoveTextBox={async () => { await flushCurrentNote(); return protectBeforeDestructive("before-text-box-delete"); }}
                       onTextBoxesChange={textBoxes => {
                         const current = noteDraftRef.current;
