@@ -2682,6 +2682,12 @@ function DailyGrind() {
   const [noteImageMessage, setNoteImageMessage] = useState("");
   const noteImageInputRef = useRef(null);
   const noteImageBusyRef = useRef(false);
+  const [revealNoteImage, setRevealNoteImage] = useState(null);
+  useLayoutEffect(() => {
+    if (!revealNoteImage || noteDraft?.id !== revealNoteImage.noteId) return;
+    const frame = [...document.querySelectorAll("[data-note-screenshot]")].find(element => element.dataset.noteScreenshot === revealNoteImage.imageId);
+    if (frame) { frame.scrollIntoView({ block: "start", behavior: "auto" }); setRevealNoteImage(null); }
+  }, [revealNoteImage, noteDraft?.id, noteDraft?.images]);
   const [showNewNoteSection, setShowNewNoteSection] = useState(false);
   const [newNoteSectionName, setNewNoteSectionName] = useState("");
   const [newNoteSectionError, setNewNoteSectionError] = useState("");
@@ -3554,6 +3560,7 @@ function DailyGrind() {
         const saving = persistNoteDraft(next);
         if (!dataRef.current.notes.find(note => note.id === next.id)?.images?.some(item => item.id === image.id)) throw new Error("The note is at the save limit. The screenshot was not added to the page.");
         noteDraftRef.current = next; setNoteDraft(next);
+        setRevealNoteImage({ noteId: next.id, imageId: image.id });
         const result = await saving;
         if (!result) throw new Error("The screenshot is on this device, but the note still needs cloud confirmation. Use the save-status retry.");
       }
@@ -4359,6 +4366,10 @@ function DailyGrind() {
                         <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 9, fontFamily: "inherit", outline: "none" }} />
                       </label>
                     </div>
+                    {(noteDraft.images || []).length > 0 && <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 0, marginBottom: 20 }}>
+                      <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
+                      {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
+                    </section>}
                     <NoteDrawingSurface key={noteDraft.id} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
                       onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing} beforeRemoveTextBox={async () => { await flushCurrentNote(); return protectBeforeDestructive("before-text-box-delete"); }}
                       onTextBoxesChange={textBoxes => {
@@ -4383,10 +4394,7 @@ function DailyGrind() {
                         setNoteDraft(next);
                         return true;
                       }} />
-                    {(noteDraft.images || []).length > 0 && <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 24 }}>
-                      <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
-                      {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
-                    </section>}
+
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>

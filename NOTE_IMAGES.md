@@ -1,6 +1,6 @@
 # Screenshots in Notes
 
-Open or create a note, then paste a screenshot with Ctrl+V/Cmd+V or use **+ Image**. Plain-text paste remains native. Images appear in the Screenshots section below the writing canvas. **Copy image** writes a PNG to the clipboard where supported; **Remove image** captures a recovery copy before removing the note reference.
+Open or create a note, then paste a screenshot with Ctrl+V/Cmd+V or use **+ Image**. Plain-text paste remains native. Images appear in the Screenshots section above the writing canvas; newly added images scroll into view automatically. **Copy image** writes a PNG to the clipboard where supported; **Remove image** captures a recovery copy before removing the note reference.
 
 Image-only pages are saved. References participate in normal note normalization, signatures, live open-note merging, account saves, and backup snapshots. The binary content is stored separately at `users/{uid}/noteImages/{sha256}` through `note-images.js`, using the existing owner-only `/users/{uid}/...` rule. Writes must finish before an image reference is inserted. Upload/read operations capture and recheck the account identity. Assets are validated and SHA-256 checked on read/import; browser cache is cleared on authentication changes.
 
