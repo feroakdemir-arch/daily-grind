@@ -46,6 +46,7 @@
     .notes-pages { background: #171726; border-right: 1px solid #2d2d3a; padding: 14px 10px; min-width: 0; min-height: 0; overflow-y: auto; }
     .notes-editor { background: #1a1a2e; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     .note-page-button:hover { background: #25253a !important; }
+    .notes-editor.notes-editor-expanded { position: fixed; inset: 0; z-index: 150; width: 100%; height: 100vh; height: 100dvh; min-height: 0; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); box-sizing: border-box; }
     @media (max-width: 760px) {
       .notes-workspace { display: block; min-height: 0; overflow-y: auto; }
       .notes-sections { border-right: 0; border-bottom: 1px solid #2d2d3a; padding: 10px; }
@@ -2678,6 +2679,18 @@ function DailyGrind() {
   const [noteTagFilter, setNoteTagFilter] = useState("all");
   const [noteDraft, setNoteDraft] = useState(null);
   const [noteDraftState, setNoteDraftState] = useState("idle");
+  const [noteExpanded, setNoteExpanded] = useState(false);
+  useEffect(() => {
+    if (!noteDraft || page !== "notes" || view !== "main") setNoteExpanded(false);
+  }, [noteDraft?.id, page, view]);
+  useEffect(() => {
+    if (!noteExpanded) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onEscape = event => { if (event.key === "Escape") setNoteExpanded(false); };
+    document.addEventListener("keydown", onEscape);
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onEscape); };
+  }, [noteExpanded]);
   const [noteImageBusy, setNoteImageBusy] = useState(false);
   const [noteImageMessage, setNoteImageMessage] = useState("");
   const noteImageInputRef = useRef(null);
@@ -4330,7 +4343,7 @@ function DailyGrind() {
               )}
             </section>
 
-            <section className="notes-editor" data-note-editor aria-label="Page editor" tabIndex={0} onPaste={pasteNoteImages}>
+            <section className={`notes-editor${noteExpanded ? " notes-editor-expanded" : ""}`} data-note-editor aria-label="Page editor" tabIndex={0} onPaste={pasteNoteImages}>
               {noteDraft ? (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "10px 14px", borderBottom: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
@@ -4340,6 +4353,7 @@ function DailyGrind() {
                     <button type="button" disabled={noteImageBusy} onClick={() => noteImageInputRef.current?.click()} style={S.noteToolBtn}>{noteImageBusy ? "Saving image…" : "+ Image"}</button>
                     <input ref={noteImageInputRef} aria-label="Add screenshots" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style={{ display: "none" }} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; addNoteImages(files); }} />
                     <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
+                    <button type="button" aria-pressed={noteExpanded} aria-label={noteExpanded ? "Exit full window" : "Full window"} title={noteExpanded ? "Exit full window (Escape)" : "Expand note to fill the window"} onClick={() => setNoteExpanded(value => !value)} style={{ ...S.noteToolBtn, color: "#ddd3ff", borderColor: "#7c3aed88" }}>{noteExpanded ? "↙ Exit full window" : "↗ Full window"}</button>
                     <span style={{ flex: 1 }} />
                     <span aria-live="polite" style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
                       {noteDraftState === "typing" ? "UNSAVED" : noteDraftState === "saving" ? "SAVING..." : noteDraftState === "saved" ? "SAVED" : noteDraftState === "error" ? "SAVE FAILED" : "AUTO-SAVE ON"}
