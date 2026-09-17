@@ -186,3 +186,25 @@ test("malformed text boxes fail closed and an empty click does not count as cont
   assert.throws(() => context.normalizeNoteTextBoxes([{ ...textBox(), width: -1 }]));
   assert.equal(context.noteCanSave({ id: "new", title: "", body: "", textBoxes: [{ ...textBox(), text: "" }] }, base()), false);
 });
+const screenshot = () => ({ id: "image-1", assetId: "a".repeat(64), name: "Screenshot.png", width: 800, height: 600 });
+test("screenshots save on image-only notes and survive older client normalization", () => {
+  const draft = { id: "page", title: "", body: "", tag: "School", images: [screenshot()] };
+  assert.equal(context.noteCanSave(draft, base()), true);
+  const saved = reload(context.addNoteSection(base(), "School", draft));
+  assert.equal(saved.notes[0].images[0].assetId, screenshot().assetId);
+  delete saved.notes[0].images;
+  assert.equal(reload(saved).notes[0].images[0].width, 800);
+});
+test("image references merge live and section removal preserves or removes references appropriately", () => {
+  const initial = { id: "page", title: "Page", body: "", tag: "School", pinned: false, images: [] };
+  const merged = context.mergeLiveNote({ ...initial, body: "Local text" }, { ...initial, images: [screenshot()] }, context.noteSignature(initial));
+  assert.equal(merged.body, "Local text"); assert.equal(merged.images.length, 1);
+  const saved = reload(context.addNoteSection(base(), "School", merged));
+  assert.equal(context.removeNoteSection(saved, "School", false).noteImages.page.length, 1);
+  assert.equal(context.removeNoteSection(saved, "School", true).noteImages.page, undefined);
+});
+test("invalid screenshot references fail closed", () => {
+  assert.throws(() => context.normalizeNoteImages([{...screenshot(),assetId:'https://outside.example/image'}]));
+  assert.throws(() => context.normalizeNoteImages([{...screenshot(),width:NaN}]));
+  assert.throws(() => context.normalizeNoteImages([screenshot(),screenshot()]));
+});

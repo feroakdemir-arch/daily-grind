@@ -832,6 +832,7 @@
     };
   </script>
   <script src="calendar-reminders.js"></script>
+  <script src="note-images.js"></script>
   <script type="text/babel">
 const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
 
@@ -859,6 +860,7 @@ const mkDefault = () => ({
   noteSections: [],
   noteDrawings: {},
   noteTextBoxes: {},
+  noteImages: {},
   dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
@@ -954,6 +956,8 @@ function parseMainData(raw) {
   const noteDrawings = Object.fromEntries(Object.entries(parsed.noteDrawings || {}).map(([id, strokes]) => [id, normalizeNoteDrawing(strokes)]));
   if (parsed.noteTextBoxes !== undefined && !objectOnly(parsed.noteTextBoxes)) throw new Error("Saved text boxes are invalid");
   const noteTextBoxes = Object.fromEntries(Object.entries(parsed.noteTextBoxes || {}).map(([id, boxes]) => [id, normalizeNoteTextBoxes(boxes)]));
+  if (parsed.noteImages !== undefined && !objectOnly(parsed.noteImages)) throw new Error("Saved note images are invalid");
+  const noteImages = Object.fromEntries(Object.entries(parsed.noteImages || {}).map(([id, images]) => [id, normalizeNoteImages(images)]));
   return {
     ...parsed,
     habitSections: habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
@@ -961,12 +965,14 @@ function parseMainData(raw) {
     noteSections: normalizeNoteSections(parsed.noteSections),
     noteDrawings,
     noteTextBoxes,
+    noteImages,
     notes: Array.isArray(parsed.notes) ? parsed.notes.filter((note) => note && typeof note === "object").map((note, index) => ({
       id: typeof note.id === "string" && note.id ? note.id : `note_legacy_${index}`,
       title: typeof note.title === "string" ? note.title : "",
       body: typeof note.body === "string" ? note.body : "",
       drawing: normalizeNoteDrawing(Object.prototype.hasOwnProperty.call(noteDrawings, note.id) ? noteDrawings[note.id] : note.drawing),
       textBoxes: normalizeNoteTextBoxes(Object.prototype.hasOwnProperty.call(noteTextBoxes, note.id) ? noteTextBoxes[note.id] : note.textBoxes),
+      images: normalizeNoteImages(Object.prototype.hasOwnProperty.call(noteImages, note.id) ? noteImages[note.id] : note.images),
       tag: typeof note.tag === "string" ? note.tag : "",
       pinned: note.pinned === true,
       createdAt: Number.isFinite(note.createdAt) ? note.createdAt : 0,
@@ -1198,12 +1204,24 @@ function normalizeNoteTextBoxes(boxes) {
   });
 }
 
+function normalizeNoteImages(images) {
+  if (images === undefined) return [];
+  if (!Array.isArray(images) || images.length > 100) throw new Error("This note has too many screenshots.");
+  const ids = new Set();
+  return images.map(image => {
+    if (!image || typeof image.id !== "string" || !image.id || ids.has(image.id) || !/^[a-f0-9]{64}$/.test(image.assetId || "") ||
+        !Number.isFinite(image.width) || image.width <= 0 || image.width > 2400 || !Number.isFinite(image.height) || image.height <= 0 || image.height > 2400) throw new Error("Saved screenshot reference is invalid");
+    ids.add(image.id);
+    return { id: image.id, assetId: image.assetId, name: typeof image.name === "string" ? image.name.slice(0, 160) : "Screenshot", width: image.width, height: image.height };
+  });
+}
+
 function noteTextContent(note) {
   return [note.body || "", ...(note.textBoxes || []).map(box => box.text)].filter(Boolean).join("\n");
 }
 
 function noteCanSave(note, current) {
-  return !!note && (!!note.title.trim() || !!noteTextContent(note).trim() || !!note.drawing?.length || (current?.notes || []).some(saved => saved.id === note.id));
+  return !!note && (!!note.title.trim() || !!noteTextContent(note).trim() || !!note.drawing?.length || !!note.images?.length || (current?.notes || []).some(saved => saved.id === note.id));
 }
 
 function drawingStrokeHit(stroke, point, radius = 12) {
@@ -1231,6 +1249,7 @@ function addNoteSection(current, section, draft) {
   return { ...current, notes,
     noteDrawings: noteCanSave(draft, current) ? { ...(current.noteDrawings || {}), [draft.id]: normalizeNoteDrawing(draft.drawing) } : current.noteDrawings || {},
     noteTextBoxes: noteCanSave(draft, current) ? { ...(current.noteTextBoxes || {}), [draft.id]: normalizeNoteTextBoxes(draft.textBoxes) } : current.noteTextBoxes || {},
+    noteImages: noteCanSave(draft, current) ? { ...(current.noteImages || {}), [draft.id]: normalizeNoteImages(draft.images) } : current.noteImages || {},
     noteSections: normalizeNoteSections([...(current.noteSections || []), section]) };
 }
 
@@ -1246,6 +1265,7 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
     noteSections: normalizeNoteSections(current.noteSections).filter(name => name !== section),
     noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => !deletedIds.has(id))),
     noteTextBoxes: Object.fromEntries(Object.entries(current.noteTextBoxes || {}).filter(([id]) => !deletedIds.has(id))),
+    noteImages: Object.fromEntries(Object.entries(current.noteImages || {}).filter(([id]) => !deletedIds.has(id))),
     notes: deletePages ? (current.notes || []).filter(note => !belongs(note))
       : (current.notes || []).map(note => belongs(note) ? { ...note, tag: "", updatedAt: now } : note),
     taskLists: (current.taskLists || []).map(list => ({ ...list,
@@ -1277,12 +1297,13 @@ function mergeLiveNote(draft, incoming, savedSignature) {
   };
   merged.drawing = mergeItems("drawing", 4);
   merged.textBoxes = mergeItems("textBoxes", 5);
+  merged.images = mergeItems("images", 6);
   return merged;
 }
 
 function noteSignature(note) {
   if (!note) return "";
-  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || [], note.textBoxes || []]);
+  return JSON.stringify([note.title || "", note.body || "", note.tag || "", note.pinned === true, note.drawing || [], note.textBoxes || [], note.images || []]);
 }
 
 function normalizedNoteDraft(draft, now = Date.now()) {
@@ -1292,6 +1313,7 @@ function normalizedNoteDraft(draft, now = Date.now()) {
     body: draft.body,
     drawing: normalizeNoteDrawing(draft.drawing),
     textBoxes: normalizeNoteTextBoxes(draft.textBoxes),
+    images: normalizeNoteImages(draft.images),
     tag: draft.tag.trim(),
     pinned: draft.pinned === true,
     createdAt: draft.createdAt || now,
@@ -1632,6 +1654,42 @@ function TaskWorkTimer({ task, onToggle }) {
       </span>
     </div>
   );
+}
+
+function NoteScreenshot({ image, onRemove }) {
+  const [src, setSrc] = useState("");
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let canceled = false;
+    setSrc(""); setError("");
+    window.noteImageStore.load(image.assetId).then(data => { if (!canceled) setSrc(data); }).catch(err => { if (!canceled) setError(err.message); });
+    return () => { canceled = true; };
+  }, [image.assetId, attempt]);
+  const pngBlob = async () => {
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = src; });
+    const canvas = document.createElement("canvas"); canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("Could not copy image.")), "image/png"));
+  };
+  return <figure data-note-screenshot={image.id} style={{ margin: "0 0 18px", padding: 12, border: "1px solid #353548", borderRadius: 10, background: "#141423" }}>
+    <figcaption style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <span style={{ flex: 1, minWidth: 100, fontSize: 11, color: "#b5b5c9", overflowWrap: "anywhere" }}>{image.name}</span>
+      {src && <button type="button" style={S.noteToolBtn} onClick={async () => {
+        setMessage("");
+        try {
+          if (!navigator.clipboard?.write || !window.ClipboardItem) throw new Error("This browser cannot copy images. Long-press or right-click the screenshot to copy it.");
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob() })]); setMessage("Image copied.");
+        } catch (err) { setMessage(err.message || "Copy was blocked. Long-press or right-click the image to copy it."); }
+      }}>Copy image</button>}
+      <button type="button" disabled={busy} style={{ ...S.noteToolBtn, color: "#ff8793" }} onClick={async () => { setBusy(true); try { await onRemove(image.id); } catch (err) { setMessage(err.message); } finally { setBusy(false); } }}>Remove image</button>
+    </figcaption>
+    {src ? <img src={src} alt={image.name} width={image.width} height={image.height} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 4 }} /> : <div role="status" style={{ color: "#aaaabb", padding: 20, fontSize: 12 }}>{error || "Loading screenshot…"}{error && <button onClick={() => setAttempt(value => value + 1)} style={{ ...S.noteToolBtn, marginLeft: 8 }}>Retry</button>}</div>}
+    {message && <p role="status" style={{ color: "#c4b5fd", fontSize: 11, marginTop: 8 }}>{message}</p>}
+  </figure>;
 }
 
 function NoteDrawingSurface({ drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
@@ -2620,6 +2678,10 @@ function DailyGrind() {
   const [noteTagFilter, setNoteTagFilter] = useState("all");
   const [noteDraft, setNoteDraft] = useState(null);
   const [noteDraftState, setNoteDraftState] = useState("idle");
+  const [noteImageBusy, setNoteImageBusy] = useState(false);
+  const [noteImageMessage, setNoteImageMessage] = useState("");
+  const noteImageInputRef = useRef(null);
+  const noteImageBusyRef = useRef(false);
   const [showNewNoteSection, setShowNewNoteSection] = useState(false);
   const [newNoteSectionName, setNewNoteSectionName] = useState("");
   const [newNoteSectionError, setNewNoteSectionError] = useState("");
@@ -2806,6 +2868,7 @@ function DailyGrind() {
         notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
         noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
         noteTextBoxes: { ...(current.noteTextBoxes || {}), [note.id]: note.textBoxes },
+        noteImages: { ...(current.noteImages || {}), [note.id]: note.images },
       };
     });
   }, [save]);
@@ -2833,7 +2896,7 @@ function DailyGrind() {
       }
     }, 700);
     return () => clearTimeout(noteSaveTimerRef.current);
-  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, noteDraft?.textBoxes, persistNoteDraft]);
+  }, [noteDraft?.id, noteDraft?.title, noteDraft?.body, noteDraft?.tag, noteDraft?.pinned, noteDraft?.drawing, noteDraft?.textBoxes, noteDraft?.images, persistNoteDraft]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -2842,7 +2905,7 @@ function DailyGrind() {
       const baseSignature = noteSavedSignatureRef.current;
       let base;
       try { base = JSON.parse(baseSignature); } catch { return; }
-      if (JSON.stringify(draft.drawing || []) === JSON.stringify(base[4] || []) && JSON.stringify(draft.textBoxes || []) === JSON.stringify(base[5] || [])) return;
+      if (JSON.stringify(draft.drawing || []) === JSON.stringify(base[4] || []) && JSON.stringify(draft.textBoxes || []) === JSON.stringify(base[5] || []) && JSON.stringify(draft.images || []) === JSON.stringify(base[6] || [])) return;
       const snapshot = { ...draft }, signature = noteSignature(snapshot);
       noteLiveSavePendingRef.current = true;
       try {
@@ -2877,6 +2940,7 @@ function DailyGrind() {
           notes: exists ? notes.map((entry) => entry.id === note.id ? note : entry) : [note, ...notes],
           noteDrawings: { ...(current.noteDrawings || {}), [note.id]: note.drawing },
           noteTextBoxes: { ...(current.noteTextBoxes || {}), [note.id]: note.textBoxes },
+        noteImages: { ...(current.noteImages || {}), [note.id]: note.images },
         }));
         const serialized = JSON.stringify(next);
         if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) return;
@@ -3471,6 +3535,48 @@ function DailyGrind() {
       setDeleteSectionError("Could not finish deleting the section. " + (error.message || "Please check your connection and try again."));
     } finally { setDeleteSectionBusy(false); }
   }
+  async function addNoteImages(files) {
+    const startingNote = noteDraftRef.current;
+    if (!startingNote || noteImageBusyRef.current || !files.length) return;
+    noteImageBusyRef.current = true; setNoteImageBusy(true); setNoteImageMessage("Saving screenshot…");
+    try {
+      if ((startingNote.images || []).length + files.length > 100) throw new Error("This page can hold up to 100 screenshots.");
+      const owner = window.noteImageStore.owner();
+      for (const file of files) {
+        const prepared = await window.noteImageStore.prepare(file);
+        if (noteDraftRef.current?.id !== startingNote.id) throw new Error("The open page changed. Paste again on the page you want.");
+        const assetId = await window.noteImageStore.put(prepared.data, undefined, owner);
+        if (window.noteImageStore.owner() !== owner) throw new Error("Your account changed. Please try again.");
+        const current = noteDraftRef.current;
+        if (!current || current.id !== startingNote.id) throw new Error("The open page changed. Paste again on the page you want.");
+        const image = { id: makeId("image"), assetId, name: file.name || "Screenshot", width: prepared.width, height: prepared.height };
+        const next = { ...current, images: [...(current.images || []), image] };
+        const saving = persistNoteDraft(next);
+        if (!dataRef.current.notes.find(note => note.id === next.id)?.images?.some(item => item.id === image.id)) throw new Error("The note is at the save limit. The screenshot was not added to the page.");
+        noteDraftRef.current = next; setNoteDraft(next);
+        const result = await saving;
+        if (!result) throw new Error("The screenshot is on this device, but the note still needs cloud confirmation. Use the save-status retry.");
+      }
+      setNoteImageMessage("Screenshot saved. Paste another with Ctrl+V or Cmd+V.");
+    } catch (err) { setNoteImageMessage(err.message || "The screenshot could not be saved. Please try again."); }
+    finally { noteImageBusyRef.current = false; setNoteImageBusy(false); }
+  }
+  function pasteNoteImages(event) {
+    const files = Array.from(event.clipboardData?.items || []).filter(item => item.kind === "file" && item.type.startsWith("image/")).map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return; // Text paste stays native.
+    event.preventDefault(); event.stopPropagation();
+    addNoteImages(files);
+  }
+  async function removeNoteImage(imageId) {
+    const id = noteDraftRef.current?.id;
+    if (!id || !confirm("Remove this screenshot from the note? A recovery copy will be saved first.")) return;
+    await flushCurrentNote();
+    if (!(await protectBeforeDestructive("before-note-image-remove"))) return;
+    const current = noteDraftRef.current;
+    if (current?.id !== id) return;
+    const next = { ...current, images: (current.images || []).filter(image => image.id !== imageId) };
+    noteDraftRef.current = next; setNoteDraft(next); await persistNoteDraft(next);
+  }
   async function deleteNote(note) {
     if (!confirm(`Delete "${note.title || "Untitled note"}"? A safety copy will be kept first.`)) return;
     clearTimeout(noteSaveTimerRef.current);
@@ -3495,6 +3601,7 @@ function DailyGrind() {
         notes: (current.notes || []).filter((entry) => entry.id !== note.id),
         noteDrawings: Object.fromEntries(Object.entries(current.noteDrawings || {}).filter(([id]) => id !== note.id)),
         noteTextBoxes: Object.fromEntries(Object.entries(current.noteTextBoxes || {}).filter(([id]) => id !== note.id)),
+        noteImages: Object.fromEntries(Object.entries(current.noteImages || {}).filter(([id]) => id !== note.id)),
         taskLists: current.taskLists.map((list) => ({
           ...list,
           items: list.items.map(unlinkNote),
@@ -3572,17 +3679,22 @@ function DailyGrind() {
       const exportedAt = new Date().toISOString();
       const mainText = JSON.stringify(mainData);
       const calendarText = JSON.stringify(calEventsRef.current);
+      const hasImages = window.noteImageStore.idsFor(mainData).length > 0;
+      const imageAssets = hasImages ? await window.noteImageStore.exportAssets(mainData) : {};
+      const imageChecksum = hasImages ? await sha256Text(JSON.stringify(imageAssets)) : null;
       const [mainChecksum, calendarChecksum] = await Promise.all([sha256Text(mainText), sha256Text(calendarText)]);
       const bundle = {
         format: "daily-grind-backup",
-        version: mainChecksum && calendarChecksum ? 2 : 1,
+        version: hasImages ? 3 : mainChecksum && calendarChecksum ? 2 : 1,
         exportedAt,
         mainData,
         calendarEvents: calEventsRef.current,
+        ...(hasImages ? { imageAssets } : {}),
         integrity: mainChecksum && calendarChecksum ? {
           algorithm: "SHA-256",
           main: mainChecksum,
           calendar: calendarChecksum,
+          ...(hasImages ? { images: imageChecksum } : {}),
         } : undefined,
       };
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
@@ -3620,6 +3732,17 @@ function DailyGrind() {
         }
       }
       const parsed = parseMainData(JSON.stringify(rawMain));
+      const hasImages = window.noteImageStore.idsFor(parsed).length > 0;
+      if (hasImages) {
+        if (bundle.version >= 3) {
+          const imageChecksum = await sha256Text(JSON.stringify(bundle.imageAssets));
+          if (!imageChecksum || imageChecksum !== bundle.integrity?.images) throw new Error("Screenshot backup integrity check failed.");
+          await window.noteImageStore.validateAssets(bundle.imageAssets, parsed);
+        } else {
+          // Older app-format exports may reference images already in this account.
+          await window.noteImageStore.exportAssets(parsed);
+        }
+      }
       const restoredCalendar = bundle && bundle.format === "daily-grind-backup" && bundle.calendarEvents !== undefined
         ? parseCalendarData(bundle.calendarEvents)
         : null;
@@ -3628,6 +3751,7 @@ function DailyGrind() {
       if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
       await flushCurrentNote();
       await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-file-restore", true);
+      if (hasImages && bundle.version >= 3) await window.noteImageStore.importAssets(bundle.imageAssets, parsed);
       const mainResult = await save(parsed);
       const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
       setGoalInput(String(parsed.dailyGoal || 100));
@@ -3661,6 +3785,7 @@ function DailyGrind() {
     try {
       const backup = await window.dataVault.read(vaultSelectedId);
       const parsed = parseMainData(backup.value);
+      if (window.noteImageStore.idsFor(parsed).length) await window.noteImageStore.exportAssets(parsed);
       const restoredCalendar = typeof backup.calendarValue === "string" ? parseCalendarData(backup.calendarValue) : null;
       const noteCount = (parsed.notes || []).length;
       const selected = vaultItems.find((item) => item.id === vaultSelectedId);
@@ -4184,7 +4309,7 @@ function DailyGrind() {
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
                     <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
-                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.drawing?.length ? "Drawing" : "Empty page")}</div>
+                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.images?.length ? "Screenshot" : note.drawing?.length ? "Drawing" : "Empty page")}</div>
                   </article>
                   <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7, color: "#ff8793" }}><TrashIcon /></button>
                   </div>
@@ -4198,13 +4323,15 @@ function DailyGrind() {
               )}
             </section>
 
-            <section className="notes-editor" data-note-editor aria-label="Page editor">
+            <section className="notes-editor" data-note-editor aria-label="Page editor" tabIndex={0} onPaste={pasteNoteImages}>
               {noteDraft ? (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "10px 14px", borderBottom: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <button onClick={() => insertNoteText("• ")} title="Insert bullet" style={S.noteToolBtn}>• List</button>
                     <button onClick={() => insertNoteText("☐ ")} title="Insert checklist item" style={S.noteToolBtn}>☐ Task</button>
                     <button onClick={() => insertNoteText("──────────")} title="Insert divider" style={S.noteToolBtn}>— Divider</button>
+                    <button type="button" disabled={noteImageBusy} onClick={() => noteImageInputRef.current?.click()} style={S.noteToolBtn}>{noteImageBusy ? "Saving image…" : "+ Image"}</button>
+                    <input ref={noteImageInputRef} aria-label="Add screenshots" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style={{ display: "none" }} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; addNoteImages(files); }} />
                     <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
                     <span style={{ flex: 1 }} />
                     <span aria-live="polite" style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
@@ -4222,6 +4349,7 @@ function DailyGrind() {
                       <button onClick={() => { setPage("tasks"); openEditTask(linkedTaskContext.list.id, linkedTaskContext.task); }} style={{ ...S.noteToolBtn, color: "#c4b5fd", borderColor: "#7c3aed77" }}>OPEN TASK</button>
                     </div>
                   )}
+                  {noteImageMessage && <div role="status" style={{ padding: "8px 14px", fontSize: 11, color: "#c4b5fd", background: "#151526" }}>{noteImageMessage}</div>}
                   <div style={{ flex: 1, padding: "28px clamp(18px,4vw,48px) 20px", display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto" }}>
                     <input aria-label="Note title" value={noteDraft.title} onChange={(e) => setNoteDraft((draft) => ({ ...draft, title: e.target.value }))} placeholder="Page title" autoFocus style={{ width: "100%", background: "transparent", border: "none", borderBottom: "1px solid #3a3a4e", color: "#f7f7fb", fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, fontFamily: "inherit", padding: "5px 0 13px", outline: "none" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 18px", flexWrap: "wrap" }}>
@@ -4238,7 +4366,7 @@ function DailyGrind() {
                         if (!current || current.id !== noteDraft.id) return false;
                         const next = { ...current, textBoxes }, note = normalizedNoteDraft(next), source = dataRef.current;
                         const existing = source.notes.some(entry => entry.id === note.id);
-                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: note.drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: textBoxes } };
+                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: note.drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
                         if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
                         noteDraftRef.current = next; setNoteDraft(next); return true;
                       }}
@@ -4249,12 +4377,16 @@ function DailyGrind() {
                         const note = normalizedNoteDraft(next);
                         const source = dataRef.current;
                         const existing = source.notes.some(entry => entry.id === note.id);
-                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: note.textBoxes } };
+                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: note.textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
                         if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
                         noteDraftRef.current = next;
                         setNoteDraft(next);
                         return true;
                       }} />
+                    {(noteDraft.images || []).length > 0 && <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 24 }}>
+                      <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
+                      {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
+                    </section>}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
