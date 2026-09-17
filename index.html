@@ -70,6 +70,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script src="jspdf.umd.min.js"></script>
   <script>
     // Initialize Firebase
     const firebaseConfig = {
@@ -834,6 +835,7 @@
   </script>
   <script src="calendar-reminders.js"></script>
   <script src="note-images.js"></script>
+  <script src="note-pdf.js"></script>
   <script type="text/babel">
 const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
 
@@ -2693,6 +2695,7 @@ function DailyGrind() {
     return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onEscape); };
   }, [noteExpanded]);
   const [noteImageBusy, setNoteImageBusy] = useState(false);
+  const [notePdfBusy, setNotePdfBusy] = useState(false);
   const [noteImageMessage, setNoteImageMessage] = useState("");
   const noteImageInputRef = useRef(null);
   const noteImageBusyRef = useRef(false);
@@ -3598,6 +3601,19 @@ function DailyGrind() {
     const next = { ...current, images: (current.images || []).filter(image => image.id !== imageId) };
     noteDraftRef.current = next; setNoteDraft(next); await persistNoteDraft(next);
   }
+  async function downloadNotePdf() {
+    const noteId = noteDraftRef.current?.id;
+    if (!noteId || notePdfBusy) return;
+    setNotePdfBusy(true); setNoteImageMessage("Building PDF…");
+    try {
+      await flushCurrentNote();
+      const note = noteDraftRef.current;
+      if (!note || note.id !== noteId) throw new Error("The open page changed. Open it again and retry the PDF download.");
+      const result = await window.notePdf.download(normalizedNoteDraft(note, note.updatedAt || Date.now()));
+      setNoteImageMessage(`Downloaded ${result.filename} (${result.pageCount} page${result.pageCount === 1 ? "" : "s"}).`);
+    } catch (error) { setNoteImageMessage(error.message || "The PDF could not be created. Please try again."); }
+    finally { setNotePdfBusy(false); }
+  }
   async function deleteNote(note) {
     if (!confirm(`Delete "${note.title || "Untitled note"}"? A safety copy will be kept first.`)) return;
     clearTimeout(noteSaveTimerRef.current);
@@ -4353,6 +4369,7 @@ function DailyGrind() {
                     <button onClick={() => insertNoteText("──────────")} title="Insert divider" style={S.noteToolBtn}>— Divider</button>
                     <div ref={setNoteToolsHost} data-note-tools-host style={{ display: "flex", alignItems: "center", flexWrap: "wrap", minWidth: 0 }} />
                     <button type="button" disabled={noteImageBusy} onClick={() => noteImageInputRef.current?.click()} style={S.noteToolBtn}>{noteImageBusy ? "Saving image…" : "+ Image"}</button>
+                    <button type="button" aria-label="Download note as PDF" disabled={notePdfBusy} onClick={downloadNotePdf} style={{ ...S.noteToolBtn, color: "#ddd3ff" }}>{notePdfBusy ? "Building PDF…" : "↓ Download PDF"}</button>
                     <input ref={noteImageInputRef} aria-label="Add screenshots" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style={{ display: "none" }} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; addNoteImages(files); }} />
                     <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
                     <button type="button" aria-pressed={noteExpanded} aria-label={noteExpanded ? "Exit full window" : "Full window"} title={noteExpanded ? "Exit full window (Escape)" : "Expand note to fill the window"} onClick={() => setNoteExpanded(value => !value)} style={{ ...S.noteToolBtn, color: "#ddd3ff", borderColor: "#7c3aed88" }}>{noteExpanded ? "↙ Exit full window" : "↗ Full window"}</button>
