@@ -1190,8 +1190,11 @@ function anchorNoteDrawing(strokes, pageWidth, originalHeight) {
   });
 }
 
-function notePaperHeight(textHeight, strokes) {
-  return Math.ceil(strokes.reduce((height, stroke) => stroke.points.reduce((last, point) => Math.max(last, point[1] + 48), height), Math.max(360, textHeight + 48)));
+// extraSpace = blank paper kept below the lowest text or ink; the editor passes most of a viewport so the
+// page is endless (draw near the bottom and it grows again), while the default keeps a tight fit.
+function notePaperHeight(textHeight, strokes, extraSpace = 48) {
+  const contentBottom = strokes.reduce((bottom, stroke) => stroke.points.reduce((last, point) => Math.max(last, point[1]), bottom), textHeight);
+  return Math.ceil(Math.max(360, contentBottom + extraSpace));
 }
 
 function normalizeNoteTextBoxes(boxes) {
@@ -1785,7 +1788,9 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     setBodySize(previous => previous.width === nextBodySize.width && previous.height === nextBodySize.height ? previous : nextBodySize);
     const size = legacySize.current;
     const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
-    let height = notePaperHeight(textHeight, strokes);
+    // Keep most of a viewport of blank paper below the lowest content so the page scrolls on endlessly.
+    const extraSpace = Math.max(48, Math.round((window.innerHeight || 0) * 0.85));
+    let height = notePaperHeight(textHeight, strokes, extraSpace);
     for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
       const box = [...textBoxes, ...(pendingBox ? [pendingBox] : [])].find(item => item.id === input.dataset.noteTextbox);
       const frame = input.closest("[data-note-textbox-frame]");
@@ -1799,7 +1804,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       const boxHeight = Math.max(28, input.scrollHeight + 2);
       input.style.height = `${boxHeight}px`;
       input.scrollTop = 0;
-      height = Math.max(height, Number(input.dataset.boxY) + boxHeight + 48);
+      height = Math.max(height, Number(input.dataset.boxY) + boxHeight + extraSpace);
     }
     setPaperHeight(height);
   }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width]);

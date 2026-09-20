@@ -208,3 +208,10 @@ test("invalid screenshot references fail closed", () => {
   assert.throws(() => context.normalizeNoteImages([{...screenshot(),width:NaN}]));
   assert.throws(() => context.normalizeNoteImages([screenshot(),screenshot()]));
 });
+
+test('the paper keeps a viewport of blank space below the lowest content', () => {
+  const drawing = [{ id: 's', color: '#fff', width: 3, space: 'page', pageWidth: 900, points: [[10, 700], [20, 1200]] }];
+  assert.equal(context.notePaperHeight(100, [], 800), 900);
+  assert.equal(context.notePaperHeight(100, drawing, 800), 2000);
+  assert.equal(context.notePaperHeight(100, [], 0), 360);
+});
