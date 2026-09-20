@@ -1713,6 +1713,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   const textBoxesRef = useRef(textBoxes);
   textBoxesRef.current = textBoxes;
   const surfaceRef = useRef(null);
+  const extraSpaceRef = useRef(0);
   const svgRef = useRef(null);
   const textRef = useRef(null);
   const legacySize = useRef(null);
@@ -1789,7 +1790,9 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     const size = legacySize.current;
     const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
     // Keep most of a viewport of blank paper below the lowest content so the page scrolls on endlessly.
-    const extraSpace = Math.max(48, Math.round((window.innerHeight || 0) * 0.85));
+    // Never shrink it while the page is open: a mobile keyboard halves innerHeight on every keystroke.
+    extraSpaceRef.current = Math.max(extraSpaceRef.current, 48, Math.round((window.innerHeight || 0) * 0.85));
+    const extraSpace = extraSpaceRef.current;
     let height = notePaperHeight(textHeight, strokes, extraSpace);
     for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
       const box = [...textBoxes, ...(pendingBox ? [pendingBox] : [])].find(item => item.id === input.dataset.noteTextbox);

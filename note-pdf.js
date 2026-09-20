@@ -2,7 +2,8 @@
   const PAGE_W = 1240, PAGE_H = 1754, MARGIN = 90, FOOTER = 58;
   const FIRST_TOP = 255, NEXT_TOP = 90;
   const CONTENT_W = PAGE_W - MARGIN * 2;
-  const RENDER_SCALE = 2, MAX_SCALE = 2;
+  // 1.5x keeps text crisp (~225 dpi) without the ~35 MB/page canvases that make iOS Safari export blank pages.
+  const RENDER_SCALE = 1.5, MAX_SCALE = 2;
   // Mirror the note editor exactly: monospace 14px, line-height 1.8, browser tab stops every 8 characters.
   const NOTE_FONT_STACK = "'SF Mono','Fira Code','JetBrains Mono',monospace";
   const NOTE_FONT_SIZE = 14, NOTE_LINE_HEIGHT = 1.8, NOTE_TAB_SIZE = 8, NOTE_LINE_PX = NOTE_FONT_SIZE * NOTE_LINE_HEIGHT;
@@ -49,7 +50,7 @@
         if (line && ctx.measureText(line + word).width > maxWidth) { lines.push(line.trimEnd()); line = word.trimStart(); }
         else line += word;
         // The textarea uses overflow-wrap: break-word, so a single word wider than the line breaks by character.
-        while (line.length > 1 && ctx.measureText(line).width > maxWidth) {
+        while (line.trim() && line.length > 1 && ctx.measureText(line).width > maxWidth) {
           let cut = line.length - 1;
           while (cut > 1 && ctx.measureText(line.slice(0, cut)).width > maxWidth) cut--;
           lines.push(line.slice(0, cut)); line = line.slice(cut);
@@ -104,10 +105,14 @@
     const fontFamily = noteFontFamily();
     const measure = document.createElement("canvas").getContext("2d");
     measure.font = `${NOTE_FONT_SIZE}px ${fontFamily}`;
+    // Canvas silently keeps "10px sans-serif" when a font string fails to parse; never measure with that.
+    if (!measure.font.includes(`${NOTE_FONT_SIZE}px`)) measure.font = `${NOTE_FONT_SIZE}px ${NOTE_FONT_STACK}`;
+    const usedFontFamily = measure.font.slice(measure.font.indexOf("px") + 2).trim();
     const strokes = note.drawing || [], boxes = note.textBoxes || [];
-    const longestBodyLine = String(note.body || "").replace(/\r/g, "").split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(expandTabs(line)).width), 0);
+    // Ink pins text to its editor pixels, so wrap at the editor width the ink was anchored to; a text-only
+    // note has nothing to align with, so wrap it at a readable 700px like a normal page.
     const anchoredWidth = Math.max(0, ...strokes.map(stroke => stroke.pageWidth || 0), ...boxes.map(box => box.pageWidth || 0));
-    const pageWidth = anchoredWidth || Math.max(700, Math.ceil(longestBodyLine) + 8);
+    const pageWidth = anchoredWidth || 700;
     const bodyLines = wrapText(measure, note.body || "", pageWidth);
     let usedWidth = bodyLines.reduce((longest, line) => Math.max(longest, measure.measureText(line).width), 0);
     const boxLayouts = boxes.map(box => {
@@ -120,7 +125,7 @@
     for (const stroke of strokes) for (const point of stroke.points || []) usedWidth = Math.max(usedWidth, point[0] + (stroke.width || 0) / 2);
     // Fit the part of the page that is actually used, so a short table stays legible on A4.
     const scale = Math.min(MAX_SCALE, CONTENT_W / Math.max(360, usedWidth + 24));
-    const lineHeight = NOTE_LINE_PX * scale, noteFont = `${NOTE_FONT_SIZE * scale}px ${fontFamily}`;
+    const lineHeight = NOTE_LINE_PX * scale, noteFont = `${NOTE_FONT_SIZE * scale}px ${usedFontFamily}`;
     let logicalBottom = 0;
     const drawLine = (text, x, logicalY) => {
       const pos = pagePosition(logicalY), ctx = page(pos.page);

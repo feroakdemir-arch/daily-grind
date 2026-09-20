@@ -46,3 +46,9 @@ test('wrapped text keeps tab columns and breaks over-long words like the textare
   assert.deepEqual([...pdf.wrapText(ctx, 'abcdefghij', 50)], ['abcde', 'fghij']);
   assert.deepEqual([...pdf.wrapText(ctx, 'a\n\nb', 100)], ['a', '', 'b']);
 });
+
+test('a run of leading whitespace wider than the line never produces blank lines', () => {
+  const ctx = { measureText: text => ({ width: text.length * 10 }) };
+  assert.deepEqual([...pdf.wrapText(ctx, '\t\t\tx', 50)], ['', 'x']);
+  assert.deepEqual([...pdf.wrapText(ctx, 'abcdefghij      k', 50)], ['abcde', 'fghij', 'k']);
+});
