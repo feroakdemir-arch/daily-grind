@@ -1738,7 +1738,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     const rect = svgRef.current.getBoundingClientRect();
     const x = Math.round(Math.max(0, event.clientX - rect.left)), y = Math.round(Math.max(0, event.clientY - rect.top));
     const fixedWidth = pageWidth || rect.width;
-    const box = { id: makeId("textbox"), text: "", x, y, width: Math.max(100, Math.min(280, fixedWidth - x)), pageWidth: fixedWidth };
+    const box = { id: makeId("textbox"), text: "", x, y, width: Math.max(100, Math.min(280, rect.width - x)), pageWidth: fixedWidth };
     setPageWidth(fixedWidth); setPendingBox(box); setActiveTextId(box.id);
   };
   useLayoutEffect(() => {
@@ -1774,7 +1774,10 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     const textHeight = text.scrollHeight;
     text.style.height = `${Math.max(28, textHeight)}px`;
     text.scrollTop = 0;
-    const availableWidth = svgRef.current.getBoundingClientRect().width;
+    // Text keeps wrapping at the locked page width (so anchored strokes stay on their words) even though
+    // the paper itself now fills the editor, leaving the whole surface free for drawing and text boxes.
+    const paperWidth = svgRef.current.getBoundingClientRect().width;
+    const availableWidth = Math.min(paperWidth, pageWidth || Infinity);
     const measure = document.createElement("canvas").getContext("2d");
     measure.font = getComputedStyle(text).font;
     const contentWidth = body.includes("\t") ? availableWidth : body.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line).width + 8), 80);
@@ -1789,7 +1792,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       if (box && frame) {
         measure.font = getComputedStyle(input).font;
         const longestLine = input.value.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line.replace(/\t/g, "        ")).width), 0);
-        const maxWidth = Math.max(box.width, availableWidth - box.x);
+        const maxWidth = Math.max(box.width, paperWidth - box.x);
         frame.style.width = `${Math.ceil(Math.min(maxWidth, Math.max(box.width, longestLine + 12)))}px`;
       }
       input.style.height = "0px";
@@ -1836,7 +1839,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       ? { undo: current.undo.slice(0, -1), redo: [...current.redo, previous] }
       : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
   };
-  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: pageWidth ? pageWidth + 2 : "100%", minWidth: pageWidth ? pageWidth + 2 : 0 }}>
+  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0 }}>
     {toolbarHost && ReactDOM.createPortal(<div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "transparent", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: 0 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
       <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>

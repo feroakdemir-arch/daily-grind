@@ -32,3 +32,17 @@ test('drawing lines are split at PDF page boundaries', () => {
   assert.equal(points[1].y, 1441);
   assert.ok(points[1].x > 10 && points[1].x < 30);
 });
+
+test('tabs expand to the same 8-character stops the note editor uses', () => {
+  assert.equal(pdf.expandTabs('a\tB\tc'), 'a       B       c');
+  assert.equal(pdf.expandTabs('GA1\tGa2'), 'GA1     Ga2');
+  assert.equal(pdf.expandTabs('12345678\tx'), '12345678        x');
+});
+
+test('wrapped text keeps tab columns and breaks over-long words like the textarea', () => {
+  const ctx = { measureText: text => ({ width: text.length * 10 }) };
+  assert.deepEqual([...pdf.wrapText(ctx, '0\t0\t1', 1000)], ['0       0       1']);
+  assert.deepEqual([...pdf.wrapText(ctx, 'one two three', 80)], ['one two', 'three']);
+  assert.deepEqual([...pdf.wrapText(ctx, 'abcdefghij', 50)], ['abcde', 'fghij']);
+  assert.deepEqual([...pdf.wrapText(ctx, 'a\n\nb', 100)], ['a', '', 'b']);
+});

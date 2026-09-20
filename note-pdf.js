@@ -2,6 +2,10 @@
   const PAGE_W = 1240, PAGE_H = 1754, MARGIN = 90, FOOTER = 58;
   const FIRST_TOP = 255, NEXT_TOP = 90;
   const CONTENT_W = PAGE_W - MARGIN * 2;
+  const RENDER_SCALE = 2, MAX_SCALE = 2;
+  // Mirror the note editor exactly: monospace 14px, line-height 1.8, browser tab stops every 8 characters.
+  const NOTE_FONT_STACK = "'SF Mono','Fira Code','JetBrains Mono',monospace";
+  const NOTE_FONT_SIZE = 14, NOTE_LINE_HEIGHT = 1.8, NOTE_TAB_SIZE = 8, NOTE_LINE_PX = NOTE_FONT_SIZE * NOTE_LINE_HEIGHT;
   const firstCapacity = PAGE_H - FOOTER - FIRST_TOP;
   const nextCapacity = PAGE_H - FOOTER - NEXT_TOP;
   const cleanName = value => (String(value || "Untitled note").normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_-]+/g, "-").toLowerCase().slice(0, 80) || "untitled-note");
@@ -18,18 +22,40 @@
     return { page: 1 + Math.floor(rest / nextCapacity), y: NEXT_TOP + (rest % nextCapacity) };
   }
   function pageStart(page) { return page === 0 ? 0 : firstCapacity + (page - 1) * nextCapacity; }
+  function noteFontFamily() {
+    try {
+      const editor = document.querySelector('textarea[aria-label="Note body"]');
+      const family = editor && getComputedStyle(editor).fontFamily;
+      if (family) return family;
+    } catch (error) { /* no DOM (tests) or the editor is closed: use the shell font stack */ }
+    return NOTE_FONT_STACK;
+  }
+  function expandTabs(line) {
+    let out = "", column = 0;
+    for (const char of line) {
+      if (char === "\t") { const gap = NOTE_TAB_SIZE - (column % NOTE_TAB_SIZE); out += " ".repeat(gap); column += gap; }
+      else { out += char; column += 1; }
+    }
+    return out;
+  }
   function wrapText(ctx, text, maxWidth) {
     const lines = [];
-    for (const paragraph of String(text || "").replace(/\r/g, "").split("\n")) {
+    for (const raw of String(text || "").replace(/\r/g, "").split("\n")) {
+      const paragraph = expandTabs(raw);
       if (!paragraph) { lines.push(""); continue; }
       const words = paragraph.split(/(\s+)/).filter(Boolean);
       let line = "";
       for (const word of words) {
-        const candidate = line + word;
-        if (line && ctx.measureText(candidate).width > maxWidth) { lines.push(line.trimEnd()); line = word.trimStart(); }
-        else line = candidate;
+        if (line && ctx.measureText(line + word).width > maxWidth) { lines.push(line.trimEnd()); line = word.trimStart(); }
+        else line += word;
+        // The textarea uses overflow-wrap: break-word, so a single word wider than the line breaks by character.
+        while (line.length > 1 && ctx.measureText(line).width > maxWidth) {
+          let cut = line.length - 1;
+          while (cut > 1 && ctx.measureText(line.slice(0, cut)).width > maxWidth) cut--;
+          lines.push(line.slice(0, cut)); line = line.slice(cut);
+        }
       }
-      lines.push(line);
+      lines.push(line.trimEnd());
     }
     return lines;
   }
@@ -57,8 +83,8 @@
     const canvases = [];
     const page = index => {
       while (canvases.length <= index) {
-        const canvas = document.createElement("canvas"); canvas.width = PAGE_W; canvas.height = PAGE_H;
-        const ctx = canvas.getContext("2d"); ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, PAGE_W, PAGE_H);
+        const canvas = document.createElement("canvas"); canvas.width = PAGE_W * RENDER_SCALE; canvas.height = PAGE_H * RENDER_SCALE;
+        const ctx = canvas.getContext("2d"); ctx.scale(RENDER_SCALE, RENDER_SCALE); ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, PAGE_W, PAGE_H);
         canvases.push(canvas);
       }
       return canvases[index].getContext("2d");
@@ -72,29 +98,39 @@
     const meta = [note.tag ? `Section: ${note.tag}` : "Quick Notes", new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleString()].join("   |   ");
     header.fillText(meta, MARGIN, 210);
 
-    const noteWidth = Math.max(700, ...((note.drawing || []).map(stroke => stroke.pageWidth || 0)), ...((note.textBoxes || []).map(box => box.pageWidth || 0)));
-    const scale = CONTENT_W / noteWidth;
-    const bodyFont = Math.max(20, 14 * scale), lineHeight = bodyFont * 1.65;
-    let logicalBottom = 0;
-    const textMeasure = page(0); textMeasure.font = `${bodyFont}px Arial`;
-    const bodyLines = wrapText(textMeasure, note.body || "", CONTENT_W);
-    bodyLines.forEach((line, i) => {
-      const logicalY = i * lineHeight, pos = pagePosition(logicalY);
-      const ctx = page(pos.page); ctx.fillStyle = "#111827"; ctx.font = `${bodyFont}px Arial`; ctx.textBaseline = "top";
-      ctx.fillText(line, MARGIN, pos.y);
-      logicalBottom = Math.max(logicalBottom, logicalY + lineHeight);
+    // Lay everything out in the editor's own pixel space first (14px monospace, 25.2px line boxes, tabs at
+    // 8-character stops, wrapping at the editor's locked page width), then scale text and ink by ONE shared
+    // factor so pen strokes land on the same characters they were drawn over.
+    const fontFamily = noteFontFamily();
+    const measure = document.createElement("canvas").getContext("2d");
+    measure.font = `${NOTE_FONT_SIZE}px ${fontFamily}`;
+    const strokes = note.drawing || [], boxes = note.textBoxes || [];
+    const longestBodyLine = String(note.body || "").replace(/\r/g, "").split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(expandTabs(line)).width), 0);
+    const anchoredWidth = Math.max(0, ...strokes.map(stroke => stroke.pageWidth || 0), ...boxes.map(box => box.pageWidth || 0));
+    const pageWidth = anchoredWidth || Math.max(700, Math.ceil(longestBodyLine) + 8);
+    const bodyLines = wrapText(measure, note.body || "", pageWidth);
+    let usedWidth = bodyLines.reduce((longest, line) => Math.max(longest, measure.measureText(line).width), 0);
+    const boxLayouts = boxes.map(box => {
+      const longest = String(box.text || "").split("\n").reduce((max, line) => Math.max(max, measure.measureText(expandTabs(line)).width), 0);
+      // The editor grows a box frame to fit its longest line (capped only by the paper's right edge).
+      const frameWidth = Math.ceil(Math.max(box.width, longest + 12));
+      usedWidth = Math.max(usedWidth, box.x + frameWidth);
+      return { box, lines: wrapText(measure, box.text, frameWidth - 2) };
     });
-    for (const box of note.textBoxes || []) {
-      const font = Math.max(20, 14 * scale), boxWidth = Math.max(80, box.width * scale);
-      const ctx = page(pagePosition(box.y * scale).page); ctx.font = `${font}px Arial`;
-      const lines = wrapText(ctx, box.text, boxWidth);
-      lines.forEach((line, i) => {
-        const y = box.y * scale + i * font * 1.55, pos = pagePosition(y), target = page(pos.page);
-        target.fillStyle = "#111827"; target.font = `${font}px Arial`; target.textBaseline = "top";
-        target.fillText(line, MARGIN + box.x * scale, pos.y);
-        logicalBottom = Math.max(logicalBottom, y + font * 1.55);
-      });
-    }
+    for (const stroke of strokes) for (const point of stroke.points || []) usedWidth = Math.max(usedWidth, point[0] + (stroke.width || 0) / 2);
+    // Fit the part of the page that is actually used, so a short table stays legible on A4.
+    const scale = Math.min(MAX_SCALE, CONTENT_W / Math.max(360, usedWidth + 24));
+    const lineHeight = NOTE_LINE_PX * scale, noteFont = `${NOTE_FONT_SIZE * scale}px ${fontFamily}`;
+    let logicalBottom = 0;
+    const drawLine = (text, x, logicalY) => {
+      const pos = pagePosition(logicalY), ctx = page(pos.page);
+      ctx.fillStyle = "#111827"; ctx.font = noteFont; ctx.textBaseline = "middle";
+      ctx.fillText(text, x, pos.y + lineHeight / 2);
+      logicalBottom = Math.max(logicalBottom, logicalY + lineHeight);
+    };
+    bodyLines.forEach((line, i) => drawLine(line, MARGIN, i * lineHeight));
+    // Positioned text boxes render inside a 1px frame border in the editor.
+    for (const { box, lines } of boxLayouts) lines.forEach((line, i) => drawLine(line, MARGIN + (box.x + 1) * scale, (box.y + 1) * scale + i * lineHeight));
     for (const stroke of note.drawing || []) {
       const points = stroke.points || [];
       if (!points.length) continue;
@@ -147,5 +183,5 @@
     return { pdf, pageCount: canvases.length, filename: `organized-me-${cleanName(note.title)}.pdf` };
   }
   async function download(note) { const result = await build(note); await result.pdf.save(result.filename, { returnPromise: true }); return result; }
-  window.notePdf = { build, download, cleanName, inkColor, wrapText, pagePosition, splitLineAcrossPages };
+  window.notePdf = { build, download, cleanName, inkColor, wrapText, expandTabs, pagePosition, splitLineAcrossPages };
 })();
