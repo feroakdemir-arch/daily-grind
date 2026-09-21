@@ -38,3 +38,18 @@ test("moving a task links to its new list and rendering never mutates persisted 
   assert.equal(items[0].listId, "new"); assert.equal(items[0].task, t); assert.equal(JSON.stringify(lists), before);
   assert.equal(forDate(JSON.parse(before)).length, 1);
 });
+
+test('deadline chips always show the exact entered date', () => {
+  const chipSrc = html.slice(html.indexOf('function deadlineChip('), html.indexOf('function fmtDoneDate('));
+  const ctx = {}; vm.runInNewContext(chipSrc + '; this.deadlineChip = deadlineChip;', ctx);
+  const chip = d => ctx.deadlineChip(d).text;
+  const today = new Date(); const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const md = d => `${d.getMonth() + 1}/${d.getDate()}`;
+  const plus = n => { const d = new Date(today); d.setDate(d.getDate() + n); return d; };
+  assert.equal(chip(ymd(plus(0))), `📅 Today ${md(plus(0))}`);
+  assert.equal(chip(ymd(plus(1)) + 'T09:00'), `📅 Tmrw ${md(plus(1))} 9a`);
+  assert.equal(chip(ymd(plus(3))), `📅 ${plus(3).toLocaleDateString('en-US', { weekday: 'short' })} ${md(plus(3))}`);
+  assert.equal(chip(ymd(plus(30))), `📅 ${md(plus(30))}`);
+  assert.match(chip(ymd(plus(-2))), new RegExp(`late · ${md(plus(-2))}$`));
+  assert.equal(chip('2027-01-05'), '📅 1/5/27');
+});

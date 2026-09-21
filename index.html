@@ -1480,16 +1480,17 @@ function deadlineChip(deadline) {
   const dueStart = new Date(due); dueStart.setHours(0,0,0,0);
   const diffDays = Math.round((dueStart - todayStart) / dayMs);
   const fmtTime = (d) => { const h = d.getHours(); const m = d.getMinutes(); const ampm = h >= 12 ? "p" : "a"; const hr = h > 12 ? h-12 : h || 12; return `${hr}${m ? ":"+String(m).padStart(2,"0") : ""}${ampm}`; };
+  // Always show the exact date that was entered (device-local, year only when it is not this year);
+  // Today / Tmrw / weekday stay as a prefix so the relative cue is not lost.
+  const exact = `${due.getMonth()+1}/${due.getDate()}${due.getFullYear() !== now.getFullYear() ? "/" + String(due.getFullYear()).slice(-2) : ""}${hasTime ? " " + fmtTime(due) : ""}`;
   if (due < now) {
     const daysLate = Math.max(1, Math.ceil((now - due) / dayMs));
-    return { text: `⚠ ${daysLate}d late`, color: "#ff4757", bg: "#ff475722", border: "#ff475755" };
+    return { text: `⚠ ${daysLate}d late · ${exact}`, color: "#ff4757", bg: "#ff475722", border: "#ff475755" };
   }
-  if (diffDays === 0) {
-    return { text: hasTime ? `📅 Today ${fmtTime(due)}` : "📅 Today", color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
-  }
-  if (diffDays === 1) return { text: hasTime ? `📅 Tmrw ${fmtTime(due)}` : "📅 Tmrw", color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
-  if (diffDays < 7) return { text: `📅 ${due.toLocaleDateString("en-US", { weekday: "short" })}${hasTime ? " " + fmtTime(due) : ""}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
-  return { text: `📅 ${due.getMonth()+1}/${due.getDate()}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
+  if (diffDays === 0) return { text: `📅 Today ${exact}`, color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
+  if (diffDays === 1) return { text: `📅 Tmrw ${exact}`, color: "#ffa502", bg: "#ffa50222", border: "#ffa50255" };
+  if (diffDays < 7) return { text: `📅 ${due.toLocaleDateString("en-US", { weekday: "short" })} ${exact}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
+  return { text: `📅 ${exact}`, color: "#8b8b9e", bg: "#2d2d3a", border: "#3d3d4a" };
 }
 
 function fmtDoneDate(d) {
