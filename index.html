@@ -2908,6 +2908,10 @@ function DailyGrind() {
   const [calWeekOffset, setCalWeekOffset] = useState(() => reminderWeekOffset(new URLSearchParams(location.search).get("date")));
   const [showCalSettings, setShowCalSettings] = useState(false);
   const [calEvents, setCalEvents] = useState([]);
+  // Deletes waiting on their safety copy: hidden right away, applied for real once the copy exists,
+  // shown again if it cannot be made.
+  const [calPendingDeletes, setCalPendingDeletes] = useState([]);
+  const visibleCalEvents = calPendingDeletes.reduce((events, pending) => pending.transform(events), calEvents);
   const [calEventsLoaded, setCalEventsLoaded] = useState(false);
   const [calLoadError, setCalLoadError] = useState(false);
   const [calLoadAttempt, setCalLoadAttempt] = useState(0);
@@ -4188,40 +4192,43 @@ function DailyGrind() {
   function editCalEvent(id, updates) {
     saveCalEvents((events) => events.map(e => e.id === id ? { ...e, ...updates } : e));
   }
-  async function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
-    if (!(await protectBeforeDestructive("before-calendar-delete"))) return false;
-    if (untilDate) {
-      const evt = calEventsRef.current.find(e => e.id === id);
-      if (!evt) return false;
-      // If truncating from the very first occurrence, that's equivalent to deleting the whole series.
-      if (untilDate <= evt.date) return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
-      return !!(await saveCalEvents((events) => events.map(e => e.id === id ? { ...e, untilDate } : e)));
-    }
-    if (exceptionDate) {
-      // Add exception date to skip this one instance
-      return !!(await saveCalEvents((events) => events.map(e => {
-        if (e.id === id) {
-          const exceptions = e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate];
-          return { ...e, exceptions };
-        }
-        return e;
-      })));
-    } else if (deleteAll) {
-      const evt = calEventsRef.current.find(e => e.id === id);
-      if (evt && evt.repeat) {
-        return !!(await saveCalEvents((events) => events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat))));
-      } else {
-        return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
+  // The same removal, as a pure function of the event list, for the instant preview and the real save.
+  function calDeleteTransform(id, deleteAll, exceptionDate, untilDate) {
+    return (events) => {
+      const evt = events.find(e => e.id === id);
+      if (untilDate) {
+        if (!evt) return events;
+        // If truncating from the very first occurrence, that's equivalent to deleting the whole series.
+        if (untilDate <= evt.date) return events.filter(e => e.id !== id);
+        return events.map(e => e.id === id ? { ...e, untilDate } : e);
       }
-    } else {
-      return !!(await saveCalEvents((events) => events.filter(e => e.id !== id)));
-    }
+      if (exceptionDate) {
+        // Add exception date to skip this one instance
+        return events.map(e => e.id === id ? { ...e, exceptions: e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate] } : e);
+      }
+      if (deleteAll && evt && evt.repeat) {
+        return events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat));
+      }
+      return events.filter(e => e.id !== id);
+    };
+  }
+  // The event disappears immediately; the safety copy still happens before the delete is saved, and if
+  // it cannot be made (protectBeforeDestructive alerts) the event is shown again untouched.
+  async function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
+    const transform = calDeleteTransform(id, deleteAll, exceptionDate, untilDate);
+    const key = makeId("caldel");
+    const release = () => setCalPendingDeletes(list => list.filter(pending => pending.key !== key));
+    setCalPendingDeletes(list => [...list, { key, transform }]);
+    if (!(await protectBeforeDestructive("before-calendar-delete"))) { release(); return false; }
+    const saving = saveCalEvents(transform);
+    release();
+    return !!(await saving);
   }
   function getEventsForDate(dateStr) {
     const d = new Date(dateStr + "T12:00");
     const dayOfWeek = d.getDay(); // 0=Sun, 1=Mon, etc.
-    const directEvents = calEvents.filter(e => e.date === dateStr && !(e.exceptions && e.exceptions.includes(dateStr)));
-    const repeatingEvents = calEvents.filter(e => {
+    const directEvents = visibleCalEvents.filter(e => e.date === dateStr && !(e.exceptions && e.exceptions.includes(dateStr)));
+    const repeatingEvents = visibleCalEvents.filter(e => {
       if (!e.repeat) return false;
       if (e.exceptions && e.exceptions.includes(dateStr)) return false;
       if (e.untilDate && dateStr >= e.untilDate) return false; // series truncated at this date
@@ -5121,9 +5128,8 @@ function DailyGrind() {
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
                           else if (confirm(`Delete "${evt.title || "this event"}"? A safety copy will be kept first.`)) {
-                            deleteCalEvent(evt.id).then((deleted) => {
-                              if (deleted) { setCalSelectedEvent(null); setCalDeleteConfirm(false); }
-                            });
+                            setCalSelectedEvent(null); setCalDeleteConfirm(false);
+                            deleteCalEvent(evt.id);
                           }
                         }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\uD83D\uDDD1"}</button>
                         <button onClick={() => { setCalSelectedEvent(null); setCalDeleteConfirm(false); }}
@@ -5151,15 +5157,15 @@ function DailyGrind() {
                         {calDeleteConfirm && (
                           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #2d2d3a", display: "flex", flexDirection: "column", gap: 8 }}>
                             <div style={{ fontSize: 13, fontWeight: 700, color: "#ff4757", marginBottom: 2 }}>Delete recurring event</div>
-                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, false, evt._displayDate)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
+                            <button onClick={() => { const realId = evt._origId || evt.id; setCalSelectedEvent(null); setCalDeleteConfirm(false); deleteCalEvent(realId, false, evt._displayDate); }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #2d2d3a", background: "#12122a", cursor: "pointer", fontSize: 13, color: "#e2e2ea", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This event
                             </button>
-                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, false, undefined, evt._displayDate)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
+                            <button onClick={() => { const realId = evt._origId || evt.id; setCalSelectedEvent(null); setCalDeleteConfirm(false); deleteCalEvent(realId, false, undefined, evt._displayDate); }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #fbbf2440", background: "#fbbf2414", cursor: "pointer", fontSize: 13, color: "#fbbf24", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} This and following events
                             </button>
-                            <button onClick={async () => { const realId = evt._origId || evt.id; if (await deleteCalEvent(realId, true)) { setCalSelectedEvent(null); setCalDeleteConfirm(false); } }}
+                            <button onClick={() => { const realId = evt._origId || evt.id; setCalSelectedEvent(null); setCalDeleteConfirm(false); deleteCalEvent(realId, true); }}
                               style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #ff475740", background: "#ff475714", cursor: "pointer", fontSize: 13, color: "#ff4757", textAlign: "left" }}>
                               {"\uD83D\uDDD1"} All events
                             </button>
