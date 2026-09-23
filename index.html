@@ -1499,6 +1499,37 @@ function fmtDoneDate(d) {
   catch (e) { return ""; }
 }
 
+// Calendar event colors: one clearly different hue per swatch, ordered around the color wheel.
+const CAL_COLORS = [
+  { name: "Red", hex: "#e53935" }, { name: "Coral", hex: "#ff7a6b" }, { name: "Orange", hex: "#fb8c00" },
+  { name: "Yellow", hex: "#fdd835" }, { name: "Green", hex: "#2e9d58" }, { name: "Teal", hex: "#00a39a" },
+  { name: "Blue", hex: "#1e88e5" }, { name: "Indigo", hex: "#5c6bc0" }, { name: "Purple", hex: "#7c3aed" },
+  { name: "Pink", hex: "#e84393" }, { name: "Brown", hex: "#8d6e63" }, { name: "Graphite", hex: "#636e72" },
+];
+const CAL_DEFAULT_COLOR = "#1e88e5";
+// Dark text on light backgrounds (yellow, coral), white everywhere else.
+function calTextColor(hex) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex || "");
+  if (!match) return "#fff";
+  const [r, g, b] = match[1].match(/.{2}/g).map(part => parseInt(part, 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.6 ? "#1a1a2e" : "#fff";
+}
+function CalColorPicker({ value, onChange }) {
+  const current = (value || "").toLowerCase();
+  // An event saved with a retired color keeps it visible and selected until another is picked.
+  const options = CAL_COLORS.some(c => c.hex === current) || !current ? CAL_COLORS : [...CAL_COLORS, { name: "Current color", hex: current }];
+  return <div role="radiogroup" aria-label="Event color" style={{ display: "grid", gridTemplateColumns: "repeat(6, 30px)", gap: 10, marginBottom: 16 }}>
+    {options.map(c => {
+      const selected = current === c.hex;
+      return <button key={c.hex} type="button" role="radio" aria-checked={selected} aria-label={c.name} title={c.name} onClick={() => onChange(c.hex)}
+        style={{ width: 30, height: 30, borderRadius: 15, background: c.hex, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+          border: "2px solid transparent", boxShadow: selected ? "0 0 0 2px #1a1a2e, 0 0 0 4px #fff" : "none", color: calTextColor(c.hex), fontSize: 13, fontWeight: 900, fontFamily: "inherit" }}>
+        {selected ? "\u2713" : ""}
+      </button>;
+    })}
+  </div>;
+}
+
 // Side-by-side layout for one day column (Google Calendar style). items: [{ key, start, end }] in minutes.
 // Events that overlap, directly or through a chain, form a cluster; each event takes the first sub-column
 // that is free at its start, and every event in the cluster gets the cluster's column count.
@@ -2777,7 +2808,7 @@ function DailyGrind() {
   const [calEventTitle, setCalEventTitle] = useState("");
   const [calEventStart, setCalEventStart] = useState("09:00");
   const [calEventEnd, setCalEventEnd] = useState("10:00");
-  const [calEventColor, setCalEventColor] = useState("#4fc3f7");
+  const [calEventColor, setCalEventColor] = useState(CAL_DEFAULT_COLOR);
   const [calEventRepeat, setCalEventRepeat] = useState("none");
   const [calEventRepeatDays, setCalEventRepeatDays] = useState([]);
   const [calSelectedEvent, setCalSelectedEvent] = useState(null);
@@ -4038,7 +4069,7 @@ function DailyGrind() {
     return window.storage.set("dg-cal-events", serialized).catch((error) => { console.error(error); return null; });
   }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
-    const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || "#4fc3f7" };
+    const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || CAL_DEFAULT_COLOR };
     if (repeat && repeat !== "none") evt.repeat = repeat;
     if (repeat === "custom" && repeatDays && repeatDays.length) evt.repeatDays = [...repeatDays].sort((a,b) => a-b);
     if (desc) evt.desc = desc;
@@ -4891,7 +4922,7 @@ function DailyGrind() {
                         <div key={evt.id} data-calendar-event={evt.id} style={{
                           position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
-                          fontSize: 9, color: "#fff", fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
+                          fontSize: 9, color: calTextColor(evt.color || "#4fc3f7"), fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
                           borderLeft: isRepeating ? "3px solid #ffffff88" : "none", opacity: isDraggingThis ? 0.85 : 1,
                           transition: isDraggingThis ? "none" : "top 0.15s, height 0.15s", userSelect: "none",
@@ -5067,11 +5098,7 @@ function DailyGrind() {
                       </div>
                     )}
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
-                    <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-                      {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
-                        <button key={c} onClick={() => setCalEventColor(c)} style={{ width: 28, height: 28, borderRadius: 14, background: c, border: calEventColor === c ? "3px solid #fff" : "2px solid transparent", cursor: "pointer" }} />
-                      ))}
-                    </div>
+                    <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
@@ -5119,11 +5146,7 @@ function DailyGrind() {
                       </div>
                     )}
                     <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
-                    <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-                      {["#4fc3f7","#4cd137","#7c3aed","#ffd43b","#e84118","#ff6b81","#00d9ff","#636e72"].map(c => (
-                        <button key={c} onClick={() => setCalEventColor(c)} style={{ width: 28, height: 28, borderRadius: 14, background: c, border: calEventColor === c ? "3px solid #fff" : "2px solid transparent", cursor: "pointer" }} />
-                      ))}
-                    </div>
+                    <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
                       <button onClick={() => {
