@@ -3007,6 +3007,7 @@ function DailyGrind() {
   const calHourHRef = useRef(calHourH);
   calHourHRef.current = calHourH;
   const calScrollRef = useRef(null);
+  const [calDueExpanded, setCalDueExpanded] = useState(false);
   // Keeps the time under the pointer (or the middle of the view) in place while the hour height changes.
   const zoomCalendar = (factor, anchorClientY) => {
     const current = calHourHRef.current;
@@ -4906,15 +4907,15 @@ function DailyGrind() {
           return (
             <div style={{ display: "flex", flexDirection: "column", height: "calc(100dvh - 68px)", minHeight: 360 }}>
               {/* Header */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <button onClick={() => setCalWeekOffset(calWeekOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25C0"}</button>
-                 <div style={{ textAlign: "center" }}>
-                   <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>{monthLabel}</div>
-                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 1.2, padding: "4px 8px" }}>TODAY</button>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexShrink: 0 }}>
+                <button onClick={() => setCalWeekOffset(calWeekOffset - 1)} aria-label="Previous week" style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "2px 12px" }}>{"\u25C0"}</button>
+                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+                   <div className="display" style={{ fontSize: 15, color: "#f4f4f8", whiteSpace: "nowrap" }}>{monthLabel}</div>
+                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "#7c3aed22", border: "1px solid #7c3aed55", borderRadius: 999, color: "#c4b5fd", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit" }}>Today</button>
                    <SaveIndicator info={saveInfo} onRetry={retrySaves} />
                  </div>
                 <div style={{ display: "flex", alignItems: "center" }}>
-                  <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25B6"}</button>
+                  <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} aria-label="Next week" style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "2px 12px" }}>{"\u25B6"}</button>
                   <div role="group" aria-label="Calendar zoom" style={{ display: "flex", alignItems: "center", gap: 2, marginRight: 4, border: "1px solid #2d2d3a", borderRadius: 8, padding: 2 }}>
                     <button type="button" onClick={() => zoomCalendar(0.8)} disabled={calHourH <= 40} aria-label="Zoom out" title="Zoom out (Ctrl + scroll on the grid)" style={{ background: "none", border: "none", color: calHourH <= 40 ? "#44445a" : "#b5b5c9", fontSize: 18, lineHeight: 1, cursor: "pointer", width: 28, height: 26, borderRadius: 6 }}>{"\u2212"}</button>
                     <button type="button" onClick={() => zoomCalendar(1.25)} disabled={calHourH >= 160} aria-label="Zoom in" title="Zoom in (Ctrl + scroll on the grid)" style={{ background: "none", border: "none", color: calHourH >= 160 ? "#44445a" : "#b5b5c9", fontSize: 18, lineHeight: 1, cursor: "pointer", width: 28, height: 26, borderRadius: 6 }}>+</button>
@@ -4924,43 +4925,44 @@ function DailyGrind() {
               </div>
 
               {/* Day headers */}
-              <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: 0, marginBottom: 2 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 2, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
                 <div />
                 {calDates.map((d, i) => {
                   const ds = localDateStr(d);
                   const isToday = ds === todayStr;
                   return (
-                    <div key={i} style={{ textAlign: "center", padding: "4px 0" }}>
-                      <div style={{ fontSize: 10.5, color: isToday ? "#7c3aed" : "#555566", fontWeight: 700, letterSpacing: 1 }}>{dayNames[i]}</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: isToday ? "#fff" : "#8b8b9e", background: isToday ? "#7c3aed" : "transparent", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", margin: "2px auto 0" }}>{d.getDate()}</div>
+                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "3px 0" }}>
+                      <span style={{ fontSize: 12, color: isToday ? "#c4b5fd" : "#77778a", fontWeight: 700 }}>{dayNames[i]}</span>
+                      <span className="num" style={{ fontSize: 14, fontWeight: 700, color: isToday ? "#fff" : "#b5b5c9", background: isToday ? "#7c3aed" : "transparent", borderRadius: 999, minWidth: 26, height: 24, padding: "0 5px", display: "flex", alignItems: "center", justifyContent: "center" }}>{d.getDate()}</span>
                     </div>
                   );
                 })}
               </div>
 
               {weekDeadlines.some(items => items.length > 0) && (
-                <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 8, borderBottom: "1px solid #ef444433", paddingBottom: 6 }}>
-                  <div style={{ fontSize: 10, color: "#fca5a5", fontWeight: 800, paddingTop: 8 }}>DUE</div>
+                <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 4, borderBottom: "1px solid #ef444426", paddingBottom: 4, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
+                  <div style={{ fontSize: 10, color: "#fca5a5", fontWeight: 800, paddingTop: 5, letterSpacing: 0.6 }}>DUE</div>
                   {weekDeadlines.map((deadlines, di) => (
-                    <div key={localDateStr(calDates[di])} data-deadline-date={localDateStr(calDates[di])} style={{ minWidth: 0, maxHeight: 128, overflowY: "auto", padding: "0 2px", display: "flex", flexDirection: "column", gap: 4 }}>
-                      {deadlines.map(({ listId, task, time }) => (
+                    <div key={localDateStr(calDates[di])} data-deadline-date={localDateStr(calDates[di])} style={{ minWidth: 0, maxHeight: calDueExpanded ? 160 : undefined, overflowY: calDueExpanded ? "auto" : "visible", padding: "0 2px", display: "flex", flexDirection: "column", gap: 3 }}>
+                      {(calDueExpanded ? deadlines : deadlines.slice(0, 2)).map(({ listId, task, time }) => (
                         <button key={`${listId}:${task.id}`} type="button" data-task-deadline={task.id}
                           aria-label={`Task deadline: ${task.name}, ${localDateStr(calDates[di])}${time ? ` at ${time}` : ""}`}
                           title={`${task.name} — ${time ? `Due at ${time}` : "Due this day"}. Click to edit task.`}
                           onClick={() => openEditTask(listId, task)}
-                          style={{ display: "block", flexShrink: 0, width: "100%", minWidth: 0, minHeight: 40, background: "#dc2626", color: "#fff", border: "1px solid #f87171", borderRadius: 4, padding: "5px 4px", textAlign: "left", fontFamily: "inherit", cursor: "pointer", lineHeight: 1.35 }}>
-                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.name}</span>
-                          <span style={{ display: "block", fontSize: 10, opacity: 0.9 }}>{time || "All day"}</span>
+                          style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, width: "100%", minWidth: 0, height: 24, background: "#dc262626", color: "#fecaca", border: "1px solid #ef444440", borderLeft: "3px solid #f87171", borderRadius: 4, padding: "0 6px", textAlign: "left", fontFamily: "inherit", cursor: "pointer" }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, fontWeight: 700, color: "#fee2e2", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.name}</span>
+                          <span className="num" style={{ fontSize: 10.5, opacity: 0.85, flexShrink: 0 }}>{time ? (() => { const [h, m] = time.split(":").map(Number); return `${h % 12 || 12}${m ? ":" + String(m).padStart(2, "0") : ""}${h < 12 ? "a" : "p"}`; })() : "all day"}</span>
                         </button>
                       ))}
+                      {deadlines.length > 2 && <button type="button" onClick={() => setCalDueExpanded(!calDueExpanded)} style={{ background: "none", border: "none", color: "#fca5a5", fontSize: 11, fontWeight: 600, cursor: "pointer", padding: "0 2px", textAlign: "left", fontFamily: "inherit" }}>{calDueExpanded ? "Show less" : `+${deadlines.length - 2} more`}</button>}
                     </div>
                   ))}
                 </div>
               )}
 
               {/* Time grid */}
-              <div ref={setCalScroller} style={{ overflowX: "auto", overflowY: "auto", flex: "1 1 auto", minHeight: 200, background: "#1a1a2e", border: "none", borderRadius: 0 }}>
-                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
+              <div ref={setCalScroller} style={{ overflowX: "hidden", overflowY: "auto", scrollbarGutter: "stable", flex: "1 1 auto", minHeight: 200, background: "#1a1a2e", border: "none", borderRadius: 0 }}>
+                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
                     if (!calGridRef.current) return;
                     const rect = calGridRef.current.getBoundingClientRect();
