@@ -117,8 +117,9 @@
     let usedWidth = bodyLines.reduce((longest, line) => Math.max(longest, measure.measureText(line).width), 0);
     const boxLayouts = boxes.map(box => {
       const longest = String(box.text || "").split("\n").reduce((max, line) => Math.max(max, measure.measureText(expandTabs(line)).width), 0);
-      // The editor grows a box frame to fit its longest line (capped only by the paper's right edge).
-      const frameWidth = Math.ceil(Math.max(box.width, longest + 12));
+      // The editor grows a box frame to fit its longest line (capped only by the paper's right edge),
+      // unless its width was set by hand; then the text wraps at that width.
+      const frameWidth = box.sized ? box.width : Math.ceil(Math.max(box.width, longest + 12));
       usedWidth = Math.max(usedWidth, box.x + frameWidth);
       return { box, lines: wrapText(measure, box.text, frameWidth - 2) };
     });

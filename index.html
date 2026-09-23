@@ -1206,7 +1206,9 @@ function normalizeNoteTextBoxes(boxes) {
         !Number.isFinite(box.x) || box.x < 0 || box.x > 10000 || !Number.isFinite(box.y) || box.y < 0 || box.y > 200000 ||
         !Number.isFinite(box.width) || box.width < 40 || box.width > 10000 || !Number.isFinite(box.pageWidth) || box.pageWidth <= 0 || box.pageWidth > 10000) throw new Error("Saved text box data is invalid");
     ids.add(box.id);
-    return { id: box.id, text: box.text, x: box.x, y: box.y, width: box.width, pageWidth: box.pageWidth };
+    if (box.sized !== undefined && typeof box.sized !== "boolean") throw new Error("Saved text box data is invalid");
+    // sized: the width was set by hand, so text wraps at it instead of the box growing to fit.
+    return { id: box.id, text: box.text, x: box.x, y: box.y, width: box.width, pageWidth: box.pageWidth, ...(box.sized ? { sized: true } : {}) };
   });
 }
 
@@ -1790,12 +1792,21 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   };
   // Moving a text box: the position follows the pointer locally and is saved once on release.
   const [boxDrag, setBoxDrag] = useState(null);
+  // Resizing works the same way: the width follows the pointer and is saved once on release.
+  const [boxResize, setBoxResize] = useState(null);
   const clampBoxPosition = (x, y) => {
     const paperWidth = surfaceRef.current.getBoundingClientRect().width;
     return [Math.round(Math.max(0, Math.min(Math.max(0, paperWidth - 40), x))), Math.round(Math.max(0, Math.min(200000, y)))];
   };
   // Always start from the latest saved box: a render-time copy can be stale between rapid events.
   const latestBox = box => textBoxesRef.current.find(item => item.id === box.id) || box;
+  const resizeBoxTo = (box, width, sized = true) => {
+    const { sized: _previous, ...rest } = latestBox(box);
+    const updated = { ...rest, width, ...(sized ? { sized: true } : {}) };
+    if (textBoxesRef.current.some(item => item.id === box.id)) return publishText(textBoxesRef.current.map(item => item.id === box.id ? updated : item));
+    setPendingBox(current => current?.id === box.id ? updated : current);
+    return true;
+  };
   const moveBoxTo = (box, x, y) => {
     const updated = { ...latestBox(box), x, y };
     if (textBoxesRef.current.some(item => item.id === box.id)) return publishText(textBoxesRef.current.map(item => item.id === box.id ? updated : item));
@@ -1863,7 +1874,9 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
       const box = [...textBoxes, ...(pendingBox ? [pendingBox] : [])].find(item => item.id === input.dataset.noteTextbox);
       const frame = input.closest("[data-note-textbox-frame]");
-      if (box && frame) {
+      if (box && frame && boxResize?.id === box.id) frame.style.width = `${boxResize.width}px`;
+      else if (box && frame && box.sized) frame.style.width = `${box.width}px`;
+      else if (box && frame) {
         measure.font = getComputedStyle(input).font;
         const longestLine = input.value.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line.replace(/\t/g, "        ")).width), 0);
         const maxWidth = Math.max(box.width, paperWidth - box.x);
@@ -1876,7 +1889,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       height = Math.max(height, Number(input.dataset.boxY) + boxHeight + extraSpace);
     }
     setPaperHeight(height);
-  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width]);
+  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize]);
   const pointAt = event => {
     const rect = event.currentTarget.getBoundingClientRect();
     return [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
@@ -1922,7 +1935,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
         <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: "#b5b5c9" }}>Ink <input aria-label="Pen color" type="color" value={color} onChange={event => setColor(event.target.value)} style={{ width: 30, height: 28, border: 0, padding: 0, background: "transparent" }} /></label>
         <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
       </>}
-      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag the \u2725 handle to move this text" : "Click any blank spot to type"}</span>
+      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag \u2725 to move, the right edge to resize" : "Click any blank spot to type"}</span>
     </div>, toolbarHost)}
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
     <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
@@ -1972,6 +1985,39 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
           }}
           style={{ position: "absolute", left: -10, top: -16, width: 20, height: 20, padding: 0, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#c4b5fd", cursor: boxDrag ? "grabbing" : "grab", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v20M2 12h20M9 5l3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3M19 9l3 3-3 3" /></svg>
+        </button>}
+        {activeTextId === box.id && mode === "text" && <button type="button" data-note-textbox-resize={box.id} aria-label="Resize text box" title="Drag to resize (double-click to fit text; arrow keys adjust)"
+          onMouseDown={event => event.preventDefault()}
+          onPointerDown={event => {
+            if (event.button !== 0 || boxResize || boxDrag) return;
+            event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
+            const startWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width);
+            setBoxResize({ id: box.id, pointerId: event.pointerId, startX: event.clientX, originWidth: startWidth, width: startWidth });
+          }}
+          onPointerMove={event => {
+            if (!boxResize || boxResize.pointerId !== event.pointerId) return;
+            const maxWidth = Math.max(60, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x);
+            const width = Math.round(Math.max(60, Math.min(maxWidth, boxResize.originWidth + event.clientX - boxResize.startX)));
+            if (width !== boxResize.width) setBoxResize({ ...boxResize, width });
+          }}
+          onPointerUp={event => {
+            if (!boxResize || boxResize.pointerId !== event.pointerId) return;
+            const resize = boxResize; setBoxResize(null);
+            if (resize.width !== resize.originWidth) resizeBoxTo(box, resize.width);
+          }}
+          onPointerCancel={() => setBoxResize(null)}
+          onDoubleClick={() => resizeBoxTo(box, Math.max(100, Math.min(280, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x)), false)}
+          onKeyDown={event => {
+            const step = event.shiftKey ? 40 : 8;
+            const delta = { ArrowLeft: -step, ArrowRight: step }[event.key];
+            if (!delta) return;
+            event.preventDefault();
+            const frameWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width);
+            const maxWidth = Math.max(60, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x);
+            resizeBoxTo(box, Math.max(60, Math.min(maxWidth, frameWidth + delta)));
+          }}
+          style={{ position: "absolute", right: -7, top: "50%", transform: "translateY(-50%)", width: 12, height: 28, padding: 0, border: "1px solid #6d5bb0", borderRadius: 4, background: "#202033", cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+          <span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} /><span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} />
         </button>}
         {activeTextId === box.id && mode === "text" && <button type="button" disabled={removingText} aria-label="Remove text box" title="Remove text box" onMouseDown={event => event.preventDefault()} onClick={async () => {
           if (removingText) return;

@@ -215,3 +215,11 @@ test('the paper keeps a viewport of blank space below the lowest content', () =>
   assert.equal(context.notePaperHeight(100, drawing, 800), 2000);
   assert.equal(context.notePaperHeight(100, [], 0), 360);
 });
+
+test('a hand-sized text box keeps its width flag; automatic boxes stay unflagged', () => {
+  const base = { id: 'tb', text: 'T\nF', x: 10, y: 20, width: 90, pageWidth: 900 };
+  assert.equal(context.normalizeNoteTextBoxes([{ ...base, sized: true }])[0].sized, true);
+  assert.equal('sized' in context.normalizeNoteTextBoxes([base])[0], false);
+  assert.equal('sized' in context.normalizeNoteTextBoxes([{ ...base, sized: false }])[0], false);
+  assert.throws(() => context.normalizeNoteTextBoxes([{ ...base, sized: 'yes' }]));
+});
