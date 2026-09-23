@@ -16,11 +16,26 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Organized Me" />
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=classic-g" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html { background: #0b0b14; }
-    body { background: #0b0b14; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
+    body { background: #0b0b14; overflow-x: hidden; -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
     ::selection { background: #7c3aed66; color: #fff; }
+    /* Type roles. Interface: Archivo. Scoreboard display: Archivo expanded. Numbers: IBM Plex Mono, tabular. */
+    .display { font-family: 'Archivo', system-ui, sans-serif; font-stretch: 125%; font-weight: 800; letter-spacing: 0.01em; }
+    .num { font-family: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+    .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #9a9aae; }
+    button, input, textarea, select { font-feature-settings: "tnum" 1; }
+    :focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }
+    input:focus-visible, textarea:focus-visible, select:focus-visible, [contenteditable]:focus-visible { outline: none; } /* fields have their own glow */
+    .quiet-danger { background: transparent !important; border-color: transparent !important; color: #5c5c70 !important; }
+    .quiet-danger:hover, .quiet-danger:focus-visible { background: #ff47571a !important; border-color: #ff475744 !important; color: #ff8793 !important; }
+    .note-page-button:hover .quiet-danger, .notes-section-row:hover .quiet-danger { color: #8a8aa0 !important; }
+    .note-page-button:hover .quiet-danger:hover, .notes-section-row:hover .quiet-danger:hover { color: #ff8793 !important; }
+    button:focus:not(:focus-visible) { outline: none; }
     /* dialed-in scrollbar */
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-track { background: #0b0b14; }
@@ -1692,7 +1707,7 @@ function TodaysFinishedTasks({ taskLists, resetHour }) {
     {finished.length ? <div style={{ maxHeight: 360, overflowY: "auto" }}>
       {finished.map(task => <div key={task.id} data-finished-task={task.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: "1px solid #2d2d3a" }}>
         <span aria-hidden="true" style={{ color: "#4cd137", fontWeight: 900 }}>✓</span>
-        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 9, color: "#8b8b9e", marginTop: 4 }}>{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 10.5, color: "#8b8b9e", marginTop: 4 }}>{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
         <span style={{ fontSize: 10, color: "#a78bfa", fontWeight: 800 }}>+{task.points}</span>
       </div>)}
     </div> : <p style={{ fontSize: 12, color: "#8b8b9e", padding: "12px 0" }}>Nothing finished today yet. Completed tasks will appear here.</p>}
@@ -1713,33 +1728,33 @@ function TaskWorkTimer({ task, onToggle }) {
 
   const elapsed = taskElapsedSeconds(task, now);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5, minHeight: 22 }}>
+    <div style={{ display: "flex", alignItems: "center", marginTop: 5, minHeight: 22 }}>
+      {/* One quiet control: play/stop plus the tracked time; it only lights up while running. */}
       <button
         onClick={onToggle}
         aria-label={`${running ? "Stop" : "Start"} timer for ${task.name}`}
         aria-pressed={running}
         title={running ? "Stop tracking time" : "Start tracking time"}
         style={{
-          background: running ? "#ff47571c" : "#00ff8714",
-          border: `1px solid ${running ? "#ff475766" : "#00ff874d"}`,
-          borderRadius: 6,
-          color: running ? "#ff6b78" : "#00ff87",
+          display: "inline-flex", alignItems: "center", gap: 6,
+          background: running ? "#00ff8714" : "transparent",
+          border: `1px solid ${running ? "#00ff8755" : "#2f2f44"}`,
+          borderRadius: 999,
+          color: running ? "#5ff0a6" : "#9a9aae",
           cursor: "pointer",
           fontFamily: "inherit",
-          fontSize: 9,
-          fontWeight: 900,
-          letterSpacing: 1,
-          padding: "4px 7px",
-          lineHeight: 1,
+          fontSize: 11.5,
+          fontWeight: 600,
+          padding: "3px 10px 3px 8px",
+          lineHeight: 1.2,
           flexShrink: 0,
         }}
       >
-        {running ? "■ STOP" : "▶ START"}
+        {running
+          ? <span aria-hidden="true" style={{ display: "inline-block", width: 7, height: 7, borderRadius: 2, background: "#5ff0a6", boxShadow: "0 0 8px #00ff87" }} />
+          : <span aria-hidden="true" style={{ fontSize: 9, color: "#a78bfa" }}>{"\u25B6"}</span>}
+        {elapsed > 0 || running ? <span className="num">{fmtTaskDuration(elapsed)}</span> : "Start timer"}
       </button>
-      <span style={{ color: running ? "#00ff87" : "#8b8b9e", fontSize: 10, fontWeight: 800, letterSpacing: 0.8, fontVariantNumeric: "tabular-nums" }}>
-        {running && <span aria-hidden="true" style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#00ff87", boxShadow: "0 0 8px #00ff87", marginRight: 6 }} />}
-        {fmtTaskDuration(elapsed)}
-      </span>
     </div>
   );
 }
@@ -1779,6 +1794,39 @@ function NoteScreenshot({ image, onRemove }) {
     {message && <p role="status" style={{ color: "#c4b5fd", fontSize: 11, marginTop: 8 }}>{message}</p>}
   </figure>;
 }
+
+// The last seven days as a W/L record, like a team's form guide. Past days come from saved history;
+// today shows W once the goal is hit, otherwise an open slot.
+function WeekRecord({ history, today, wonToday }) {
+  const base = new Date(today + "T12:00:00");
+  const days = [];
+  for (let offset = 6; offset >= 0; offset--) {
+    const date = new Date(base); date.setDate(date.getDate() - offset);
+    const key = localDateStr(date), entry = history ? history[key] : undefined;
+    const state = offset === 0 ? (wonToday ? "W" : "today") : !entry ? "none" : entry.won ? "W" : "L";
+    days.push({ key, state, day: date.toLocaleDateString("en-US", { weekday: "short" }) });
+  }
+  const wins = days.filter(d => d.state === "W").length, losses = days.filter(d => d.state === "L").length;
+  const look = {
+    W: { background: "#00ff8720", border: "1px solid #00ff8760", color: "#5ff0a6" },
+    L: { background: "#ff475716", border: "1px solid #ff475750", color: "#ff7b88" },
+    none: { background: "transparent", border: "1px solid #2d2d3a", color: "#4a4a5c" },
+    today: { background: "transparent", border: "1px dashed #a78bfa99", color: "#a78bfa" },
+  };
+  return <div aria-label={`Last 7 days: ${wins} won, ${losses} lost`} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, marginLeft: "auto" }}>
+    <div className="eyebrow" style={{ fontSize: 10 }}>Last 7 <span className="num" style={{ color: "#d6d6e0", marginLeft: 4 }}>{wins}–{losses}</span></div>
+    <div style={{ display: "flex", gap: 4 }}>
+      {days.map(d => <span key={d.key} title={`${d.day} ${d.key}: ${d.state === "W" ? "won" : d.state === "L" ? "lost" : d.state === "today" ? "in progress" : "no score"}`} className="num"
+        style={{ width: 24, height: 24, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, ...look[d.state] }}>
+        {d.state === "W" || d.state === "L" ? d.state : "\u00b7"}
+      </span>)}
+    </div>
+  </div>;
+}
+
+// Note paper font. Pen strokes are stored in pixels over this text and note-pdf.js mirrors it, so it must
+// never change with the interface font (and no webfont with one of these names may be loaded).
+const NOTE_FONT_STACK = "'SF Mono','Fira Code','JetBrains Mono',monospace";
 
 function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
   const [mode, setMode] = useState("text");
@@ -1954,7 +2002,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       ? { undo: current.undo.slice(0, -1), redo: [...current.redo, previous] }
       : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
   };
-  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0 }}>
+  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0, fontFamily: NOTE_FONT_STACK }}>
     {toolbarHost && ReactDOM.createPortal(<div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "transparent", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: 0 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
       <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>
@@ -2146,7 +2194,7 @@ function SaveIndicator({ info, onRetry }) {
     <button
       onClick={isError ? onRetry : undefined}
       title={isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
-      style={{ background: "none", border: "none", color, cursor: isError ? "pointer" : "default", fontFamily: "inherit", fontSize: 8, fontWeight: 800, letterSpacing: 1.2, marginTop: 5, padding: 0 }}
+      style={{ background: "none", border: "none", color, cursor: isError ? "pointer" : "default", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, marginTop: 5, padding: 0 }}
     >
       {label}
     </button>
@@ -2389,7 +2437,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
           style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900, letterSpacing: -2 }}
           title="Drag to reorder list"
         >{"\u22EE"}</span>
-        <span style={S.tlTitle}>{list.title}{list.resetsDaily && <span style={{ fontSize: 9, color: "#7c3aed", marginLeft: 6, fontWeight: 700 }}>{"\u21BB"} Daily</span>}</span>
+        <span style={S.tlTitle}>{list.title}{list.resetsDaily && <span style={{ fontSize: 10.5, color: "#7c3aed", marginLeft: 6, fontWeight: 700 }}>{"\u21BB"} Daily</span>}</span>
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
 
@@ -2422,7 +2470,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               <span style={{ ...S.tText, flex: "0 1 auto" }}>{t.name}</span>
-              {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 9, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
+              {(() => { const chip = deadlineChip(t.deadline); return chip && <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}>{chip.text}</span>; })()}
             </div>
             <TaskWorkTimer task={t} onToggle={() => onToggleTimer(list.id, t.id)} />
           </div>
@@ -2461,7 +2509,7 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
             if (textRef.current.trim()) writeTaskDraft(list.id, { id: draftIdRef.current, name: textRef.current, points: next });
           }}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
-        <button type="button" onClick={commitDraft} disabled={taskSaving || !text.trim()} style={{ background: taskSaving || !text.trim() ? "#2d2d3a" : "#7c3aed", color: taskSaving || !text.trim() ? "#666677" : "#fff", border: "none", borderRadius: 7, padding: "7px 10px", cursor: taskSaving ? "wait" : text.trim() ? "pointer" : "default", fontFamily: "inherit", fontSize: 9, fontWeight: 900, letterSpacing: 1, minWidth: 48 }}>{taskSaving ? "SAVING" : "ADD"}</button>
+        <button type="button" onClick={commitDraft} disabled={taskSaving || !text.trim()} style={{ background: taskSaving || !text.trim() ? "#2d2d3a" : "#7c3aed", color: taskSaving || !text.trim() ? "#666677" : "#fff", border: "none", borderRadius: 7, padding: "7px 10px", cursor: taskSaving ? "wait" : text.trim() ? "pointer" : "default", fontFamily: "inherit", fontSize: 10.5, fontWeight: 900, letterSpacing: 1, minWidth: 48 }}>{taskSaving ? "SAVING" : "ADD"}</button>
       </div>
 
       {completedAll.length > 0 && (
@@ -2479,8 +2527,8 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
               <div style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e", display: "block" }}>{c.name}</span>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 }}>
-                  {c.date && <span style={{ fontSize: 9, color: "#555566", letterSpacing: 0.5 }}>Completed: {fmtDoneDate(c.date)}</span>}
-                  {c.trackedSeconds > 0 && <span style={{ fontSize: 9, color: "#00b86b", letterSpacing: 0.5 }}>⏱ {fmtTaskDuration(c.trackedSeconds)} worked</span>}
+                  {c.date && <span style={{ fontSize: 10.5, color: "#555566", letterSpacing: 0.5 }}>Completed: {fmtDoneDate(c.date)}</span>}
+                  {c.trackedSeconds > 0 && <span style={{ fontSize: 10.5, color: "#00b86b", letterSpacing: 0.5 }}>⏱ {fmtTaskDuration(c.trackedSeconds)} worked</span>}
                 </div>
               </div>
               {c.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be", marginTop: 2 }}>+{c.points}</span>}
@@ -2651,7 +2699,13 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
             </div>
             <span style={S.cardPts}>+{item.points}</span>
           </div>
-          <div style={S.cardMeta}>Streak: +{streak}  |  Overall: {overall}%</div>
+          <div style={S.cardMeta}>
+            <span>Streak <span className="num" style={{ color: streak > 0 ? "#e6e6ee" : undefined }}>{streak}</span> {"\u00B7"} <span className="num">{overall}%</span> all-time</span>
+            <button onClick={(event) => { event.stopPropagation(); setShowMonthly(!showMonthly); setMonthOffset(0); }} aria-expanded={showMonthly}
+              style={{ marginLeft: "auto", background: "none", border: "none", color: showMonthly ? "#a78bfa" : "#77778a", fontSize: 12, cursor: "pointer", padding: "2px 0", fontFamily: "inherit" }}>
+              {showMonthly ? "Hide month \u25B4" : "Month \u25BE"}
+            </button>
+          </div>
         </div>
         {item.desc && <button onClick={() => setShowDesc(!showDesc)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 2px 4px 8px", marginTop: 2, transition: "transform 0.2s", transform: showDesc ? "rotate(180deg)" : "rotate(0deg)" }}>{"▾"}</button>}
       </div>
@@ -2680,8 +2734,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
                   fontSize: 11, fontWeight: 800, cursor: isF ? "default" : "pointer", fontFamily: "inherit",
                   display: "flex", alignItems: "center", justifyContent: "center", opacity: isF ? 0.2 : 1, transition: "all 0.15s", padding: 0,
                 }}>{lbl}</button>
-                <span style={{ fontSize: 8, color: isT ? "#7c3aed" : "#555566", fontWeight: isT ? 800 : 600 }}>{DAYS[i]}</span>
-                {isT && <span style={{ fontSize: 6, color: "#8b8b9e", letterSpacing: 1, marginTop: -2, fontWeight: 700 }}>TODAY</span>}
+                <span style={{ fontSize: 11, color: isT ? "#a78bfa" : "#66667a", fontWeight: isT ? 800 : 600 }} aria-label={isT ? "Today" : undefined}>{DAYS[i]}</span>
               </div>
             );
           })}
@@ -2693,7 +2746,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
           return (
           <div style={S.pickerWrap}>
             {isPast && (
-              <div style={{ textAlign: "center", fontSize: 9, color: "#c4b5fd", letterSpacing: 2, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ textAlign: "center", fontSize: 10.5, color: "#c4b5fd", letterSpacing: 1.2, fontWeight: 700, marginBottom: 6 }}>
                 EDITING {pickerDateObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
               </div>
             )}
@@ -2720,9 +2773,6 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
           {"📝"} {todayNote}
         </div>
       )}
-      <div style={{ marginTop: 8, textAlign: "center" }}>
-        <button onClick={() => { setShowMonthly(!showMonthly); setMonthOffset(0); }} style={{ background: "none", border: "none", color: showMonthly ? "#7c3aed" : "#555566", fontSize: 14, cursor: "pointer", padding: "4px 8px", fontFamily: "inherit" }}>{showMonthly ? "▲ Hide Calendar" : "▼ Monthly View"}</button>
-      </div>
       {showMonthly && (() => {
         const now = new Date();
         const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
@@ -4134,12 +4184,12 @@ function DailyGrind() {
   if (loadError) return (
     <div style={S.shell}><div style={{ ...S.box, paddingTop: 100, textAlign: "center", maxWidth: 460 }}>
       <div style={{ fontSize: 34, marginBottom: 16 }}>⚠</div>
-      <div style={{ color: "#f0f0f4", fontSize: 15, fontWeight: 900, letterSpacing: 2, marginBottom: 10 }}>DATA KEPT SAFE</div>
+      <div style={{ color: "#f0f0f4", fontSize: 15, fontWeight: 900, letterSpacing: 1.2, marginBottom: 10 }}>DATA KEPT SAFE</div>
       <div style={{ color: "#8b8b9e", fontSize: 11, lineHeight: 1.7, marginBottom: 20 }}>{loadError}</div>
       <button onClick={() => setLoadAttempt((n) => n + 1)} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
     </div></div>
   );
-  if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 4 }}>LOADING...</span></div></div>;
+  if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 1.6 }}>LOADING...</span></div></div>;
 
   // First-time visitors sign in before using the app. Anyone with existing
   // data on this device, or already signed in, skips straight through.
@@ -4148,7 +4198,7 @@ function DailyGrind() {
       <div style={{ ...S.shell, background: "#12122a", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
         <div style={{ maxWidth: 360, width: "100%", textAlign: "center" }}>
           <img src="icon.svg?v=classic-g" alt="Organized Me logo" width="80" height="80" style={{ display: "block", margin: "0 auto 20px", borderRadius: 18 }} />
-          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 4, color: "#f0f0f4", marginBottom: 8 }}>ORGANIZED ME</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 900, letterSpacing: 1.6, color: "#f0f0f4", marginBottom: 8 }}>ORGANIZED ME</h1>
           <div style={{ fontSize: 12, color: "#8b8b9e", letterSpacing: 1, marginBottom: 28 }}>Score your day. Build streaks. Level up.</div>
           <div style={{ textAlign: "left", margin: "0 auto 28px", display: "inline-block" }}>
             <div style={{ fontSize: 12, color: "#c9c9d4", marginBottom: 10 }}>{"⚡"} Habits, tasks, notes &amp; calendar in one place</div>
@@ -4322,7 +4372,7 @@ function DailyGrind() {
 
         {page !== "calendar" && <div style={{ marginBottom: page === "notes" ? 12 : 20, padding: page === "notes" ? "0 16px" : 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 3, color: "#f0f0f4" }}><img src="icon.svg?v=classic-g" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
+            <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 1.5, color: "#f0f0f4" }}><img src="icon.svg?v=classic-g" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
             <SaveIndicator info={saveInfo} onRetry={retrySaves} />
           </div>
@@ -4333,42 +4383,45 @@ function DailyGrind() {
         </div>}
 
         <div style={{ ...S.sc, cursor: "pointer", display: (page === "calendar" || page === "notes") ? "none" : "block" }} onClick={() => setShowScoreDetail(!showScoreDetail)}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 12 }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontSize: 42, fontWeight: 900, lineHeight: 1, color: won ? "#00ff87" : prog > 0.7 ? "#ffd43b" : "#7c3aed" }}>{score}</span>
-              <span style={{ fontSize: 18, color: "#8b8b9e" }}>/ {data.dailyGoal}</span>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 14, marginBottom: 14 }}>
+            <div>
+              <div className="eyebrow" style={{ fontSize: 10, marginBottom: 4 }}>Today</div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span className="display" style={{ fontSize: 58, lineHeight: 0.95, letterSpacing: -1, color: won ? "#00ff87" : prog > 0.7 ? "#ffd43b" : "#8b5cf6" }}>{score}</span>
+                <span className="num" style={{ fontSize: 18, color: "#9a9aae" }}>/{data.dailyGoal}</span>
+              </div>
             </div>
-            <div style={{ textAlign: "right" }}>
-              <span style={{ fontSize: 11, color: "#8b8b9e", letterSpacing: 1 }}>{doneN}/{totalN}</span>
-              <div style={{ fontSize: 8, color: "#555566", marginTop: 2 }}>{showScoreDetail ? "\u25B2 tap to close" : "\u25BC tap for details"}</div>
-            </div>
+            <WeekRecord history={data.history} today={today} wonToday={won} />
           </div>
           <div style={S.tr}><div style={{ ...S.fl, width: `${prog * 100}%`, background: won ? "linear-gradient(90deg,#00ff87,#00d9ff)" : prog > 0.7 ? "linear-gradient(90deg,#ffd43b,#ff922b)" : "linear-gradient(90deg,#7c3aed,#c4b5fd)", boxShadow: won ? "0 0 20px #00ff8744" : "none" }} /></div>
-          <div style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 2, textTransform: "uppercase", marginTop: 8 }}>
-            {won ? "TARGET HIT" : `${data.dailyGoal - score} to go`}
-            {(hScore > 0 || tScore > 0) ? ` \u00B7 H:${hScore} \u00B7 T:${tScore}` : ""}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginTop: 9, fontSize: 12, color: "#9a9aae" }}>
+            <span>
+              <span style={{ color: won ? "#5ff0a6" : "#e6e6ee", fontWeight: 650 }}>{won ? "Goal hit" : <><span className="num">{data.dailyGoal - score}</span> to go</>}</span>
+              {(hScore > 0 || tScore > 0) ? <> {"\u00B7"} habits <span className="num">{hScore}</span> {"\u00B7"} tasks <span className="num">{tScore}</span></> : ""}
+            </span>
+            <span style={{ whiteSpace: "nowrap" }}><span className="num">{doneN}/{totalN}</span> done {showScoreDetail ? "\u25B4" : "\u25BE"}</span>
           </div>
           <div title={`${lifePts.toLocaleString()} lifetime XP — hitting your daily goal earns ~100 XP, no matter your point values`} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
-            <span style={{ fontSize: 12, fontWeight: 900, color: "#ffd43b", letterSpacing: 1, whiteSpace: "nowrap" }}>LVL {lvl.level}</span>
-            <span style={{ fontSize: 8, fontWeight: 800, color: "#8b8b9e", letterSpacing: 2, whiteSpace: "nowrap" }}>{rankForLevel(lvl.level)}</span>
+            <span className="display" style={{ fontSize: 13, color: "#ffd43b", whiteSpace: "nowrap" }}>LVL <span className="num" style={{ fontWeight: 700 }}>{lvl.level}</span></span>
+            <span style={{ fontSize: 10, fontWeight: 800, color: "#8b8b9e", letterSpacing: 1.2, whiteSpace: "nowrap" }}>{rankForLevel(lvl.level)}</span>
             <div style={{ flex: 1, height: 4, background: "#2d2d3a", borderRadius: 2, overflow: "hidden" }}>
               <div className="xp-fill" style={{ width: `${Math.min(100, (lvl.intoLevel / lvl.needed) * 100)}%`, height: "100%", background: "linear-gradient(90deg,#ffd43b,#ff922b,#ffd43b)", borderRadius: 2, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" }} />
             </div>
-            <span style={{ fontSize: 9, color: "#555566", whiteSpace: "nowrap" }}>{lvl.intoLevel}/{lvl.needed} XP</span>
+            <span className="num" style={{ fontSize: 11, color: "#77778a", whiteSpace: "nowrap" }}>{lvl.intoLevel}/{lvl.needed} XP</span>
           </div>
           <button onClick={(e) => { e.stopPropagation(); openStore(); }}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", marginTop: 10, padding: "10px 12px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 10, cursor: "pointer", fontFamily: "inherit" }}>
-            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 3, color: "#c9c9d4" }}>{"🛒"} STORE</span>
-            <span style={{ fontSize: 12, fontWeight: 900, color: "#00d9ff" }}>{walletBalance.toLocaleString()} <span style={{ fontSize: 9, color: "#555566", fontWeight: 700 }}>SPENDABLE</span></span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#e6e6ee" }}>{"🛒"} Store</span>
+            <span style={{ fontSize: 12, color: "#9a9aae" }}><span className="num" style={{ fontSize: 14, fontWeight: 700, color: "#00d9ff" }}>{walletBalance.toLocaleString()}</span> pts to spend {"\u203A"}</span>
           </button>
         </div>
 
         {page !== "notes" && showScoreDetail && (
           <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 12, padding: "16px", marginBottom: 20, marginTop: -12 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 3, color: "#8b8b9e", marginBottom: 12 }}>TODAY'S COMPLETED</div>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.5, color: "#8b8b9e", marginBottom: 12 }}>TODAY'S COMPLETED</div>
             {allH.filter((h) => tl[h.id] === "done").length > 0 && (
               <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 9, color: "#555566", letterSpacing: 2, marginBottom: 6 }}>HABITS</div>
+                <div style={{ fontSize: 10.5, color: "#555566", letterSpacing: 1.2, marginBottom: 6 }}>HABITS</div>
                 {allH.filter((h) => tl[h.id] === "done").map((h) => (
                   <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #2d2d3a" }}>
                     <button onClick={(e) => { e.stopPropagation(); toggleHabit(h.id); }} style={{ width: 22, height: 22, borderRadius: 11, background: "#4cd137", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{"\u2713"}</button>
@@ -4380,7 +4433,7 @@ function DailyGrind() {
             )}
             {allT.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).length > 0 && (
               <div style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 9, color: "#555566", letterSpacing: 2, marginBottom: 6 }}>TASKS</div>
+                <div style={{ fontSize: 10.5, color: "#555566", letterSpacing: 1.2, marginBottom: 6 }}>TASKS</div>
                 {data.taskLists.flatMap((list) => list.items.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).map((t) => ({ ...t, listId: list.id, listTitle: list.title }))).map((t) => (
                   <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #2d2d3a" }}>
                     <button onClick={(e) => { e.stopPropagation(); toggleTask(t.listId, t.id); }} style={{ width: 22, height: 22, borderRadius: 11, background: "#4cd137", border: "none", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{"\u2713"}</button>
@@ -4391,7 +4444,7 @@ function DailyGrind() {
               </div>
             )}
             {doneN === 0 && <div style={{ fontSize: 12, color: "#555566", textAlign: "center", padding: "12px 0" }}>Nothing completed yet. Get to work.</div>}
-            <div style={{ fontSize: 9, color: "#555566", textAlign: "center", marginTop: 8 }}>Tap the green {"\u2713"} to undo a completion</div>
+            <div style={{ fontSize: 10.5, color: "#555566", textAlign: "center", marginTop: 8 }}>Tap the green {"\u2713"} to undo a completion</div>
           </div>
         )}
 
@@ -4425,7 +4478,7 @@ function DailyGrind() {
             <div style={{ marginBottom: 20 }}>
               <div style={S.secH}>
                 <span style={S.secLbl}>{showAllHistory ? "ALL HISTORY" : "LAST 7 DAYS"}</span>
-                <span style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 1, fontWeight: 700 }}>{showAllHistory ? `${totalDays} DAYS · ${wins} WINS (${winPct}%) · AVG ${avgScore}` : ""}</span>
+                <span style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1, fontWeight: 700 }}>{showAllHistory ? `${totalDays} DAYS · ${wins} WINS (${winPct}%) · AVG ${avgScore}` : ""}</span>
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: showAllHistory ? "wrap" : "nowrap" }}>
                 {shown.map(([d, inf]) => {
@@ -4433,14 +4486,14 @@ function DailyGrind() {
                   return (
                     <div key={d} title={dateObj.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}
                       style={{ flex: showAllHistory ? "0 0 calc(14.2857% - 6px)" : 1, minWidth: showAllHistory ? 44 : 0, borderRadius: 8, border: `1px solid ${inf.won ? "#00ff8733" : "#ff475733"}`, background: inf.won ? "#00ff8716" : "#ff475716", padding: "8px 2px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                      <span style={{ fontSize: 9, fontWeight: 700, color: "#8b8b9e" }}>{dateObj.toLocaleDateString("en-US", { weekday: "narrow" })}</span>
-                      {showAllHistory && <span style={{ fontSize: 8, color: "#666677", fontWeight: 600 }}>{dateObj.getMonth() + 1}/{dateObj.getDate()}</span>}
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: "#8b8b9e" }}>{dateObj.toLocaleDateString("en-US", { weekday: "narrow" })}</span>
+                      {showAllHistory && <span style={{ fontSize: 10, color: "#666677", fontWeight: 600 }}>{dateObj.getMonth() + 1}/{dateObj.getDate()}</span>}
                       <span style={{ fontSize: 13, fontWeight: 800, color: inf.won ? "#00ff87" : "#ff4757" }}>{inf.score}</span>
                     </div>
                   );
                 })}
               </div>
-              <button onClick={() => setShowAllHistory(!showAllHistory)} style={{ width: "100%", marginTop: 8, padding: "10px", background: "none", border: "none", color: "#7c3aed", fontSize: 11, fontWeight: 700, letterSpacing: 2, cursor: "pointer", fontFamily: "inherit" }}>
+              <button onClick={() => setShowAllHistory(!showAllHistory)} style={{ width: "100%", marginTop: 8, padding: "10px", background: "none", border: "none", color: "#7c3aed", fontSize: 11, fontWeight: 700, letterSpacing: 1.2, cursor: "pointer", fontFamily: "inherit" }}>
                 {showAllHistory ? "▲ SHOW LESS" : `▼ SHOW ALL HISTORY (${totalDays})`}
               </button>
             </div>
@@ -4450,7 +4503,7 @@ function DailyGrind() {
         {page === "tasks" && (
           <div data-tasklists-container>
             {data.taskLists.length > 1 && data.taskLists.some((list) => list.items.some((task) => !task.done)) && (
-              <div style={{ margin: "0 2px 10px", color: taskDrag ? "#c4b5fd" : "#555566", fontSize: 9, fontWeight: 800, letterSpacing: 1.5, textAlign: "right" }}>
+              <div style={{ margin: "0 2px 10px", color: taskDrag ? "#c4b5fd" : "#555566", fontSize: 10.5, fontWeight: 800, letterSpacing: 1.5, textAlign: "right" }}>
                 {taskDrag ? "RELEASE TO MOVE TASK" : "DRAG ⋮ TO MOVE TASKS BETWEEN LISTS"}
               </div>
             )}
@@ -4489,8 +4542,8 @@ function DailyGrind() {
               <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
                 <img src="icon.svg?v=classic-g" alt="" width="38" height="38" style={{ flexShrink: 0, borderRadius: 8 }} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 2, color: "#f0f0f4", lineHeight: 1.4 }}>MY NOTEBOOK</div>
-                  <div style={{ fontSize: 9, color: "#666677", marginTop: 2 }}>{notes.length} page{notes.length === 1 ? "" : "s"} · synced</div>
+                  <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.2, color: "#f0f0f4", lineHeight: 1.4 }}>MY NOTEBOOK</div>
+                  <div style={{ fontSize: 10.5, color: "#666677", marginTop: 2 }}>{notes.length} page{notes.length === 1 ? "" : "s"} · synced</div>
                 </div>
               </div>
 
@@ -4506,7 +4559,7 @@ function DailyGrind() {
                   <button onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, flex: 1, minWidth: 0, marginBottom: 0, background: noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
                     <span style={{ color: ["#00d9ff","#00ff87","#ff922b","#f472b6","#a78bfa"][index % 5] }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
                   </button>
-                  <button type="button" aria-label={`Delete section: ${tag}`} title={`Delete section: ${tag}`} onClick={() => { setDeleteSectionTarget(tag); setDeleteSectionError(""); }} style={{ ...S.noteToolBtn, color: "#ff8793", padding: 7, flexShrink: 0 }}><TrashIcon /></button>
+                  <button type="button" aria-label={`Delete section: ${tag}`} title={`Delete section: ${tag}`} onClick={() => { setDeleteSectionTarget(tag); setDeleteSectionError(""); }} className="quiet-danger" style={{ ...S.noteToolBtn, padding: 7, flexShrink: 0 }}><TrashIcon /></button>
                   </div>
                 ))}
               </div>
@@ -4515,16 +4568,16 @@ function DailyGrind() {
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
                   <input aria-label="New section name" value={newNoteSectionName} maxLength={30} onChange={(e) => { setNewNoteSectionName(e.target.value); setNewNoteSectionError(""); }} onKeyDown={(e) => { if (e.key === "Enter") createNoteSection(); if (e.key === "Escape") setShowNewNoteSection(false); }} placeholder="Section name" autoFocus style={{ ...S.inp, fontSize: 11, padding: "9px" }} />
                   {newNoteSectionError && <div role="alert" style={{ color: "#fca5a5", fontSize: 10, marginTop: 6 }}>{newNoteSectionError}</div>}
-                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}><button onClick={createNoteSection} style={{ ...S.okBtn, padding: 8, fontSize: 9 }}>CREATE</button><button onClick={() => { setShowNewNoteSection(false); setNewNoteSectionName(""); }} style={{ ...S.cBtn, padding: 8, fontSize: 9 }}>CANCEL</button></div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}><button onClick={createNoteSection} style={{ ...S.okBtn, padding: 8, fontSize: 10.5 }}>CREATE</button><button onClick={() => { setShowNewNoteSection(false); setNewNoteSectionName(""); }} style={{ ...S.cBtn, padding: 8, fontSize: 10.5 }}>CANCEL</button></div>
                 </div>
               ) : (
-                <button onClick={() => setShowNewNoteSection(true)} style={{ width: "100%", marginTop: 12, padding: "9px", background: "transparent", border: "1px dashed #3b3b4e", borderRadius: 8, color: "#77778a", fontSize: 9, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>+ NEW SECTION</button>
+                <button onClick={() => setShowNewNoteSection(true)} style={{ width: "100%", marginTop: 12, padding: "9px", background: "transparent", border: "1px dashed #3b3b4e", borderRadius: 8, color: "#77778a", fontSize: 10.5, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}>+ NEW SECTION</button>
               )}
             </aside>
 
             <section className="notes-pages" aria-label="Notebook pages">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 12px" }}>
-                <div><div style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 3, fontWeight: 900 }}>PAGES</div><div style={{ color: "#555566", fontSize: 9, marginTop: 3 }}>{visibleNotes.length} shown</div></div>
+                <div><div style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.5, fontWeight: 900 }}>PAGES</div><div style={{ color: "#555566", fontSize: 10.5, marginTop: 3 }}>{visibleNotes.length} shown</div></div>
                 <button onClick={() => openNewNote()} aria-label="New page" title="New page" style={{ width: 34, height: 34, borderRadius: 9, border: "none", background: "linear-gradient(135deg,#7c3aed,#a78bfa)", color: "#fff", fontSize: 20, cursor: "pointer", fontFamily: "inherit" }}>+</button>
               </div>
               <div style={{ position: "relative", marginBottom: 10 }}>
@@ -4540,10 +4593,10 @@ function DailyGrind() {
                   <article className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 44px 11px 15px", marginBottom: 5, cursor: "pointer", outline: "none" }}>
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
-                    <div style={{ color: "#666677", fontSize: 8, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
-                    <div style={{ color: "#858596", fontSize: 9, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.images?.length ? "Screenshot" : note.drawing?.length ? "Drawing" : "Empty page")}</div>
+                    <div style={{ color: "#666677", fontSize: 10, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
+                    <div style={{ color: "#858596", fontSize: 10.5, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.images?.length ? "Screenshot" : note.drawing?.length ? "Drawing" : "Empty page")}</div>
                   </article>
-                  <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7, color: "#ff8793" }}><TrashIcon /></button>
+                  <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} className="quiet-danger" style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7 }}><TrashIcon /></button>
                   </div>
                 );
               })}
@@ -4569,7 +4622,7 @@ function DailyGrind() {
                     <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, display: "flex", alignItems: "center", gap: 5, color: "#ff8793" }}><TrashIcon />Delete page</button>
                     <button type="button" aria-pressed={noteExpanded} aria-label={noteExpanded ? "Exit full window" : "Full window"} title={noteExpanded ? "Exit full window (Escape)" : "Expand note to fill the window"} onClick={() => setNoteExpanded(value => !value)} style={{ ...S.noteToolBtn, color: "#ddd3ff", borderColor: "#7c3aed88" }}>{noteExpanded ? "↙ Exit full window" : "↗ Full window"}</button>
                     <span style={{ flex: 1 }} />
-                    <span aria-live="polite" style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
+                    <span aria-live="polite" style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: noteDraftState === "error" ? "#ff4757" : noteDraftState === "saved" ? "#4cd137" : "#8b8b9e" }}>
                       {noteDraftState === "typing" ? "UNSAVED" : noteDraftState === "saving" ? "SAVING..." : noteDraftState === "saved" ? "SAVED" : noteDraftState === "error" ? "SAVE FAILED" : "AUTO-SAVE ON"}
                     </span>
                   </div>
@@ -4577,7 +4630,7 @@ function DailyGrind() {
                     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderBottom: "1px solid #3f2b68", background: "#211b38", flexWrap: "wrap" }}>
                       <button onClick={() => toggleTask(linkedTaskContext.list.id, linkedTaskContext.task.id)} aria-label={linkedTaskContext.task.done ? "Mark linked task incomplete" : "Complete linked task"} style={{ ...S.tCircle, borderColor: linkedTaskContext.task.done ? "#00b86b" : "#a78bfa", background: linkedTaskContext.task.done ? "#00b86b" : "transparent", color: "#fff" }}>{linkedTaskContext.task.done ? "✓" : ""}</button>
                       <div style={{ flex: 1, minWidth: 170 }}>
-                        <div style={{ color: "#a78bfa", fontSize: 8, fontWeight: 900, letterSpacing: 2, marginBottom: 3 }}>LINKED TASK · {linkedTaskContext.list.title}</div>
+                        <div style={{ color: "#a78bfa", fontSize: 10, fontWeight: 900, letterSpacing: 1.2, marginBottom: 3 }}>LINKED TASK · {linkedTaskContext.list.title}</div>
                         <div style={{ color: linkedTaskContext.task.done ? "#77778a" : "#f0f0f4", fontSize: 11, fontWeight: 800, textDecoration: linkedTaskContext.task.done ? "line-through" : "none" }}>{linkedTaskContext.task.name}</div>
                       </div>
                       {!linkedTaskContext.task.done && <TaskWorkTimer task={linkedTaskContext.task} onToggle={() => toggleTaskTimer(linkedTaskContext.list.id, linkedTaskContext.task.id)} />}
@@ -4588,10 +4641,10 @@ function DailyGrind() {
                   <div style={{ flex: 1, padding: "28px clamp(18px,4vw,48px) 20px", display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto" }}>
                     <input aria-label="Note title" value={noteDraft.title} onChange={(e) => setNoteDraft((draft) => ({ ...draft, title: e.target.value }))} placeholder="Page title" autoFocus style={{ width: "100%", background: "transparent", border: "none", borderBottom: "1px solid #3a3a4e", color: "#f7f7fb", fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, fontFamily: "inherit", padding: "5px 0 13px", outline: "none" }} />
                     <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 18px", flexWrap: "wrap" }}>
-                      <span style={{ color: "#666677", fontSize: 9 }}>{new Date(noteDraft.updatedAt || noteDraft.createdAt || Date.now()).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+                      <span style={{ color: "#666677", fontSize: 10.5 }}>{new Date(noteDraft.updatedAt || noteDraft.createdAt || Date.now()).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</span>
                       <span style={{ color: "#3d3d50" }}>·</span>
-                      <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#77778a", fontSize: 9 }}>SECTION
-                        <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 9, fontFamily: "inherit", outline: "none" }} />
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#77778a", fontSize: 10.5 }}>SECTION
+                        <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 10.5, fontFamily: "inherit", outline: "none" }} />
                       </label>
                     </div>
                     {(noteDraft.images || []).length > 0 && <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 0, marginBottom: 20 }}>
@@ -4627,15 +4680,15 @@ function DailyGrind() {
 
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
-                    <span style={{ color: "#555566", fontSize: 8, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
+                    <span style={{ color: "#555566", fontSize: 10, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
                     <button onClick={() => toggleNotePin(noteDraft.id)} style={{ ...S.noteToolBtn, color: noteDraft.pinned ? "#ffd43b" : "#8b8b9e", borderColor: noteDraft.pinned ? "#ffd43b55" : "#353548" }}>{noteDraft.pinned ? "◆ PINNED" : "◇ PIN"}</button>
                     {notes.some((note) => note.id === noteDraft.id) && <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, color: "#ff6b7a", borderColor: "#ff475744" }}>DELETE</button>}
-                    <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "8px 14px", fontSize: 9 }}>CLOSE</button>
+                    <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "8px 14px", fontSize: 10.5 }}>CLOSE</button>
                   </div>
                 </>
               ) : (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 30 }}>
-                  <div><div style={{ width: 56, height: 62, margin: "0 auto 18px", borderRadius: "7px 13px 13px 7px", background: "linear-gradient(145deg,#292944,#1f1f35)", boxShadow: "inset 6px 0 #7c3aed55", display: "flex", alignItems: "center", justifyContent: "center", color: "#a78bfa", fontSize: 24, fontWeight: 900 }}>N</div><div style={{ color: "#c9c9d4", fontSize: 12, fontWeight: 900, letterSpacing: 2 }}>SELECT A PAGE</div><div style={{ color: "#666677", fontSize: 10, lineHeight: 1.7, marginTop: 8, maxWidth: 300 }}>Choose a page from the list or create a new one to start writing.</div><button onClick={() => openNewNote()} style={{ ...S.okBtn, display: "inline-block", flex: "none", marginTop: 16, padding: "10px 16px" }}>+ NEW PAGE</button></div>
+                  <div><div style={{ width: 56, height: 62, margin: "0 auto 18px", borderRadius: "7px 13px 13px 7px", background: "linear-gradient(145deg,#292944,#1f1f35)", boxShadow: "inset 6px 0 #7c3aed55", display: "flex", alignItems: "center", justifyContent: "center", color: "#a78bfa", fontSize: 24, fontWeight: 900 }}>N</div><div style={{ color: "#c9c9d4", fontSize: 12, fontWeight: 900, letterSpacing: 1.2 }}>SELECT A PAGE</div><div style={{ color: "#666677", fontSize: 10, lineHeight: 1.7, marginTop: 8, maxWidth: 300 }}>Choose a page from the list or create a new one to start writing.</div><button onClick={() => openNewNote()} style={{ ...S.okBtn, display: "inline-block", flex: "none", marginTop: 16, padding: "10px 16px" }}>+ NEW PAGE</button></div>
                 </div>
               )}
             </section>
@@ -4661,7 +4714,7 @@ function DailyGrind() {
           return (
             <div>
               <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "28px 20px", marginBottom: 16, textAlign: "center" }}>
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: pomoIsBreak ? "#00ff87" : "#7c3aed", marginBottom: 12, textTransform: "uppercase" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.6, color: pomoIsBreak ? "#00ff87" : "#7c3aed", marginBottom: 12, textTransform: "uppercase" }}>
                   {pomoIsBreak ? "\u2615 BREAK" : "\uD83C\uDF45 POMODORO"}
                 </div>
                 <div style={{ marginBottom: 16 }}>
@@ -4677,12 +4730,12 @@ function DailyGrind() {
                       strokeDasharray={2 * Math.PI * 80} strokeDashoffset={2 * Math.PI * 80 * (1 - pomoProg)} strokeLinecap="round" style={{ transition: "stroke-dashoffset 1s linear" }} />
                   </svg>
                   <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                    <span style={{ fontSize: 40, fontWeight: 900, color: "#f0f0f4", fontFamily: "inherit" }}>{fmtSec(pomoSeconds)}</span>
+                    <span className="display" style={{ fontSize: 40, color: "#f4f4f8", fontVariantNumeric: "tabular-nums" }}>{fmtSec(pomoSeconds)}</span>
                     <span style={{ fontSize: 10, color: "#8b8b9e", marginTop: 4 }}>Session #{pomoSessions + 1}</span>
                   </div>
                 </div>
                 {pomoAlarmRinging && (
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 3, color: "#ff4757", marginBottom: 10, textAlign: "center" }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1.5, color: "#ff4757", marginBottom: 10, textAlign: "center" }}>
                     {"\uD83D\uDD14"} RINGING {"\u2014"} TAP START OR RESET TO STOP
                   </div>
                 )}
@@ -4696,7 +4749,7 @@ function DailyGrind() {
                 </div>
                 <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
                   <div style={{ textAlign: "center" }}>
-                    <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>WORK</label>
+                    <label style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700 }}>WORK</label>
                     <input type="number" value={pomoWorkInput}
                       onChange={(e) => setPomoWorkInput(e.target.value)}
                       onBlur={() => { const v = Math.max(1, parseInt(pomoWorkInput) || 25); setPomWork(v); setPomoWorkInput(String(v)); if (!pomoRunning && !pomoIsBreak) setPomoSeconds(v * 60); }}
@@ -4704,7 +4757,7 @@ function DailyGrind() {
                       style={{ ...S.inp, width: 60, textAlign: "center", padding: "6px", fontSize: 13, marginTop: 4 }} />
                   </div>
                   <div style={{ textAlign: "center" }}>
-                    <label style={{ fontSize: 8, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700 }}>BREAK</label>
+                    <label style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700 }}>BREAK</label>
                     <input type="number" value={pomoBreakInput}
                       onChange={(e) => setPomoBreakInput(e.target.value)}
                       onBlur={() => { const v = Math.max(1, parseInt(pomoBreakInput) || 5); setPomBreak(v); setPomoBreakInput(String(v)); if (!pomoRunning && pomoIsBreak) setPomoSeconds(v * 60); }}
@@ -4716,8 +4769,8 @@ function DailyGrind() {
               </div>
 
               <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "24px 20px", marginBottom: 16, textAlign: "center" }}>
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#ffd43b", marginBottom: 16 }}>{"\u23F1"} COUNTDOWN TIMER</div>
-                <div style={{ fontSize: 36, fontWeight: 900, color: customTimerSec > 0 ? "#ffd43b" : "#f0f0f4", marginBottom: 16, fontFamily: "inherit" }}>{fmtSec(customTimerSec)}</div>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.6, color: "#ffd43b", marginBottom: 16 }}>{"\u23F1"} COUNTDOWN TIMER</div>
+                <div className="display" style={{ fontSize: 36, color: customTimerSec > 0 ? "#ffd43b" : "#f4f4f8", marginBottom: 16, fontVariantNumeric: "tabular-nums" }}>{fmtSec(customTimerSec)}</div>
                 {!customTimerRunning && customTimerSec === 0 && (
                   <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
                     <input type="number" placeholder="min" value={customTimerMin} onChange={(e) => setCustomTimerMin(e.target.value)}
@@ -4735,7 +4788,7 @@ function DailyGrind() {
               </div>
 
               <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "24px 20px", textAlign: "center" }}>
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#00ff87", marginBottom: 16 }}>{"\u23F1"} STOPWATCH</div>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.6, color: "#00ff87", marginBottom: 16 }}>{"\u23F1"} STOPWATCH</div>
                 <div style={{ fontSize: 36, fontWeight: 900, color: stopwatchRunning ? "#00ff87" : "#f0f0f4", marginBottom: 16, fontFamily: "inherit" }}>
                   {`${String(Math.floor(stopwatchSec / 3600)).padStart(2, "0")}:${String(Math.floor((stopwatchSec % 3600) / 60)).padStart(2, "0")}:${String(stopwatchSec % 60).padStart(2, "0")}`}
                 </div>
@@ -4753,7 +4806,7 @@ function DailyGrind() {
         {page === "calendar" && (() => {
           if (calLoadError) return (
             <div style={{ maxWidth: 440, margin: "80px auto", textAlign: "center", background: "#12122a", border: "1px solid #ff475755", borderRadius: 14, padding: 24 }}>
-              <div style={{ color: "#f0f0f4", fontSize: 13, fontWeight: 900, letterSpacing: 2, marginBottom: 10 }}>CALENDAR DATA KEPT SAFE</div>
+              <div style={{ color: "#f0f0f4", fontSize: 13, fontWeight: 900, letterSpacing: 1.2, marginBottom: 10 }}>CALENDAR DATA KEPT SAFE</div>
               <div style={{ color: "#8b8b9e", fontSize: 10, lineHeight: 1.6, marginBottom: 18 }}>The calendar could not be loaded, so editing is paused to prevent an empty calendar from replacing your saved events.</div>
               <button onClick={() => { setCalLoadError(false); setCalEventsLoaded(false); setCalLoadAttempt((n) => n + 1); }} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
             </div>
@@ -4809,7 +4862,7 @@ function DailyGrind() {
                 <button onClick={() => setCalWeekOffset(calWeekOffset - 1)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 20, cursor: "pointer", padding: "4px 12px" }}>{"\u25C0"}</button>
                  <div style={{ textAlign: "center" }}>
                    <div style={{ fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 }}>{monthLabel}</div>
-                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 2, padding: "4px 8px" }}>TODAY</button>
+                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "none", border: "none", color: "#7c3aed", fontSize: 10, cursor: "pointer", fontWeight: 700, letterSpacing: 1.2, padding: "4px 8px" }}>TODAY</button>
                    <SaveIndicator info={saveInfo} onRetry={retrySaves} />
                  </div>
                 <div style={{ display: "flex", alignItems: "center" }}>
@@ -4826,7 +4879,7 @@ function DailyGrind() {
                   const isToday = ds === todayStr;
                   return (
                     <div key={i} style={{ textAlign: "center", padding: "4px 0" }}>
-                      <div style={{ fontSize: 9, color: isToday ? "#7c3aed" : "#555566", fontWeight: 700, letterSpacing: 1 }}>{dayNames[i]}</div>
+                      <div style={{ fontSize: 10.5, color: isToday ? "#7c3aed" : "#555566", fontWeight: 700, letterSpacing: 1 }}>{dayNames[i]}</div>
                       <div style={{ fontSize: 16, fontWeight: 800, color: isToday ? "#fff" : "#8b8b9e", background: isToday ? "#7c3aed" : "transparent", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", margin: "2px auto 0" }}>{d.getDate()}</div>
                     </div>
                   );
@@ -4835,7 +4888,7 @@ function DailyGrind() {
 
               {weekDeadlines.some(items => items.length > 0) && (
                 <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 8, borderBottom: "1px solid #ef444433", paddingBottom: 6 }}>
-                  <div style={{ fontSize: 8, color: "#fca5a5", fontWeight: 800, paddingTop: 8 }}>DUE</div>
+                  <div style={{ fontSize: 10, color: "#fca5a5", fontWeight: 800, paddingTop: 8 }}>DUE</div>
                   {weekDeadlines.map((deadlines, di) => (
                     <div key={localDateStr(calDates[di])} data-deadline-date={localDateStr(calDates[di])} style={{ minWidth: 0, maxHeight: 128, overflowY: "auto", padding: "0 2px", display: "flex", flexDirection: "column", gap: 4 }}>
                       {deadlines.map(({ listId, task, time }) => (
@@ -4844,8 +4897,8 @@ function DailyGrind() {
                           title={`${task.name} — ${time ? `Due at ${time}` : "Due this day"}. Click to edit task.`}
                           onClick={() => openEditTask(listId, task)}
                           style={{ display: "block", flexShrink: 0, width: "100%", minWidth: 0, minHeight: 40, background: "#dc2626", color: "#fff", border: "1px solid #f87171", borderRadius: 4, padding: "5px 4px", textAlign: "left", fontFamily: "inherit", cursor: "pointer", lineHeight: 1.35 }}>
-                          <span style={{ display: "block", fontSize: 9, fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.name}</span>
-                          <span style={{ display: "block", fontSize: 8, opacity: 0.9 }}>{time || "All day"}</span>
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.name}</span>
+                          <span style={{ display: "block", fontSize: 10, opacity: 0.9 }}>{time || "All day"}</span>
                         </button>
                       ))}
                     </div>
@@ -4985,7 +5038,7 @@ function DailyGrind() {
                   {/* Hour labels + grid lines */}
                   {hours.map((h, hi) => (
                     <React.Fragment key={h}>
-                      <div style={{ gridColumn: "1", gridRow: hi + 1, fontSize: 9, color: "#555566", textAlign: "right", paddingRight: 6, paddingTop: 2, height: HOUR_H, borderTop: "1px solid #2d2d3a22" }}>{fmtHour(h)}</div>
+                      <div style={{ gridColumn: "1", gridRow: hi + 1, fontSize: 10.5, color: "#555566", textAlign: "right", paddingRight: 6, paddingTop: 2, height: HOUR_H, borderTop: "1px solid #2d2d3a22" }}>{fmtHour(h)}</div>
                       {calDates.map((d, di) => (
                         <div key={di} style={{ gridColumn: di + 2, gridRow: hi + 1, borderTop: "1px solid #2d2d3a44", borderLeft: "1px solid #2d2d3a22", height: HOUR_H, cursor: "crosshair", position: "relative" }}
                           onMouseDown={(e) => {
@@ -5013,7 +5066,7 @@ function DailyGrind() {
                         fontSize: 10, color: "#fff", fontWeight: 700, zIndex: 25, pointerEvents: "none",
                       }}>
                         <div>(New event)</div>
-                        <div style={{ fontSize: 9, opacity: 0.8 }}>{fmtT(calCreating.startMin)} - {fmtT(calCreating.endMin)}</div>
+                        <div style={{ fontSize: 10.5, opacity: 0.8 }}>{fmtT(calCreating.startMin)} - {fmtT(calCreating.endMin)}</div>
                       </div>
                     );
                   })()}
@@ -5055,8 +5108,8 @@ function DailyGrind() {
                       return (
                         <div key={evt.id} data-calendar-event={evt.id} style={{
                           position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
-                          top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
-                          fontSize: 9, color: calTextColor(evt.color || "#4fc3f7"), fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
+                          top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: cols > 1 ? "2px 3px" : "2px 4px", overflow: "hidden",
+                          fontSize: cols > 2 ? 9.5 : 10.5, color: calTextColor(evt.color || "#4fc3f7"), fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
                           borderLeft: isRepeating ? "3px solid #ffffff88" : "none", opacity: isDraggingThis ? 0.85 : 1,
                           transition: isDraggingThis ? "none" : "top 0.15s, height 0.15s", userSelect: "none",
@@ -5100,8 +5153,12 @@ function DailyGrind() {
                           onTouchEnd={(e) => { if (e.currentTarget._dragTimer) { clearTimeout(e.currentTarget._dragTimer); e.currentTarget._dragTimer = null; } }}
                           onTouchCancel={(e) => { if (e.currentTarget._dragTimer) { clearTimeout(e.currentTarget._dragTimer); e.currentTarget._dragTimer = null; } }}
                         >
-                          <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating ? "\u21BB " : ""}{evt.title}</div>
-                          {heightPx > 24 && <div style={{ fontSize: 8, opacity: 0.8, fontWeight: 600 }}>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</div>}
+                          {/* Shared (narrow) slots: the left repeat stripe already marks repeats, titles may wrap to two lines,
+                              and only the start time is shown, so short names like "CAD" stay readable. */}
+                          <div style={cols > 1 && heightPx > 36
+                            ? { overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "break-word" }
+                            : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating && cols === 1 ? "\u21BB " : ""}{evt.title}</div>
+                          {heightPx > 24 && <div style={{ fontSize: 10, opacity: 0.8, fontWeight: 600, whiteSpace: cols > 1 ? "nowrap" : undefined, overflow: "hidden", textOverflow: "ellipsis" }}>{cols > 1 ? fmtTime(displayStart) : <>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</>}</div>}
                         </div>
                       );
                     });
@@ -5202,18 +5259,18 @@ function DailyGrind() {
                   onClick={() => { setCalSelectedEvent(null); setCalEditMode(false); }}>
                   <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%" }}
                     onClick={(e) => e.stopPropagation()}>
-                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 16 }}>EDIT EVENT</h3>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
+                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1.2, marginBottom: 16 }}>EDIT EVENT</h3>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
                     <input style={S.inp} value={calEventTitle} onChange={(e) => setCalEventTitle(e.target.value)} autoFocus />
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
                         <input aria-label="Event start time" type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
                         <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>
                     </div>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                       {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"],["custom","Custom"]].map(([v,l]) => (
                         <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
@@ -5230,7 +5287,7 @@ function DailyGrind() {
                         })}
                       </div>
                     )}
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
@@ -5250,18 +5307,18 @@ function DailyGrind() {
                   onClick={() => setCalAddEvent(null)}>
                   <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%" }}
                     onClick={(e) => e.stopPropagation()}>
-                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 16 }}>ADD EVENT - {new Date(calAddEvent + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</h3>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
+                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1.2, marginBottom: 16 }}>ADD EVENT - {new Date(calAddEvent + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</h3>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
                     <input style={S.inp} value={calEventTitle} onChange={(e) => setCalEventTitle(e.target.value)} placeholder="Event name" autoFocus />
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
                         <input aria-label="Event start time" type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
                         <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>
                     </div>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
                     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                       {[["none","None"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"],["custom","Custom"]].map(([v,l]) => (
                         <button key={v} onClick={() => setCalEventRepeat(v)} style={{ flex: 1, padding: "8px 4px", borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1, border: calEventRepeat === v ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calEventRepeat === v ? "#7c3aed22" : "#12122a", color: calEventRepeat === v ? "#c4b5fd" : "#8b8b9e" }}>{l}</button>
@@ -5278,7 +5335,7 @@ function DailyGrind() {
                         })}
                       </div>
                     )}
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
@@ -5299,10 +5356,10 @@ function DailyGrind() {
                   onClick={() => setShowCalSettings(false)}>
                   <div role="dialog" aria-label="Calendar settings" style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 420, width: "100%", maxHeight: "85dvh", overflowY: "auto" }}
                     onClick={(e) => e.stopPropagation()}>
-                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 2, marginBottom: 6 }}>CALENDAR SETTINGS</h3>
+                    <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1.2, marginBottom: 6 }}>CALENDAR SETTINGS</h3>
                     <CalendarReminders />
                     <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 16, lineHeight: 1.5 }}>Adjust when your day starts and how late it runs. Hours past midnight will appear at the bottom of the same day's column — so 1 AM stays inside your day.</div>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY STARTS AT</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY STARTS AT</label>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[4,5,6,7,8,9,10].map(h => (
                         <button key={h} onClick={() => save((current) => ({ ...current, calStartHour: h }))}
@@ -5311,7 +5368,7 @@ function DailyGrind() {
                         </button>
                       ))}
                     </div>
-                    <label style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY ENDS AT</label>
+                    <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>DAY ENDS AT</label>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[21,22,23,24,25,26,27,28].map(h => (
                         <button key={h} onClick={() => save((current) => ({ ...current, calEndHour: h }))}
@@ -5400,18 +5457,18 @@ function DailyGrind() {
           return (
             <button key={l.id} onClick={() => moveTaskTo(l.id)}
               style={{ padding: "7px 12px", background: isCurrent ? "#7c3aed33" : "#12122a", border: `1px solid ${isCurrent ? "#7c3aed" : "#2d2d3a"}`, borderRadius: 8, color: isCurrent ? "#7c3aed" : "#8b8b9e", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1 }}>
-              {l.title}{l.resetsDaily && <span style={{ marginLeft: 4, fontSize: 8 }}>{"↻"}</span>}
+              {l.title}{l.resetsDaily && <span style={{ marginLeft: 4, fontSize: 10 }}>{"↻"}</span>}
             </button>
           );
         })}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 10, marginTop: 18 }}>
         <button onClick={() => { setPomoTask(formTaskName.trim() || "Task"); setEditTaskCtx(null); setView("main"); setPage("timer"); }}
-          style={{ width: "100%", padding: "12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: 10, color: "#c4b5fd", fontSize: 11, fontWeight: 800, letterSpacing: 2, cursor: "pointer", fontFamily: "inherit" }}>
+          style={{ width: "100%", padding: "12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: 10, color: "#c4b5fd", fontSize: 11, fontWeight: 800, letterSpacing: 1.2, cursor: "pointer", fontFamily: "inherit" }}>
           {"↑ SEND TO POMODORO"}
         </button>
         <button onClick={sendTaskToNotes} disabled={taskNoteSending}
-          style={{ width: "100%", padding: "12px", background: "#00d9ff14", border: "1px solid #00d9ff88", borderRadius: 10, color: "#67e8f9", fontSize: 11, fontWeight: 800, letterSpacing: 2, cursor: taskNoteSending ? "wait" : "pointer", fontFamily: "inherit", opacity: taskNoteSending ? 0.65 : 1 }}>
+          style={{ width: "100%", padding: "12px", background: "#00d9ff14", border: "1px solid #00d9ff88", borderRadius: 10, color: "#67e8f9", fontSize: 11, fontWeight: 800, letterSpacing: 1.2, cursor: taskNoteSending ? "wait" : "pointer", fontFamily: "inherit", opacity: taskNoteSending ? 0.65 : 1 }}>
           {taskNoteSending ? "OPENING NOTES..." : hasLinkedTaskNote ? "↗ OPEN TASK NOTE" : "↗ SEND TO NOTES"}
         </button>
       </div>
@@ -5438,8 +5495,8 @@ function DailyGrind() {
       <div style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 1, marginBottom: 18, lineHeight: 1.6 }}>You don't take cheat days. You earn them. Spending never touches your XP or level.</div>
       <div style={{ background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 12, padding: "16px", marginBottom: 20, textAlign: "center" }}>
         <div style={{ fontSize: 34, fontWeight: 900, color: "#00d9ff", lineHeight: 1 }}>{walletBalance.toLocaleString()}</div>
-        <div style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 3, fontWeight: 700, marginTop: 6 }}>SPENDABLE POINTS</div>
-        <div style={{ fontSize: 9, color: "#555566", marginTop: 4 }}>{walletEarned.toLocaleString()} earned lifetime {"·"} {(data.walletSpent || 0).toLocaleString()} spent</div>
+        <div style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.5, fontWeight: 700, marginTop: 6 }}>SPENDABLE POINTS</div>
+        <div style={{ fontSize: 10.5, color: "#555566", marginTop: 4 }}>{walletEarned.toLocaleString()} earned lifetime {"·"} {(data.walletSpent || 0).toLocaleString()} spent</div>
       </div>
       {items.map((item) => {
         const affordable = walletBalance >= item.price;
@@ -5475,7 +5532,7 @@ function DailyGrind() {
       </div>
       {purchases.length > 0 && (
         <div style={{ marginTop: 22, borderTop: "1px solid #2d2d3a", paddingTop: 14 }}>
-          <div style={{ fontSize: 9, color: "#8b8b9e", letterSpacing: 3, fontWeight: 800, marginBottom: 8 }}>RECENT PURCHASES</div>
+          <div style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.5, fontWeight: 800, marginBottom: 8 }}>RECENT PURCHASES</div>
           {purchases.map((p) => (
             <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 11, color: "#8b8b9e" }}>
               <span>{p.name}</span>
@@ -5554,9 +5611,9 @@ function DailyGrind() {
               ? "Organized Me keeps paired main-data and calendar recovery copies: latest, hourly, daily, and weekly. The app never automatically deletes them."
               : "Your device keeps the current copy. Sign in for long-term cloud history across devices."}
           </div>
-          {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 9, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
-          {vaultInfo.state === "saved" && <div style={{ marginTop: 8, fontSize: 9, color: "#4cd137", letterSpacing: 1.5 }}>RECOVERY COPIES CURRENT • {new Date(vaultInfo.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>}
-          {vaultInfo.state === "error" && <div style={{ marginTop: 8, fontSize: 9, color: "#ff6b7a", lineHeight: 1.5 }}>BACKUP NEEDS ATTENTION • {vaultInfo.error}</div>}
+          {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
+          {vaultInfo.state === "saved" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#4cd137", letterSpacing: 1.5 }}>RECOVERY COPIES CURRENT • {new Date(vaultInfo.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>}
+          {vaultInfo.state === "error" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#ff6b7a", lineHeight: 1.5 }}>BACKUP NEEDS ATTENTION • {vaultInfo.error}</div>}
         </div>
         <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.55 }}>
           Downloaded backups are your independent copy if the entire site, account, or Firebase project is ever removed.
@@ -5584,7 +5641,7 @@ function DailyGrind() {
         {vaultMessage && <div style={{ marginTop: 9, fontSize: 10, color: vaultMessage.toLowerCase().includes("failed") || vaultMessage.toLowerCase().includes("could not") ? "#ff6b7a" : "#4cd137", lineHeight: 1.5 }}>{vaultMessage}</div>}
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
-        <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 2, textTransform: "uppercase" }}>Reset Everything</button>
+        <button onClick={resetAll} style={{ width: "100%", padding: 11, background: "none", border: "1px solid #ff475733", borderRadius: 8, color: "#ff4757", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1.2, textTransform: "uppercase" }}>Reset Everything</button>
       </div>
     </div>);
   }
@@ -5592,30 +5649,30 @@ function DailyGrind() {
 }
 
 const S = {
-  shell: { minHeight: "100vh", background: "#0b0b14", color: "#e2e2ea", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',monospace" },
+  shell: { minHeight: "100vh", background: "#0b0b14", color: "#e6e6ee", fontFamily: "'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif", fontSize: 14 },
   box: { padding: "16px 14px", maxWidth: 900, margin: "0 auto", paddingBottom: 80 },
-  title: { fontSize: 18, fontWeight: 900, letterSpacing: 6, margin: 0, color: "#f0f0f4", textShadow: "0 0 24px #7c3aed55" },
-  date: { fontSize: 11, color: "#8b8b9e", letterSpacing: 1, marginTop: 4, textTransform: "uppercase" },
-  streakB: { fontSize: 13, fontWeight: 700, color: "#fbbf24", background: "#fbbf2414", border: "1px solid #fbbf2440", borderRadius: 20, padding: "4px 12px" },
+  title: { fontSize: "clamp(15px, 4.4vw, 19px)", fontWeight: 800, fontStretch: "125%", letterSpacing: 1.5, margin: 0, color: "#f4f4f8", whiteSpace: "nowrap" },
+  date: { fontSize: 12, color: "#9a9aae", letterSpacing: 0.3, marginTop: 5, fontWeight: 500 },
+  streakB: { fontSize: 13, fontWeight: 700, color: "#fbbf24", background: "#fbbf2414", border: "1px solid #fbbf2440", borderRadius: 20, padding: "4px 12px", whiteSpace: "nowrap" },
   gear: { background: "#12122a", border: "1px solid #2d2d3a", color: "#8b8b9e", fontSize: 16, width: 34, height: 34, borderRadius: 8, cursor: "pointer" },
   sc: { background: "linear-gradient(160deg, #1a1a2e 0%, #16162a 100%)", border: "1px solid #7c3aed2e", borderRadius: 16, padding: "20px 18px", marginBottom: 24, boxShadow: "0 0 40px #7c3aed14, 0 8px 24px #00000066" },
   tr: { height: 6, background: "#2d2d3a", borderRadius: 3, overflow: "hidden" },
   fl: { height: "100%", borderRadius: 3, transition: "width 0.4s cubic-bezier(0.22,1,0.36,1)" },
   secH: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0 10px", borderBottom: "1px solid #2d2d3a", marginBottom: 10 },
-  secLbl: { fontSize: 10, fontWeight: 800, letterSpacing: 4, color: "#c9c9d4", textTransform: "uppercase" },
-  secCnt: { fontSize: 10, color: "#8b8b9e", background: "#2d2d3a", borderRadius: 10, padding: "2px 7px", fontWeight: 700 },
-  secPt: { fontSize: 12, color: "#7c3aed", fontWeight: 700 },
-  card: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "14px 16px 16px", marginBottom: 10, boxShadow: "0 4px 18px #00000055" },
+  secLbl: { fontSize: 12, fontWeight: 800, fontStretch: "125%", letterSpacing: 1.2, color: "#d6d6e0", textTransform: "uppercase" },
+  secCnt: { fontSize: 11, color: "#9a9aae", background: "#23233a", borderRadius: 10, padding: "2px 8px", fontWeight: 700 },
+  secPt: { fontSize: 13, color: "#a78bfa", fontWeight: 600, fontFamily: "'IBM Plex Mono', ui-monospace, monospace" },
+  card: { background: "#1a1a2e", border: "1px solid #2a2a3c", borderRadius: 14, padding: "12px 14px 12px", marginBottom: 8, boxShadow: "0 2px 12px #00000044" },
   cardHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", cursor: "pointer", marginBottom: 4 },
-  cardName: { fontSize: 14, fontWeight: 700, color: "#f0f0f4", lineHeight: 1.3 },
-  cardPts: { fontSize: 13, fontWeight: 800, color: "#a78bfa", flexShrink: 0, marginLeft: 8 },
-  cardMeta: { fontSize: 10, color: "#8b8b9e", letterSpacing: 0.5, marginBottom: 12 },
+  cardName: { fontSize: 15, fontWeight: 650, color: "#f4f4f8", lineHeight: 1.3 },
+  cardPts: { fontSize: 13, fontWeight: 600, color: "#a78bfa", flexShrink: 0, marginLeft: 8, fontFamily: "'IBM Plex Mono', ui-monospace, monospace" },
+  cardMeta: { fontSize: 12, color: "#9a9aae", letterSpacing: 0, marginBottom: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
   cardDesc: { fontSize: 11, color: "#a0a0b0", lineHeight: 1.6, marginBottom: 12, whiteSpace: "pre-wrap", background: "#12122a", borderRadius: 8, padding: "8px 10px", border: "1px solid #2d2d3a" },
   noteRow: { marginTop: 10, paddingTop: 8, borderTop: "1px solid #2d2d3a" },
   noteInp: { width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 12, fontFamily: "inherit", padding: "8px 10px", outline: "none", boxSizing: "border-box" },
   noteSectionBtn: { width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "9px 8px", marginBottom: 4, background: "transparent", border: "1px solid transparent", borderRadius: 8, color: "#a0a0b0", fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" },
-  noteSectionCount: { minWidth: 20, height: 18, padding: "2px 5px", borderRadius: 9, background: "#2d2d3a", color: "#8b8b9e", fontSize: 8, textAlign: "center" },
-  noteToolBtn: { padding: "7px 9px", background: "#202034", border: "1px solid #353548", borderRadius: 7, color: "#b0b0be", fontSize: 9, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" },
+  noteSectionCount: { minWidth: 20, height: 18, padding: "2px 5px", borderRadius: 9, background: "#2d2d3a", color: "#8b8b9e", fontSize: 10, textAlign: "center" },
+  noteToolBtn: { padding: "7px 10px", background: "#202034", border: "1px solid #353548", borderRadius: 7, color: "#c0c0cc", fontSize: 11, fontWeight: 650, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" },
   textarea: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 },
   week: { display: "flex", justifyContent: "space-between", gap: 2 },
   picker: { display: "flex", justifyContent: "center", gap: 10 },
@@ -5630,12 +5687,12 @@ const S = {
 
   taskList: { background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: "16px", marginBottom: 12, boxShadow: "0 4px 18px #00000055" },
   tlHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid #2d2d3a", paddingBottom: 10 },
-  tlTitle: { fontSize: 14, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1 },
+  tlTitle: { fontSize: 15, fontWeight: 800, fontStretch: "112%", color: "#f4f4f8", letterSpacing: 0.3 },
   tlDel: { background: "none", border: "none", color: "#555566", fontSize: 20, cursor: "pointer", fontFamily: "inherit", padding: "0 4px", lineHeight: 1 },
   tRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #2d2d3a" },
   tCircle: { width: 20, height: 20, borderRadius: 10, border: "2px solid #555566", background: "transparent", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
-  tText: { flex: 1, fontSize: 13, color: "#f0f0f4", lineHeight: 1.4 },
-  tPts: { fontSize: 10, color: "#a78bfa", fontWeight: 700, flexShrink: 0 },
+  tText: { flex: 1, fontSize: 14, color: "#f0f0f4", lineHeight: 1.4 },
+  tPts: { fontSize: 12, color: "#a78bfa", fontWeight: 600, flexShrink: 0, fontFamily: "'IBM Plex Mono', ui-monospace, monospace" },
   tX: { background: "none", border: "none", color: "#555566", fontSize: 16, cursor: "pointer", fontFamily: "inherit", padding: "0 2px", flexShrink: 0, lineHeight: 1 },
   tAddRow: { display: "flex", alignItems: "center", gap: 8, padding: "10px 0 4px" },
   tAddIcon: { color: "#a78bfa", fontSize: 16, fontWeight: 700, flexShrink: 0 },
@@ -5644,8 +5701,8 @@ const S = {
   compToggle: { background: "none", border: "none", color: "#8b8b9e", fontSize: 11, cursor: "pointer", fontFamily: "inherit", padding: "10px 0 4px", letterSpacing: 1, fontWeight: 600, display: "flex", alignItems: "center" },
 
   fCard: { background: "#1a1a2e", borderRadius: 16, padding: "28px 22px", marginTop: 40, border: "1px solid #2d2d3a", boxShadow: "0 8px 28px #00000066" },
-  fTitle: { fontSize: 13, fontWeight: 900, letterSpacing: 4, margin: "0 0 20px 0", color: "#f0f0f4" },
-  lbl: { fontSize: 9, fontWeight: 800, letterSpacing: 3, color: "#8b8b9e", textTransform: "uppercase", display: "block", marginBottom: 6, marginTop: 14 },
+  fTitle: { fontSize: 15, fontWeight: 800, fontStretch: "125%", letterSpacing: 1, margin: "0 0 20px 0", color: "#f4f4f8" },
+  lbl: { fontSize: 11, fontWeight: 700, letterSpacing: 1.4, color: "#9a9aae", textTransform: "uppercase", display: "block", marginBottom: 6, marginTop: 14 },
   inp: { width: "100%", padding: "11px 13px", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 8, color: "#f0f0f4", fontSize: 14, fontFamily: "inherit", outline: "none", boxSizing: "border-box" },
   fAct: { display: "flex", gap: 8, marginTop: 24 },
   cBtn: { flex: 1, padding: 11, background: "none", border: "1px solid #2d2d3a", borderRadius: 8, color: "#8b8b9e", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", letterSpacing: 1 },
@@ -5654,10 +5711,10 @@ const S = {
 
   nav: { position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", background: "#1a1a2eee", borderTop: "1px solid #2d2d3a", zIndex: 100, backdropFilter: "blur(10px)", padding: "4px 0 env(safe-area-inset-bottom, 6px)" },
   navBtn: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "10px 0 6px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", transition: "opacity 0.2s" },
-  navLbl: { fontSize: 9, fontWeight: 700, letterSpacing: 2, color: "#e2e2ea", textTransform: "uppercase" },
+  navLbl: { fontSize: 11, fontWeight: 650, letterSpacing: 0.4, color: "#e6e6ee" },
   win: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "radial-gradient(circle at center,#00ff8726 0%,#0b0b14f2 62%)", backdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 999, pointerEvents: "none" },
-  winTxt: { fontSize: 24, fontWeight: 900, letterSpacing: 8, color: "#00ff87", textShadow: "0 0 40px #00ff8766" },
-  winSub: { fontSize: 13, color: "#8b8b9e", marginTop: 8, letterSpacing: 2 },
+  winTxt: { fontSize: 30, fontWeight: 900, fontStretch: "125%", letterSpacing: 1.2, color: "#00ff87", textShadow: "0 0 40px #00ff8766" },
+  winSub: { fontSize: 13, color: "#8b8b9e", marginTop: 8, letterSpacing: 1.2 },
 };
 
 ReactDOM.createRoot(document.getElementById("root")).render(
