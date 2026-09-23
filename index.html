@@ -216,14 +216,29 @@
       try { _storageBroadcast.postMessage({ key, value, localTs, identity: _identity() }); }
       catch (error) { console.warn("Cross-tab sync announcement failed:", error); }
     }
+    // Every payload is a complete document, so a write still waiting in line is made obsolete by a newer one:
+    // keep at most one write in flight and one waiting per document, always with the newest payload. Callers
+    // whose payload was replaced resolve when the newer write (which contains their change) is confirmed.
+    // Without this, fast edits on a slow connection queued a full upload per edit and never caught up.
     function _queueCloudWrite(key, ref, payload) {
-      const previous = _cloudWriteQueues[key] || Promise.resolve();
-      const next = previous.catch(() => {}).then(() => ref.set(payload));
-      const tracked = next.finally(() => {
-        if (_cloudWriteQueues[key] === tracked) delete _cloudWriteQueues[key];
-      });
-      _cloudWriteQueues[key] = tracked;
-      return tracked;
+      const slotKey = `${key}|${ref.path || ""}`; // never merge writes meant for different accounts
+      const slot = _cloudWriteQueues[slotKey] || (_cloudWriteQueues[slotKey] = { running: false, waiting: null });
+      if (slot.waiting) { slot.waiting.payload = payload; return slot.waiting.promise; }
+      const entry = { payload };
+      entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
+      slot.waiting = entry;
+      const pump = () => {
+        if (slot.running || !slot.waiting) {
+          if (!slot.running && !slot.waiting && _cloudWriteQueues[slotKey] === slot) delete _cloudWriteQueues[slotKey];
+          return;
+        }
+        const current = slot.waiting;
+        slot.waiting = null;
+        slot.running = true;
+        Promise.resolve().then(() => ref.set(current.payload)).then(current.resolve, current.reject).finally(() => { slot.running = false; pump(); });
+      };
+      pump();
+      return entry.promise;
     }
 
     // Versioned recovery vault. The live document remains the fast source of
@@ -3682,7 +3697,8 @@ function DailyGrind() {
     if (noteDraft?.id === note.id) return;
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
-    if (noteCanSave(noteDraft, dataRef.current)) await persistNoteDraft(noteDraft);
+    // persistNoteDraft stores the page on this device synchronously; do not wait for the cloud to switch.
+    if (noteCanSave(noteDraft, dataRef.current)) persistNoteDraft(noteDraft);
     noteSavedSignatureRef.current = noteSignature(note);
     setNoteDraft({ ...note });
     setNoteDraftState("saved");
@@ -3691,11 +3707,8 @@ function DailyGrind() {
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     const draft = noteDraft;
-    if (noteCanSave(draft, dataRef.current)) {
-      setNoteDraftState("saving");
-      const result = await persistNoteDraft(draft);
-      setNoteDraftState(result ? "saved" : "error");
-    }
+    // Stored on this device synchronously; the cloud upload continues in the background.
+    if (noteCanSave(draft, dataRef.current)) persistNoteDraft(draft);
     setNoteDraft(null);
   }
   function toggleNotePin(noteId) {
@@ -3878,9 +3891,11 @@ function DailyGrind() {
     if (!noteCanSave(noteDraft, dataRef.current)) return;
     const signature = noteSignature(noteDraft);
     if (signature === noteSavedSignatureRef.current) return;
-    const result = await persistNoteDraft({ ...noteDraft });
+    // The device copy is written synchronously and is all a backup or safety copy reads; the cloud
+    // confirmation follows in the background (awaiting it here froze backups behind a slow connection).
+    persistNoteDraft({ ...noteDraft });
     const savedLocally = (dataRef.current?.notes || []).some((note) => note.id === noteDraft.id);
-    if (!result && !savedLocally) throw new Error("Your open note could not be saved");
+    if (!savedLocally) throw new Error("Your open note could not be saved");
     noteSavedSignatureRef.current = signature;
     setNoteDraftState("saved");
   }
