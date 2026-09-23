@@ -1281,7 +1281,20 @@ function removeNoteSection(current, section, deletePages, now = Date.now()) {
   };
 }
 
-function mergeLiveNote(draft, incoming, savedSignature) {
+// IDs of ink strokes, text boxes and screenshots present in `before` but gone from `after`.
+function removedNoteItemIds(before, after) {
+  const ids = [];
+  for (const key of ["drawing", "textBoxes", "images"]) {
+    const kept = new Set((after?.[key] || []).map(item => item.id));
+    for (const item of before?.[key] || []) if (!kept.has(item.id)) ids.push(item.id);
+  }
+  return ids;
+}
+
+// removedIds: items deleted on this device while the page is open. The saved signature only advances
+// after a cloud write resolves, but the write's own echo can arrive first; without this, an item added and
+// then deleted inside that window looks like another device's new item and comes back.
+function mergeLiveNote(draft, incoming, savedSignature, removedIds) {
   if (!draft || !incoming || draft.id !== incoming.id) return draft;
   let base;
   try { base = JSON.parse(savedSignature); } catch { return draft; }
@@ -1297,7 +1310,7 @@ function mergeLiveNote(draft, incoming, savedSignature) {
   const remote = new Map((incoming[key] || []).map(stroke => [stroke.id, stroke]));
   return [...new Set([...remote.keys(), ...local.keys()])].flatMap(id => {
     const old = before.get(id), ours = local.get(id), theirs = remote.get(id);
-    if (!old) return [ours || theirs];
+    if (!old) return ours ? [ours] : removedIds?.has(id) ? [] : [theirs];
     if (!ours) return []; // Preserve a local erasure.
     if (!theirs) return same(ours, old) ? [] : [ours];
     return [same(ours, old) ? theirs : ours];
@@ -2016,7 +2029,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
             const maxWidth = Math.max(60, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x);
             resizeBoxTo(box, Math.max(60, Math.min(maxWidth, frameWidth + delta)));
           }}
-          style={{ position: "absolute", right: -7, top: "50%", transform: "translateY(-50%)", width: 12, height: 28, padding: 0, border: "1px solid #6d5bb0", borderRadius: 4, background: "#202033", cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+          style={{ position: "absolute", right: -7, top: "max(50%, 24px)", transform: "translateY(-50%)", width: 12, height: 22, padding: 0, border: "1px solid #6d5bb0", borderRadius: 4, background: "#202033", cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
           <span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} /><span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} />
         </button>}
         {activeTextId === box.id && mode === "text" && <button type="button" disabled={removingText} aria-label="Remove text box" title="Remove text box" onMouseDown={event => event.preventDefault()} onClick={async () => {
@@ -2028,7 +2041,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
             if (!textBoxesRef.current.some(item => item.id === box.id) || publishText(textBoxesRef.current.filter(item => item.id !== box.id))) { setPendingBox(null); setActiveTextId(null); }
           } catch (error) { setMessage(error.message || "Could not save the recovery copy."); }
           finally { setRemovingText(false); }
-        }} style={{ position: "absolute", right: -10, top: -16, width: 20, height: 20, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#ff8793", cursor: "pointer" }}>×</button>}
+        }} style={{ position: "absolute", right: -10, top: -16, width: 20, height: 20, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#ff8793", cursor: removingText ? "wait" : "pointer" }}>{removingText ? "\u2026" : "\u00d7"}</button>}
       </div>)}
       <svg ref={svgRef} aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 2, pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
@@ -2867,6 +2880,12 @@ function DailyGrind() {
   const noteSaveTimerRef = useRef(null);
   const noteSaveVersionRef = useRef(0);
   const noteSavedSignatureRef = useRef("");
+  const noteRemovedIdsRef = useRef({ noteId: null, ids: new Set() });
+  const rememberNoteRemovals = (before, after) => {
+    if (!after?.id) return;
+    if (noteRemovedIdsRef.current.noteId !== after.id) noteRemovedIdsRef.current = { noteId: after.id, ids: new Set() };
+    for (const id of removedNoteItemIds(before, after)) noteRemovedIdsRef.current.ids.add(id);
+  };
   const noteLiveSavePendingRef = useRef(false);
   const noteDraftRef = useRef(null);
   noteDraftRef.current = noteDraft;
@@ -3165,7 +3184,7 @@ function DailyGrind() {
         if (draft) {
           const incoming = (parsed.notes || []).find(note => note.id === draft.id);
           if (incoming) {
-            const merged = mergeLiveNote(draft, incoming, noteSavedSignatureRef.current);
+            const merged = mergeLiveNote(draft, incoming, noteSavedSignatureRef.current, noteRemovedIdsRef.current.noteId === draft.id ? noteRemovedIdsRef.current.ids : undefined);
             const changed = noteSignature(merged) !== noteSignature(draft);
             if (changed || noteSignature(merged) === noteSignature(incoming)) {
               clearTimeout(noteSaveTimerRef.current);
@@ -3752,6 +3771,7 @@ function DailyGrind() {
     const current = noteDraftRef.current;
     if (current?.id !== id) return;
     const next = { ...current, images: (current.images || []).filter(image => image.id !== imageId) };
+    rememberNoteRemovals(current, next);
     noteDraftRef.current = next; setNoteDraft(next); await persistNoteDraft(next);
   }
   async function downloadNotePdf() {
@@ -4565,6 +4585,7 @@ function DailyGrind() {
                         const existing = source.notes.some(entry => entry.id === note.id);
                         const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: note.drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
                         if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        rememberNoteRemovals(current, next);
                         noteDraftRef.current = next; setNoteDraft(next); return true;
                       }}
                       onDrawingChange={drawing => {
@@ -4576,6 +4597,7 @@ function DailyGrind() {
                         const existing = source.notes.some(entry => entry.id === note.id);
                         const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: note.textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
                         if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        rememberNoteRemovals(current, next);
                         noteDraftRef.current = next;
                         setNoteDraft(next);
                         return true;

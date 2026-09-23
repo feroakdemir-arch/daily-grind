@@ -223,3 +223,25 @@ test('a hand-sized text box keeps its width flag; automatic boxes stay unflagged
   assert.equal('sized' in context.normalizeNoteTextBoxes([{ ...base, sized: false }])[0], false);
   assert.throws(() => context.normalizeNoteTextBoxes([{ ...base, sized: 'yes' }]));
 });
+
+test('a text box deleted before its save is confirmed does not come back from the save echo', () => {
+  const page = { id: 'page', title: 'Page', body: '', tag: '', pinned: false, drawing: [], textBoxes: [], images: [] };
+  const signature = context.noteSignature(page); // last confirmed save: no box yet
+  const box = { id: 'textbox-new', text: 'T  F', x: 10, y: 20, width: 280, pageWidth: 900 };
+  const typed = { ...page, textBoxes: [box] }, deleted = { ...page, textBoxes: [] };
+  const removed = new Set(context.removedNoteItemIds(typed, deleted));
+  assert.deepEqual([...removed], ['textbox-new']);
+  // The echo of the pre-delete save still carries the box.
+  assert.equal(context.mergeLiveNote(deleted, typed, signature, removed).textBoxes.length, 0);
+  // A box another device added (never deleted here) still arrives.
+  assert.equal(context.mergeLiveNote(deleted, typed, signature, new Set()).textBoxes.length, 1);
+  assert.equal(context.mergeLiveNote(deleted, typed, signature).textBoxes.length, 1);
+});
+
+test('erased strokes and removed screenshots are remembered the same way', () => {
+  const stroke = { id: 'stroke-1', color: '#fff', width: 3, space: 'page', pageWidth: 900, points: [[1, 1], [5, 5]] };
+  const image = { id: 'image-1', assetId: 'a'.repeat(64), name: 'Screenshot', width: 10, height: 10 };
+  const before = { id: 'page', drawing: [stroke], textBoxes: [], images: [image] };
+  assert.deepEqual([...context.removedNoteItemIds(before, { id: 'page', drawing: [], textBoxes: [], images: [] })].sort(), ['image-1', 'stroke-1']);
+  assert.deepEqual([...context.removedNoteItemIds(before, before)], []);
+});
