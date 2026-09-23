@@ -1499,6 +1499,26 @@ function fmtDoneDate(d) {
   catch (e) { return ""; }
 }
 
+// Side-by-side layout for one day column (Google Calendar style). items: [{ key, start, end }] in minutes.
+// Events that overlap, directly or through a chain, form a cluster; each event takes the first sub-column
+// that is free at its start, and every event in the cluster gets the cluster's column count.
+// Returns Map key -> { col, cols }.
+function layoutDayEvents(items) {
+  const layout = new Map();
+  const sorted = [...items].sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+  let cluster = [], columnEnds = [], clusterEnd = -Infinity;
+  const flush = () => { for (const { key, col } of cluster) layout.set(key, { col, cols: columnEnds.length }); cluster = []; columnEnds = []; };
+  for (const item of sorted) {
+    if (item.start >= clusterEnd) { flush(); clusterEnd = -Infinity; }
+    let col = columnEnds.findIndex(end => end <= item.start);
+    if (col === -1) { col = columnEnds.length; columnEnds.push(item.end); } else columnEnds[col] = item.end;
+    cluster.push({ key: item.key, col });
+    clusterEnd = Math.max(clusterEnd, item.end);
+  }
+  flush();
+  return layout;
+}
+
 function taskElapsedSeconds(task, now = Date.now()) {
   const saved = Math.max(0, Number(task.trackedSeconds) || 0);
   const startedAt = Number(task.timerStartedAt);
@@ -4837,6 +4857,16 @@ function DailyGrind() {
                   {calDates.map((d, di) => {
                     const ds = localDateStr(d);
                     const dayEvents = getDisplayedEvents(ds);
+                    // Overlapping events split the column side by side. The event being dragged is left out
+                    // (it floats full-width on top) so the rest do not reshuffle under the pointer.
+                    const minVisibleMin = 20 / HOUR_H * 60; // blocks are at least 20px tall, so short ones overlap visually
+                    const overlap = layoutDayEvents(dayEvents
+                      .filter(evt => !(calDragging && calDragging.id === (evt._origId || evt.id)))
+                      .map(evt => {
+                        const shift = evt._spilloverFromDate ? 24 * 60 : 0;
+                        const start = timeToMin(evt.start) + shift;
+                        return { key: evt.id, start, end: Math.max(calendarEndMinutes(evt.start, evt.end) + shift, start + minVisibleMin) };
+                      }));
                     return dayEvents.map(evt => {
                       const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
                       if (isDraggingThis && calDragging.newDate && calDragging.newDate !== ds) return null; // hide from original column
@@ -4855,9 +4885,11 @@ function DailyGrind() {
                         const idx = calDates.findIndex(cd => localDateStr(cd) === calDragging.newDate);
                         if (idx >= 0) displayDi = idx;
                       }
+                      const { col, cols } = overlap.get(evt.id) || { col: 0, cols: 1 };
+                      const slotW = `(((100% - 40px) / 7 - 3px) / ${cols})`;
                       return (
                         <div key={evt.id} data-calendar-event={evt.id} style={{
-                          position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
+                          position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: "2px 4px", overflow: "hidden",
                           fontSize: 9, color: "#fff", fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
