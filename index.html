@@ -154,7 +154,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -163,6 +163,9 @@
       if (window._user) return fbDb.collection("users").doc(window._user.uid).collection("data").doc(key);
       return null;
     }
+    // Owner of this device's data when the page opened (loading the account updates dg-owner, and the
+    // calendar loads in parallel: it must judge the device data by who owned it before this visit).
+    const _startupOwner = (() => { try { return localStorage.getItem("dg-owner"); } catch (e) { return null; } })();
     // Who the data on THIS device belongs to. On a shared computer, signing into a
     // different account must never import the previous person's local data.
     function _identity() {
@@ -226,6 +229,211 @@
       }
       return true;
     }
+    // ---- Edits from two devices ----
+    // The account is one cloud document, so a plain upload replaces all of it. Each device remembers the
+    // cloud version its data was built on (its "base"). An upload only replaces the cloud copy while the
+    // cloud still holds that version; if another device saved in between, the three versions are merged so
+    // both devices' edits survive instead of the later upload silently erasing the other's.
+    const _MERGE_KEYS = new Set(["daily-grind-v13", "dg-cal-events"]);
+    const _writerId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const _memoryBase = {};
+    function _docVersion(doc) {
+      return doc ? `${Number(doc.rev) || 0}:${Number(doc.localTs) || 0}:${doc.writer || ""}` : "";
+    }
+    function _versionRev(version) { return parseInt(String(version || "").split(":")[0]) || 0; }
+    function _getBase(key) {
+      try {
+        const version = localStorage.getItem(key + "_basever");
+        const value = version ? localStorage.getItem(key + "_base") : null;
+        if (version && typeof value === "string") return { value, version };
+      } catch (e) {}
+      return _memoryBase[key] || null;
+    }
+    function _forgetBases() {
+      _MERGE_KEYS.forEach((key) => {
+        delete _memoryBase[key];
+        try { localStorage.removeItem(key + "_base"); localStorage.removeItem(key + "_basever"); } catch (e) {}
+      });
+    }
+    function _setBase(key, value, version) {
+      _memoryBase[key] = { value, version };
+      try { localStorage.setItem(key + "_base", value); localStorage.setItem(key + "_basever", version); }
+      catch (e) {
+        // Out of device storage: the base is only an optimisation for merging, never worth a failed save.
+        try { localStorage.removeItem(key + "_base"); localStorage.removeItem(key + "_basever"); } catch (e2) {}
+      }
+    }
+    // Writes the device copy; if the browser is out of storage, drops the merge bases and tries once more.
+    function _storeLocal(key, value, ts) {
+      try { localStorage.setItem(key, value); }
+      catch (error) { _forgetBases(); localStorage.setItem(key, value); }
+      localStorage.setItem(key + "_ts", String(ts));
+      window._lastLocalTs = window._lastLocalTs || {};
+      window._lastLocalTs[key] = ts;
+    }
+    function _hasOwn(object, key) { return Object.prototype.hasOwnProperty.call(object, key); }
+    function _sameJson(a, b) { return a === b || JSON.stringify(a) === JSON.stringify(b); }
+    function _isPlainObject(value) { return !!value && typeof value === "object" && !Array.isArray(value); }
+    function _isIdList(value) { return Array.isArray(value) && value.every((item) => _isPlainObject(item) && typeof item.id === "string" && item.id); }
+    function _isStringList(value) { return Array.isArray(value) && value.every((item) => typeof item === "string"); }
+    const _GONE = { gone: true };
+    // A value changed on one side only takes that change. Changed on both sides: objects and lists of
+    // items with ids merge deeper; two different values for the very same field keep this device's.
+    function _merge3(base, local, remote, path) {
+      if (_sameJson(local, remote)) return local;
+      if (base !== undefined && _sameJson(base, local)) return remote;
+      if (base !== undefined && _sameJson(base, remote)) return local;
+      // Points spent in the store add up: two purchases on two devices both count.
+      if (path === "walletSpent" && [base, local, remote].every(Number.isFinite)) return Math.max(0, local + remote - base);
+      if (_isPlainObject(local) && _isPlainObject(remote)) {
+        const b = _isPlainObject(base) ? base : {};
+        const out = {};
+        new Set([...Object.keys(local), ...Object.keys(remote)]).forEach((key) => {
+          const merged = _mergeEntry(b, local, remote, key, path ? path + "." + key : key);
+          if (merged !== _GONE) out[key] = merged;
+        });
+        return out;
+      }
+      if (_isIdList(local) && _isIdList(remote)) return _mergeIdList(_isIdList(base) ? base : [], local, remote, path);
+      if (_isStringList(local) && _isStringList(remote)) {
+        const b = _isStringList(base) ? base : [];
+        const kept = local.filter((item) => remote.includes(item) || !b.includes(item));
+        remote.forEach((item) => { if (!kept.includes(item) && !b.includes(item)) kept.push(item); });
+        return kept;
+      }
+      return local;
+    }
+    // One field (or one list item, by id). Added on one side: kept. Removed on one side and untouched on
+    // the other: removed. Removed on one side but edited on the other: the edit is kept, never lost.
+    function _mergeEntry(b, l, r, key, path) {
+      const inL = _hasOwn(l, key), inR = _hasOwn(r, key), inB = _hasOwn(b, key);
+      if (inL && inR) return _merge3(inB ? b[key] : undefined, l[key], r[key], path);
+      const kept = inL ? l[key] : r[key];
+      if (!inB) return kept;
+      if (_sameJson(b[key], kept)) return _GONE;
+      return kept;
+    }
+    function _mergeIdList(base, local, remote, path) {
+      const byId = (list) => { const map = Object.create(null); list.forEach((item) => { if (!(item.id in map)) map[item.id] = item; }); return map; };
+      const B = byId(base), L = byId(local), R = byId(remote);
+      const order = (list, other) => list.map((item) => item.id).filter((id) => id in B && id in other);
+      // Follow the side that reordered; if this device kept the old order, take the other device's order.
+      const localReordered = !_sameJson(order(local, R), order(base, L).filter((id) => id in R));
+      const skeleton = localReordered ? local : remote, other = localReordered ? remote : local;
+      const out = [], seen = new Set();
+      const itemPath = path + "[]";
+      skeleton.forEach((item) => {
+        if (seen.has(item.id)) return;
+        seen.add(item.id);
+        const merged = _mergeEntry(B, L, R, item.id, itemPath);
+        if (merged !== _GONE) out.push(merged);
+      });
+      // Items only the other side has go right before their nearest later neighbour there (new items at
+      // the end of a list stay at the end, new items at the top stay at the top).
+      other.forEach((item, index) => {
+        if (seen.has(item.id)) return;
+        seen.add(item.id);
+        const merged = _mergeEntry(B, L, R, item.id, itemPath);
+        if (merged === _GONE) return;
+        let at = out.length;
+        for (let j = index + 1; j < other.length; j++) {
+          const found = out.findIndex((entry) => entry.id === other[j].id);
+          if (found >= 0) { at = found; break; }
+        }
+        out.splice(at, 0, merged);
+      });
+      return out;
+    }
+    // Returns the merged document text, or null when the versions can't be merged safely.
+    function _mergeValues(key, baseValue, localValue, remoteValue) {
+      try {
+        const base = JSON.parse(baseValue), local = JSON.parse(localValue), remote = JSON.parse(remoteValue);
+        if (key === "daily-grind-v13") {
+          // "Reset Everything" is meant to replace everything: the device that reset wins outright.
+          const baseReset = _isPlainObject(base) ? base.resetStamp : undefined;
+          if (_isPlainObject(local) && local.resetStamp && local.resetStamp !== baseReset) return localValue;
+          if (_isPlainObject(remote) && remote.resetStamp && remote.resetStamp !== baseReset) return remoteValue;
+        }
+        const merged = JSON.stringify(_merge3(base, local, remote, ""));
+        return _validStorageValue(key, merged) ? merged : null;
+      } catch (error) {
+        console.warn("Could not merge edits from two devices:", error);
+        return null;
+      }
+    }
+    // Compare-and-merge upload: read the cloud copy and write in one transaction, so another device's save
+    // can never be overwritten unseen.
+    function _mergingWrite(key, ref) {
+      return (payload) => {
+        const { base, ...doc } = payload;
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          return Promise.reject(new Error("You're offline. Your change is saved on this device and will upload when you reconnect."));
+        }
+        return fbDb.runTransaction(async (tx) => {
+          const snap = await tx.get(ref);
+          const server = snap.exists ? snap.data() : null;
+          let value = doc.value;
+          const serverValid = server && typeof server.value === "string" && _validStorageValue(key, server.value);
+          if (serverValid && server.value !== value && base && base.version !== _docVersion(server)) {
+            // Never merge with an empty starter that replaced real data; that is what healing is for.
+            const starterOverReal = key === "daily-grind-v13" && (() => {
+              const rc = _mainRichness(server.value), rl = _mainRichness(value);
+              return rc !== null && rl !== null && rc <= 2 && rl >= rc + 3;
+            })();
+            if (!starterOverReal) {
+              const merged = _mergeValues(key, base.value, value, server.value);
+              if (merged !== null) value = merged;
+            }
+          }
+          const written = { ...doc, value, rev: ((server && Number(server.rev)) || 0) + 1 };
+          tx.set(ref, written);
+          return { doc: written, sent: doc.value };
+        });
+      };
+    }
+    const _localSubscribers = {};
+    function _notifyLocalSubscribers(key, value) {
+      (_localSubscribers[key] || new Set()).forEach((callback) => { try { callback(value); } catch (error) { console.warn(error); } });
+    }
+    // After the cloud confirmed an upload: remember it as the new base; if the cloud merged in another
+    // device's edits, show them here too (unless this device has moved on; its next upload merges again).
+    function _afterCommit(key, result) {
+      if (!result || !result.doc || typeof result.doc.value !== "string") return;
+      const { doc, sent } = result;
+      const version = _docVersion(doc);
+      if (doc.value === sent) { _setBase(key, doc.value, version); return; }
+      let local = null;
+      try { local = localStorage.getItem(key); } catch (e) {}
+      if (local !== sent) return;
+      const ts = _nextLocalTs(key);
+      _storeLocal(key, doc.value, ts);
+      _setBase(key, doc.value, version);
+      _announceStorageWrite(key, doc.value, ts);
+      _notifyLocalSubscribers(key, doc.value);
+    }
+    // Every upload of the account or calendar goes through here.
+    function _upload(key, ref, value, localTs) {
+      const payload = { value, localTs, writer: _writerId, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
+      if (!_MERGE_KEYS.has(key)) return _queueCloudWrite(key, ref, payload);
+      payload.base = _getBase(key);
+      return _queueCloudWrite(key, ref, payload, _mergingWrite(key, ref)).then((result) => { _afterCommit(key, result); return result; });
+    }
+    // Uploads that failed (offline, flaky network) retry by themselves when the connection comes back.
+    const _unsyncedKeys = new Set();
+    function _retryUnsynced() {
+      if (!window._user || !_unsyncedKeys.size) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      Array.from(_unsyncedKeys).forEach((key) => {
+        if ((_pendingStorageWrites[key] || 0) > 0) return;
+        let value = null;
+        try { value = localStorage.getItem(key); } catch (e) {}
+        if (value === null || !_validStorageValue(key, value)) { _unsyncedKeys.delete(key); return; }
+        window.storage.set(key, value).catch(() => {});
+      });
+    }
+    window.addEventListener("online", () => setTimeout(_retryUnsynced, 1500));
+    setInterval(_retryUnsynced, 60000);
+
     const _cloudWriteQueues = {};
     const _pendingStorageWrites = {};
     const _storageStatusListeners = new Set();
@@ -248,11 +456,11 @@
     // keep at most one write in flight and one waiting per document, always with the newest payload. Callers
     // whose payload was replaced resolve when the newer write (which contains their change) is confirmed.
     // Without this, fast edits on a slow connection queued a full upload per edit and never caught up.
-    function _queueCloudWrite(key, ref, payload) {
+    function _queueCloudWrite(key, ref, payload, write) {
       const slotKey = `${key}|${ref.path || ""}`; // never merge writes meant for different accounts
       const slot = _cloudWriteQueues[slotKey] || (_cloudWriteQueues[slotKey] = { running: false, waiting: null });
-      if (slot.waiting) { slot.waiting.payload = payload; return slot.waiting.promise; }
-      const entry = { payload };
+      if (slot.waiting) { slot.waiting.payload = payload; slot.waiting.write = write; return slot.waiting.promise; }
+      const entry = { payload, write };
       entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
       slot.waiting = entry;
       const pump = () => {
@@ -263,7 +471,8 @@
         const current = slot.waiting;
         slot.waiting = null;
         slot.running = true;
-        Promise.resolve().then(() => ref.set(current.payload)).then(current.resolve, current.reject).finally(() => { slot.running = false; pump(); });
+        Promise.resolve().then(() => current.write ? current.write(current.payload) : ref.set(current.payload).then(() => current.payload))
+          .then(current.resolve, current.reject).finally(() => { slot.running = false; pump(); });
       };
       pump();
       return entry.promise;
@@ -384,7 +593,13 @@
             { id: `${VAULT_PREFIX}weekly-${_weekStart(now)}`, calendarId: `${VAULT_CAL_PREFIX}weekly-${_weekStart(now)}`, kind: "weekly" },
           ];
       _emitVaultStatus("saving", { reason: reason || "automatic" });
-      await Promise.all(targets.flatMap((target) => [
+      // A safety copy is also kept on this device at once, so a delete never waits on the network.
+      let deviceCopy = false;
+      if (safetyCopy) {
+        try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, calendarValue, reason, at: now })); deviceCopy = true; }
+        catch (e) { console.warn("Device safety copy skipped:", e); }
+      }
+      const cloudCopies = Promise.all(targets.flatMap((target) => [
         _queueCloudWrite(`vault:${target.id}`, collection.doc(target.id), {
           value,
           checksum,
@@ -406,23 +621,40 @@
           clientCreatedAt: now,
           updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
         }),
-      ]));
-      await _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes);
+      ])).then(() => _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes));
       const result = { cloud: true, copies: targets.length * 2, at: now };
+      if (deviceCopy) {
+        // Offline or slow: the cloud copies stay queued (Firestore keeps them) and upload later.
+        const confirmed = await Promise.race([cloudCopies.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 5000))]);
+        if (!confirmed) {
+          cloudCopies.then(() => _emitVaultStatus("saved", result), (error) => _emitVaultStatus("error", { error: String(error.message || error) }));
+          return { ...result, cloud: "pending" };
+        }
+      } else {
+        await cloudCopies;
+      }
       _emitVaultStatus("saved", result);
       return result;
     }
+    // Each automatic capture uploads 8 full copies (latest/hourly/daily/weekly, account + calendar). Doing
+    // that after every pause in typing competed with real saves on slow connections, so captures now run
+    // at most every 5 minutes, always with the newest data.
+    let _vaultLastRun = 0;
     function _scheduleVault(value) {
       _vaultPendingValue = value;
-      clearTimeout(_vaultTimer);
+      if (_vaultTimer) return;
+      const wait = Math.max(4000, _vaultLastRun + 5 * 60 * 1000 - Date.now());
       _vaultTimer = setTimeout(() => {
+        _vaultTimer = null;
         const pending = _vaultPendingValue;
         _vaultPendingValue = null;
+        if (pending === null) return;
+        _vaultLastRun = Date.now();
         _captureVault(pending, "automatic", false).catch((error) => {
           console.warn("Automatic backup failed:", error);
           _emitVaultStatus("error", { error: String(error.message || error) });
         });
-      }, 4000);
+      }, wait);
     }
     window.dataVault = {
       schedule: _scheduleVault,
@@ -644,6 +876,49 @@
       },
     };
 
+    // A save from another device (or tab) reached the cloud. Take it; if this device has edits the cloud
+    // hasn't confirmed yet, merge them in and upload the result instead of dropping either side.
+    function _receiveRemote(key, doc, callback) {
+      const metadata = doc.metadata || {};
+      if (metadata.hasPendingWrites || metadata.fromCache) return; // not a confirmed cloud version
+      const d = doc.data() || {};
+      if (d.writer && d.writer === _writerId) return; // this tab's own upload; handled when it was confirmed
+      const version = _docVersion(d);
+      const base = _getBase(key);
+      if (base && base.version === version) return;
+      // An older version arriving late must not replace a newer one this device already has.
+      if (base && Number(d.rev) > 0 && _versionRev(base.version) > Number(d.rev)) return;
+      let local = null;
+      try { local = localStorage.getItem(key); } catch (e) {}
+      if (local === d.value) { _setBase(key, d.value, version); return; }
+      const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
+      if (key === "daily-grind-v13" && local !== null) {
+        // Same safety as get(): a live-sync update carrying the empty starter never clobbers real data.
+        const rc = _mainRichness(d.value), rl = _mainRichness(local);
+        if (rc !== null && rl !== null && rc <= 2 && rl >= rc + 3) return;
+      }
+      const localValid = local !== null && _validStorageValue(key, local);
+      let next = d.value;
+      if (localValid && base && local !== base.value) {
+        next = _mergeValues(key, base.value, local, d.value);
+        if (next === null) next = (Number(d.localTs) || 0) > localTs ? d.value : local;
+      } else if (localValid && !base && !((Number(d.localTs) || 0) > localTs)) {
+        return; // first run of this version, nothing known about the base: the newer timestamp wins as before
+      }
+      _setBase(key, d.value, version);
+      window._lastLocalTs = window._lastLocalTs || {};
+      if (next === d.value) {
+        const ts = Math.max(_nextLocalTs(key), Number(d.localTs) || 0);
+        _storeLocal(key, next, ts);
+        localStorage.setItem("dg-owner", _identity());
+        _announceStorageWrite(key, next, ts);
+      } else {
+        // set() stores it here at once (before its first await) and uploads the merged result.
+        window.storage.set(key, next).catch((error) => console.warn("Merged edits are waiting to upload:", error));
+      }
+      try { callback(next); } catch (error) { console.warn(error); }
+    }
+
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
     window.storage = {
@@ -666,6 +941,8 @@
           if (localData && ownerIsUser && (!identIsUser || owner !== ident)) {
             localStorage.removeItem(key);
             localStorage.removeItem(key + "_ts");
+            localStorage.removeItem(key + "_base");
+            localStorage.removeItem(key + "_basever");
             localData = null;
           }
 
@@ -682,8 +959,23 @@
                   const healTs = Math.max(localTs, fbTs, Date.now()) + 1;
                   localStorage.setItem(key + "_ts", String(healTs));
                   window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
-                  _queueCloudWrite(key, ref, { value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                  _unsyncedKeys.add(key);
+                  _upload(key, ref, localData.value, healTs).then(() => _unsyncedKeys.delete(key), console.warn);
                   return localData;
+                }
+                // Data made on this device while signed out (or by an earlier account) is not this
+                // account's data. The account's cloud copy wins; the device data is kept as a local
+                // safety copy (Settings → backups) instead of silently replacing the account.
+                if (localData && identIsUser && _startupOwner !== ident) {
+                  if (key === "daily-grind-v13" && _mainRichness(localData.value) > 2) {
+                    try {
+                      localStorage.setItem("dg-vault-local-safety", JSON.stringify({
+                        value: localData.value, calendarValue: _validStorageValue("dg-cal-events", localStorage.getItem("dg-cal-events")) ? localStorage.getItem("dg-cal-events") : "[]",
+                        reason: "data from before sign-in", at: Date.now(),
+                      }));
+                    } catch (e) { console.warn("Signed-out data could not be kept as a safety copy:", e); }
+                  }
+                  localData = null;
                 }
                 // SAFETY (main data only): never let the empty starter clobber real
                 // data, and let real data restore over an empty starter — no matter
@@ -697,7 +989,8 @@
                       localStorage.setItem(key + "_ts", String(healTs));
                       localStorage.setItem("dg-owner", _identity());
                       window._lastLocalTs = window._lastLocalTs || {}; window._lastLocalTs[key] = healTs;
-                      _queueCloudWrite(key, ref, { value: localData.value, localTs: healTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
+                      _unsyncedKeys.add(key);
+                      _upload(key, ref, localData.value, healTs).then(() => _unsyncedKeys.delete(key), console.warn);
                       return localData;
                     }
                     if (rl <= 2 && rc >= rl + 3) {
@@ -711,23 +1004,28 @@
                     }
                   }
                 }
-                // Cloud is source of truth when sync is enabled.
-                // Use local only if local is strictly newer (i.e. offline edits we haven't pushed yet).
-                if (localTs > fbTs && localData) {
-                  if (_validStorageValue(key, localData.value)) {
-                    // Local has unsynced changes — push to cloud
-                    _queueCloudWrite(key, ref, { value: localData.value, localTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(console.warn);
-                    return localData;
-                  }
-                  console.warn("Invalid local data was ignored for", key);
+                // Edits this device made that the cloud never confirmed (offline, closed too soon).
+                // With a known base they merge with whatever other devices saved meanwhile; without one
+                // (first run of this version) the newer timestamp wins, as before.
+                const base = _MERGE_KEYS.has(key) ? _getBase(key) : null;
+                const localValid = !!localData && _validStorageValue(key, localData.value);
+                if (localData && !localValid) console.warn("Invalid local data was ignored for", key);
+                const unsynced = localValid && localData.value !== fbValue && (base ? localData.value !== base.value : localTs > fbTs);
+                if (unsynced) {
+                  let value = localData.value;
+                  if (base && base.version !== _docVersion(fbData)) value = _mergeValues(key, base.value, localData.value, fbValue) || localData.value;
+                  const pushTs = Math.max(localTs, fbTs, Date.now()) + 1;
+                  _storeLocal(key, value, pushTs);
+                  localStorage.setItem("dg-owner", _identity());
+                  _unsyncedKeys.add(key);
+                  _upload(key, ref, value, pushTs).then(() => _unsyncedKeys.delete(key), (error) => console.warn("Upload of this device's unsynced changes failed; it will retry:", error));
+                  return { key, value };
                 }
                 // Otherwise, cloud wins
-                const saveTs = fbTs || Date.now();
-                localStorage.setItem(key, fbValue);
-                localStorage.setItem(key + "_ts", String(saveTs));
+                const saveTs = Math.max(fbTs || Date.now(), localTs);
+                _storeLocal(key, fbValue, saveTs);
                 localStorage.setItem("dg-owner", _identity());
-                window._lastLocalTs = window._lastLocalTs || {};
-                window._lastLocalTs[key] = saveTs;
+                if (_MERGE_KEYS.has(key)) _setBase(key, fbValue, _docVersion(fbData));
                 return { key, value: fbValue };
               } else if (localData) {
                 // Cloud empty — seed it from local (this is also how data
@@ -742,7 +1040,7 @@
                 }
                 const pushTs = localTs || Date.now();
                 localStorage.setItem(key + "_ts", String(pushTs));
-                await _queueCloudWrite(key, ref, { value: localData.value, localTs: pushTs, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                await _upload(key, ref, localData.value, pushTs);
                 localStorage.setItem("dg-owner", ident);
               }
             } catch (e) {
@@ -764,10 +1062,7 @@
         try {
           if (!_validStorageValue(key, value)) throw new Error(`Invalid data was blocked for ${key}`);
           ts = _nextLocalTs(key);
-          localStorage.setItem(key, value);
-          localStorage.setItem(key + "_ts", String(ts));
-          window._lastLocalTs = window._lastLocalTs || {};
-          window._lastLocalTs[key] = ts;
+          _storeLocal(key, value, ts);
           _announceStorageWrite(key, value, ts);
         } catch (e) {
           _emitStorageStatus("error", key, e);
@@ -781,11 +1076,9 @@
           const ref = _docRef(key);
           if (ref) {
             localStorage.setItem("dg-owner", _identity());
-            await _queueCloudWrite(key, ref, {
-              value: value,
-              localTs: ts,
-              updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-            });
+            _unsyncedKeys.add(key);
+            await _upload(key, ref, value, ts);
+            _unsyncedKeys.delete(key);
           }
           if (key === "daily-grind-v13") window.dataVault.schedule(value);
           if (key === "dg-cal-events") {
@@ -807,17 +1100,25 @@
       setLocalOnly(key, value) {
         if (!_validStorageValue(key, value)) throw new Error(`Invalid data was blocked for ${key}`);
         const ts = _nextLocalTs(key);
-        localStorage.setItem(key, value);
-        localStorage.setItem(key + "_ts", String(ts));
+        _storeLocal(key, value, ts);
         if (_docRef(key)) localStorage.setItem("dg-owner", _identity());
-        window._lastLocalTs = window._lastLocalTs || {};
-        window._lastLocalTs[key] = ts;
         _announceStorageWrite(key, value, ts);
         return { key, value };
       },
       onStatus(callback) {
         _storageStatusListeners.add(callback);
         return () => _storageStatusListeners.delete(callback);
+      },
+      // True while some change on this device hasn't been confirmed by the cloud yet.
+      hasUnsyncedChanges() {
+        return _unsyncedKeys.size > 0 || Object.values(_pendingStorageWrites).some((count) => count > 0);
+      },
+      // Waits (up to timeoutMs) for every pending upload; resolves true when nothing is left unsynced.
+      async flush(timeoutMs) {
+        _retryUnsynced();
+        const until = Date.now() + (timeoutMs || 8000);
+        while (window.storage.hasUnsyncedChanges() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 250));
+        return !window.storage.hasUnsyncedChanges();
       },
       // Subscribe to real-time cloud updates for a key
       subscribe(key, callback) {
@@ -843,6 +1144,8 @@
         };
         if (_storageBroadcast) _storageBroadcast.addEventListener("message", onBroadcast);
         window.addEventListener("storage", onStorage);
+        const onLocalMerge = (value) => { if (!cancelled) callback(value); };
+        (_localSubscribers[key] = _localSubscribers[key] || new Set()).add(onLocalMerge);
         _fbReady.then(() => {
           if (cancelled) return;
           const ref = _docRef(key);
@@ -855,6 +1158,7 @@
                 _emitStorageStatus("error", key, new Error("Invalid cloud update was blocked"));
                 return;
               }
+              if (_MERGE_KEYS.has(key)) { _receiveRemote(key, doc, callback); return; }
               const fbTs = d.localTs || 0;
               const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
               // Ignore echoes of our own recent writes
@@ -877,6 +1181,7 @@
         });
         return () => {
           cancelled = true;
+          if (_localSubscribers[key]) _localSubscribers[key].delete(onLocalMerge);
           if (_storageBroadcast) _storageBroadcast.removeEventListener("message", onBroadcast);
           window.removeEventListener("storage", onStorage);
           try { unsub(); } catch(e) {}
@@ -1200,6 +1505,39 @@ function reconcileTaskLedger(data, ledgerEntries) {
 function textByteSize(text) {
   try { return new TextEncoder().encode(text).length; }
   catch (e) { return new Blob([text]).size; }
+}
+
+// Note ink, text boxes and screenshots are stored once, in the noteDrawings / noteTextBoxes / noteImages
+// maps (parseMainData reads those first and rebuilds each note's copy). Keeping them on the notes too
+// doubled every handwritten page inside the one cloud document, which has a hard size cap.
+function compactMainData(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.notes)) return data;
+  const own = (map, id) => !!map && typeof map === "object" && Object.prototype.hasOwnProperty.call(map, id);
+  const noteDrawings = {}, noteTextBoxes = {}, noteImages = {};
+  const notes = data.notes.map((note) => {
+    if (!note || typeof note !== "object" || typeof note.id !== "string") return note;
+    const { drawing, textBoxes, images, ...rest } = note;
+    const pick = (map, fallback) => own(map, note.id) ? map[note.id] : fallback;
+    const ink = pick(data.noteDrawings, drawing), boxes = pick(data.noteTextBoxes, textBoxes), shots = pick(data.noteImages, images);
+    if (Array.isArray(ink) && ink.length) noteDrawings[note.id] = ink;
+    if (Array.isArray(boxes) && boxes.length) noteTextBoxes[note.id] = boxes;
+    if (Array.isArray(shots) && shots.length) noteImages[note.id] = shots;
+    return rest;
+  });
+  return { ...data, notes, noteDrawings, noteTextBoxes, noteImages };
+}
+function serializeMainData(data) { return JSON.stringify(compactMainData(data)); }
+// Size of the saved account if `note` replaced its current version: the rest of the account is measured
+// once per saved state, so the pen doesn't re-measure the whole account on every movement.
+const accountSizeCache = new WeakMap();
+function accountBytesWithNote(source, note) {
+  let byNote = accountSizeCache.get(source);
+  if (!byNote) { byNote = new Map(); accountSizeCache.set(source, byNote); }
+  if (!byNote.has(note.id)) {
+    const others = { ...source, notes: (source.notes || []).filter((entry) => entry.id !== note.id) };
+    byNote.set(note.id, textByteSize(serializeMainData(others)));
+  }
+  return byNote.get(note.id) + textByteSize(JSON.stringify(note)) + 64;
 }
 
 async function sha256Text(text) {
@@ -2274,9 +2612,10 @@ function reminderWeekOffset(date) {
 
 function SaveIndicator({ info, onRetry }) {
   if (!info || info.state === "idle") return null;
-  const isError = info.state === "error";
-  const color = isError ? "#ff6b78" : info.state === "saving" ? "#ffd43b" : "#00b86b";
-  const label = isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
+  const offline = info.state === "error" && typeof navigator !== "undefined" && navigator.onLine === false;
+  const isError = info.state === "error" && !offline;
+  const color = isError ? "#ff6b78" : offline || info.state === "saving" ? "#ffd43b" : "#00b86b";
+  const label = offline ? "● SAVED ON DEVICE · OFFLINE, WILL SYNC" : isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
   return (
     <button
       onClick={isError ? onRetry : undefined}
@@ -2982,6 +3321,8 @@ function DailyGrind() {
   const [vaultLoading, setVaultLoading] = useState(false);
   const [vaultMessage, setVaultMessage] = useState("");
   const dataRef = useRef(null);
+  // Whether the latest save() call was applied (false when it was blocked: too large or invalid), and why.
+  const lastSaveRef = useRef({ applied: true, error: "" });
   const taskLedgerRef = useRef([]);
   const backupFileRef = useRef(null);
   const initialVaultRef = useRef(false);
@@ -3163,8 +3504,32 @@ function DailyGrind() {
     if (page === "calendar") return watchCalendarClock(setCalendarNow);
   }, [page]);
   const resetHour = data?.dayResetHour || 0;
+  // Re-render when the day flips (and when the app comes back to the screen) so a page left open
+  // overnight never writes this morning's check-offs into yesterday.
+  const [, setDayTick] = useState(0);
+  useEffect(() => {
+    let timer;
+    const arm = () => {
+      const now = new Date(), next = new Date(now);
+      next.setHours(resetHour, 0, 5, 0);
+      if (next <= now) next.setDate(next.getDate() + 1);
+      timer = setTimeout(() => { setDayTick((tick) => tick + 1); arm(); }, Math.min(next - now, 60 * 60 * 1000));
+    };
+    arm();
+    const onVisible = () => { if (document.visibilityState === "visible") setDayTick((tick) => tick + 1); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [resetHour]);
   const today = getToday(resetHour);
   const weekDates = getWeekDates(today);
+  // How full the one cloud document is (it has a hard cap). Measured shortly after changes settle.
+  const [accountBytes, setAccountBytes] = useState(0);
+  useEffect(() => {
+    if (!data) return;
+    const timer = setTimeout(() => { try { setAccountBytes(textByteSize(serializeMainData(data))); } catch (e) {} }, 1500);
+    return () => clearTimeout(timer);
+  }, [data]);
+  const accountFull = accountBytes / MAX_SAFE_DOC_BYTES;
 
   const [hasSavedData, setHasSavedData] = useState(true);
   useEffect(() => { dataRef.current = data; }, [data]);
@@ -3198,8 +3563,9 @@ function DailyGrind() {
         }
         const base = r?.value ? parseMainData(r.value) : mkDefault();
         let ledgerEntries = [];
+        let ledgerLoaded = true;
         try { ledgerEntries = await window.taskLedger.list(); }
-        catch (error) { console.warn("Task recovery records could not be loaded yet:", error); }
+        catch (error) { ledgerLoaded = false; console.warn("Task recovery records could not be loaded yet:", error); }
         taskLedgerRef.current = ledgerEntries;
         const reconciled = reconcileTaskLedger(base, ledgerEntries);
         const parsed = reconciled.data;
@@ -3208,9 +3574,9 @@ function DailyGrind() {
         setGoalInput(String(parsed.dailyGoal || 100));
         setHasSavedData(!!r?.value || ledgerEntries.some((entry) => entry && entry.deleted !== true));
         if (reconciled.changed) {
-          window.storage.set(STORAGE_KEY, JSON.stringify(parsed)).catch((error) => console.warn("Recovered tasks could not be merged to the main cloud copy yet:", error));
+          window.storage.set(STORAGE_KEY, serializeMainData(parsed)).catch((error) => console.warn("Recovered tasks could not be merged to the main cloud copy yet:", error));
         }
-        window.taskLedger.seed(parsed, ledgerEntries).catch((error) => console.warn("Existing task recovery seeding failed:", error));
+        if (ledgerLoaded) window.taskLedger.seed(parsed, ledgerEntries).catch((error) => console.warn("Existing task recovery seeding failed:", error));
         loaded = true;
         break;
       } catch (e) {
@@ -3226,7 +3592,7 @@ function DailyGrind() {
   useEffect(() => {
     if (loading || !hasSavedData || !dataRef.current || initialVaultRef.current) return;
     initialVaultRef.current = true;
-    window.dataVault?.schedule(JSON.stringify(dataRef.current));
+    window.dataVault?.schedule(serializeMainData(dataRef.current));
   }, [loading, hasSavedData]);
 
   const save = useCallback((nextOrUpdater) => {
@@ -3234,18 +3600,21 @@ function DailyGrind() {
     if (!current) return Promise.resolve(null);
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
     if (!next || typeof next !== "object") return Promise.resolve(null);
+    lastSaveRef.current = { applied: false, error: "" };
     let validated;
     let serialized;
     try {
-      serialized = JSON.stringify(next);
+      serialized = serializeMainData(next);
       if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) throw new Error("Organized Me data reached the safe cloud size limit. Download a backup before adding more data.");
       validated = parseMainData(serialized);
-      serialized = JSON.stringify(validated);
+      serialized = serializeMainData(validated);
     } catch (error) {
       console.error("Main data save blocked:", error);
+      lastSaveRef.current = { applied: false, error: String(error.message || error) };
       setSaveInfo({ state: "error", key: STORAGE_KEY, error: String(error.message || error) });
       return Promise.resolve(null);
     }
+    lastSaveRef.current = { applied: true, error: "" };
     dataRef.current = validated;
     setData(validated);
     setHasSavedData(true);
@@ -3263,7 +3632,7 @@ function DailyGrind() {
   const protectBeforeDestructive = useCallback(async (reason) => {
     if (!dataRef.current) return false;
     try {
-      await window.dataVault.capture(JSON.stringify(dataRef.current), reason, true);
+      await window.dataVault.capture(serializeMainData(dataRef.current), reason, true);
       return true;
     } catch (error) {
       console.error("Safety copy failed:", error);
@@ -3275,7 +3644,13 @@ function DailyGrind() {
   const persistNoteDraft = useCallback((draft) => {
     if (!noteCanSave(draft, dataRef.current)) return Promise.resolve(null);
     const now = Date.now();
-    const note = normalizedNoteDraft(draft, now);
+    let note;
+    try { note = normalizedNoteDraft(draft, now); }
+    catch (error) {
+      lastSaveRef.current = { applied: false, error: String(error.message || error) };
+      setSaveInfo({ state: "error", key: STORAGE_KEY, error: String(error.message || error) });
+      return Promise.resolve(null);
+    }
     return save((current) => {
       const notes = Array.isArray(current.notes) ? current.notes : [];
       const exists = notes.some((entry) => entry.id === note.id);
@@ -3358,7 +3733,7 @@ function DailyGrind() {
           noteTextBoxes: { ...(current.noteTextBoxes || {}), [note.id]: note.textBoxes },
         noteImages: { ...(current.noteImages || {}), [note.id]: note.images },
         }));
-        const serialized = JSON.stringify(next);
+        const serialized = serializeMainData(next);
         if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) return;
         dataRef.current = next;
         window.storage.setLocalOnly(STORAGE_KEY, serialized);
@@ -3387,7 +3762,7 @@ function DailyGrind() {
   const retrySaves = useCallback(() => {
     const jobs = [];
     if (dataRef.current) {
-      jobs.push(window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)));
+      jobs.push(window.storage.set(STORAGE_KEY, serializeMainData(dataRef.current)));
       jobs.push(window.taskLedger.seed(dataRef.current, taskLedgerRef.current));
     }
     if (calEventsLoaded && !calLoadError) jobs.push(window.storage.set("dg-cal-events", JSON.stringify(calEventsRef.current)));
@@ -3425,7 +3800,7 @@ function DailyGrind() {
         setData(parsed);
         setGoalInput(String(parsed.dailyGoal || 100));
         if (reconciled.changed) {
-          window.storage.set(STORAGE_KEY, JSON.stringify(parsed)).catch((error) => console.warn("Task recovery repair is waiting to sync:", error));
+          window.storage.set(STORAGE_KEY, serializeMainData(parsed)).catch((error) => console.warn("Task recovery repair is waiting to sync:", error));
         }
       } catch(e) {
         console.warn("Live sync parse failed:", e);
@@ -3449,7 +3824,7 @@ function DailyGrind() {
         dataRef.current = reconciled.data;
         setData(reconciled.data);
         setGoalInput(String(reconciled.data.dailyGoal || 100));
-        window.storage.set(STORAGE_KEY, JSON.stringify(reconciled.data)).catch((error) => console.warn("Recovered task merge is waiting to sync:", error));
+        window.storage.set(STORAGE_KEY, serializeMainData(reconciled.data)).catch((error) => console.warn("Recovered task merge is waiting to sync:", error));
       } catch (error) {
         console.warn("Task recovery merge failed:", error);
       }
@@ -3513,7 +3888,7 @@ function DailyGrind() {
 
   useEffect(() => {
     if (!calEventsLoaded || calLoadError || !dataRef.current || !hasSavedData) return;
-    window.dataVault?.schedule(JSON.stringify(dataRef.current));
+    window.dataVault?.schedule(serializeMainData(dataRef.current));
   }, [calEventsLoaded, calLoadError, hasSavedData]);
 
   // Day rollover
@@ -3561,7 +3936,8 @@ function DailyGrind() {
     // Reset daily task lists if the day changed — ONLY lists marked resetsDaily.
     // Non-daily lists keep their completed items; legacy done-tasks without a
     // doneDate get stamped with yesterday so they stop counting toward today.
-    if (data.lastTaskResetDate && data.lastTaskResetDate !== today) {
+    // Only a real move forward resets daily lists; an earlier reset hour or travel west must not reset twice.
+    if (data.lastTaskResetDate && data.lastTaskResetDate < today) {
       updated.taskLists = updated.taskLists.map((l) => {
         if (l.resetsDaily) {
           // Archive each completed daily task into history, then reset for the new day.
@@ -3593,7 +3969,7 @@ function DailyGrind() {
       // user actually has data (or makes an edit, which saves explicitly).
       if (hasSavedData) save(updated); else { dataRef.current = updated; setData(updated); }
     }
-  }, [data, save, hasSavedData]);
+  }, [data, save, hasSavedData, today]);
 
   const getTL = () => data?.log[today] || {};
 
@@ -3901,12 +4277,23 @@ function DailyGrind() {
     setShowNewNoteSection(false);
     openNewNote(section);
   }
+  // Stores the open page on this device right now (the cloud upload follows in the background). Returns
+  // false, after telling the user why, when it couldn't be stored, so the page stays open instead of
+  // being thrown away.
+  function storeOpenNoteNow(draft) {
+    if (!noteCanSave(draft, dataRef.current)) return true;
+    persistNoteDraft(draft);
+    if (lastSaveRef.current.applied) return true;
+    setNoteDraftState("error");
+    alert(`This page couldn't be saved, so it's still open.\n\n${lastSaveRef.current.error || "Please try again."}`);
+    return false;
+  }
   async function openNote(note) {
     if (noteDraft?.id === note.id) return;
     clearTimeout(noteSaveTimerRef.current);
     noteSaveVersionRef.current += 1;
     // persistNoteDraft stores the page on this device synchronously; do not wait for the cloud to switch.
-    if (noteCanSave(noteDraft, dataRef.current)) persistNoteDraft(noteDraft);
+    if (!storeOpenNoteNow(noteDraft)) return;
     noteSavedSignatureRef.current = noteSignature(note);
     setNoteDraft({ ...note });
     setNoteDraftState("saved");
@@ -3916,7 +4303,7 @@ function DailyGrind() {
     noteSaveVersionRef.current += 1;
     const draft = noteDraft;
     // Stored on this device synchronously; the cloud upload continues in the background.
-    if (noteCanSave(draft, dataRef.current)) persistNoteDraft(draft);
+    if (!storeOpenNoteNow(draft)) return;
     setNoteDraft(null);
   }
   function toggleNotePin(noteId) {
@@ -3935,7 +4322,7 @@ function DailyGrind() {
     setDeleteSectionBusy(true); setDeleteSectionError("");
     try {
       await flushCurrentNote();
-      await window.dataVault.capture(JSON.stringify(dataRef.current), "before-note-section-delete", true);
+      await window.dataVault.capture(serializeMainData(dataRef.current), "before-note-section-delete", true);
       clearTimeout(noteSaveTimerRef.current);
       noteSaveVersionRef.current += 1;
       const saving = save(current => removeNoteSection(current, section, deletePages));
@@ -4018,7 +4405,7 @@ function DailyGrind() {
     noteSaveVersionRef.current += 1;
     try {
       await flushCurrentNote();
-      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-note-delete", true);
+      await window.dataVault?.capture(serializeMainData(dataRef.current), "before-note-delete", true);
     } catch (error) {
       alert("The safety copy could not be created, so the note was not deleted. Check your connection and try again.");
       return;
@@ -4050,7 +4437,7 @@ function DailyGrind() {
     if (!confirm("Reset every habit, task, note, score, streak, and reward? Your cloud copy will also be reset.")) return;
     try {
       await flushCurrentNote();
-      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-reset-everything", true);
+      await window.dataVault?.capture(serializeMainData(dataRef.current), "before-reset-everything", true);
     } catch (error) {
       alert("The safety copy could not be created, so nothing was reset. Check your connection and try again.");
       return;
@@ -4102,8 +4489,7 @@ function DailyGrind() {
     // The device copy is written synchronously and is all a backup or safety copy reads; the cloud
     // confirmation follows in the background (awaiting it here froze backups behind a slow connection).
     persistNoteDraft({ ...noteDraft });
-    const savedLocally = (dataRef.current?.notes || []).some((note) => note.id === noteDraft.id);
-    if (!savedLocally) throw new Error("Your open note could not be saved");
+    if (!lastSaveRef.current.applied) throw new Error(`Your open note could not be saved. ${lastSaveRef.current.error}`.trim());
     noteSavedSignatureRef.current = signature;
     setNoteDraftState("saved");
   }
@@ -4187,7 +4573,7 @@ function DailyGrind() {
       const taskCount = (parsed.taskLists || []).reduce((sum, list) => sum + (list.items || []).length, 0);
       if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
       await flushCurrentNote();
-      await window.dataVault?.capture(JSON.stringify(dataRef.current), "before-file-restore", true);
+      await window.dataVault?.capture(serializeMainData(dataRef.current), "before-file-restore", true);
       if (hasImages && bundle.version >= 3) await window.noteImageStore.importAssets(bundle.imageAssets, parsed);
       const mainResult = await save(parsed);
       const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
@@ -4229,7 +4615,7 @@ function DailyGrind() {
       const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
       if (!confirm(`Restore the ${selected?.kind || "cloud"} copy from ${when} with ${noteCount} notes?\n\nYour current data will be saved as a safety copy first.`)) return;
       await flushCurrentNote();
-      await window.dataVault.capture(JSON.stringify(dataRef.current), "before-cloud-restore", true);
+      await window.dataVault.capture(serializeMainData(dataRef.current), "before-cloud-restore", true);
       const result = await save(parsed);
       const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
       setGoalInput(String(parsed.dailyGoal || 100));
@@ -4345,6 +4731,16 @@ function DailyGrind() {
       <div style={{ color: "#f0f0f4", fontSize: 15, fontWeight: 900, letterSpacing: 1.2, marginBottom: 10 }}>DATA KEPT SAFE</div>
       <div style={{ color: "#8b8b9e", fontSize: 11, lineHeight: 1.7, marginBottom: 20 }}>{loadError}</div>
       <button onClick={() => setLoadAttempt((n) => n + 1)} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
+      <button onClick={() => {
+        // Raw copy of everything this device holds, restorable from Settings once the app loads again.
+        const read = (key) => { try { return localStorage.getItem(key); } catch (e) { return null; } };
+        const bundle = { format: "daily-grind-device-copy", exportedAt: new Date().toISOString(), main: read(STORAGE_KEY), calendar: read("dg-cal-events"), safety: read("dg-vault-local-safety") };
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(new Blob([JSON.stringify(bundle)], { type: "application/json" }));
+        link.download = `organized-me-device-copy-${bundle.exportedAt.slice(0, 10)}.json`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+      }} style={{ ...S.cBtn, width: "100%", marginTop: 10 }}>Download this device's copy</button>
     </div></div>
   );
   if (loading || !data) return <div style={S.shell}><div style={{ ...S.box, paddingTop: 120, textAlign: "center" }}><span style={{ color: "#8b8b9e", fontSize: 11, letterSpacing: 1.6 }}>LOADING...</span></div></div>;
@@ -4385,6 +4781,10 @@ function DailyGrind() {
   // Calendar helpers
   function saveCalEvents(nextOrUpdater) {
     if (calLoadError) return Promise.resolve(null);
+    if (!calEventsLoaded) {
+      setSaveInfo({ state: "error", key: "dg-cal-events", error: "Your calendar is still loading. Try that again in a moment." });
+      return Promise.resolve(null);
+    }
     const current = calEventsRef.current;
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
     let validated;
@@ -4430,7 +4830,12 @@ function DailyGrind() {
         return events.map(e => e.id === id ? { ...e, exceptions: e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate] } : e);
       }
       if (deleteAll && evt && evt.repeat) {
-        return events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat));
+        const weekday = (date) => new Date(date + "T12:00:00").getDay();
+        const days = (e) => JSON.stringify([...(Array.isArray(e.repeatDays) ? e.repeatDays : [])].sort());
+        const sameSeries = (e) => e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat
+          && (e.repeat !== "weekly" || weekday(e.date) === weekday(evt.date))
+          && (e.repeat !== "custom" || days(e) === days(evt));
+        return events.filter(e => !(e.id === id || sameSeries(e)));
       }
       return events.filter(e => e.id !== id);
     };
@@ -4533,6 +4938,9 @@ function DailyGrind() {
             <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 1.5, color: "#f0f0f4" }}><img src="icon.svg?v=classic-g" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
             <SaveIndicator info={saveInfo} onRetry={retrySaves} />
+            {accountFull >= 0.7 && <button onClick={() => setView("settings")} style={{ display: "block", background: "none", border: "none", padding: 0, marginTop: 4, cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: accountFull >= 0.9 ? "#ff6b78" : "#ffd43b" }}>
+              {`● ACCOUNT ${Math.round(accountFull * 100)}% FULL · SEE SETTINGS`}
+            </button>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {data.streak > 0 && <div style={S.streakB} title={`${data.streak}-day streak`} aria-label={`${data.streak}-day streak`}><Icon name="flame" size={17} stroke={2.4} style={{ color: "#ff9f1c", filter: "drop-shadow(0 0 6px #ff9f1c88)" }} /><span className="num">{data.streak}</span></div>}
@@ -4822,9 +5230,7 @@ function DailyGrind() {
                         const current = noteDraftRef.current;
                         if (!current || current.id !== noteDraft.id) return false;
                         const next = { ...current, textBoxes }, note = normalizedNoteDraft(next), source = dataRef.current;
-                        const existing = source.notes.some(entry => entry.id === note.id);
-                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: note.drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
-                        if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        if (accountBytesWithNote(source, note) > MAX_SAFE_DOC_BYTES) return false;
                         rememberNoteRemovals(current, next);
                         noteDraftRef.current = next; setNoteDraft(next); return true;
                       }}
@@ -4834,9 +5240,7 @@ function DailyGrind() {
                         const next = { ...current, drawing };
                         const note = normalizedNoteDraft(next);
                         const source = dataRef.current;
-                        const existing = source.notes.some(entry => entry.id === note.id);
-                        const candidate = { ...source, notes: existing ? source.notes.map(entry => entry.id === note.id ? note : entry) : [note, ...source.notes], noteDrawings: { ...(source.noteDrawings || {}), [note.id]: drawing }, noteTextBoxes: { ...(source.noteTextBoxes || {}), [note.id]: note.textBoxes }, noteImages: { ...(source.noteImages || {}), [note.id]: note.images } };
-                        if (textByteSize(JSON.stringify(candidate)) > MAX_SAFE_DOC_BYTES) return false;
+                        if (accountBytesWithNote(source, note) > MAX_SAFE_DOC_BYTES) return false;
                         rememberNoteRemovals(current, next);
                         noteDraftRef.current = next;
                         setNoteDraft(next);
@@ -5744,7 +6148,15 @@ function DailyGrind() {
             <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 12, lineHeight: 1.5 }}>Your data is saved to your account and syncs on every device you sign in on.</div>
             <div style={S.fAct}>
               <button onClick={() => { alert("Pulling latest from cloud..."); location.reload(); }} style={S.cBtn}>Pull from Cloud</button>
-              <button onClick={async () => { try { await window._signOut(); location.reload(); } catch (error) { alert(error.message || "Sign-out could not finish. Please try again."); } }} style={S.dBtn}>Sign out</button>
+              <button onClick={async () => {
+                try {
+                  try { await flushCurrentNote(); } catch (error) { console.warn(error); }
+                  // Signing out removes this device's copy, so first let pending changes reach the cloud.
+                  const synced = await window.storage.flush(10000);
+                  if (!synced && !confirm("Some changes haven't reached the cloud yet (you may be offline). Signing out now deletes them from this device.\n\nSign out anyway?")) return;
+                  await window._signOut(); location.reload();
+                } catch (error) { alert(error.message || "Sign-out could not finish. Please try again."); }
+              }} style={S.dBtn}>Sign out</button>
             </div>
           </div>
         ) : (
@@ -5785,6 +6197,18 @@ function DailyGrind() {
           {vaultInfo.state === "saving" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#00d9ff", letterSpacing: 1.5 }}>CREATING RECOVERY COPIES…</div>}
           {vaultInfo.state === "saved" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#4cd137", letterSpacing: 1.5 }}>RECOVERY COPIES CURRENT • {new Date(vaultInfo.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>}
           {vaultInfo.state === "error" && <div style={{ marginTop: 8, fontSize: 10.5, color: "#ff6b7a", lineHeight: 1.5 }}>BACKUP NEEDS ATTENTION • {vaultInfo.error}</div>}
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "#aaaabb", marginBottom: 6, letterSpacing: 0.4 }}>
+            <span>Account storage</span>
+            <span className="num" style={{ color: accountFull >= 0.9 ? "#ff6b78" : accountFull >= 0.7 ? "#ffd43b" : "#aaaabb" }}>{Math.round(accountBytes / 1000)} KB of {Math.round(MAX_SAFE_DOC_BYTES / 1000)} KB · {Math.round(accountFull * 100)}%</span>
+          </div>
+          <div role="meter" aria-label="Account storage used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(accountFull * 100)} style={{ height: 6, borderRadius: 3, background: "#2d2d3a", overflow: "hidden" }}>
+            <div style={{ width: `${Math.min(100, accountFull * 100)}%`, height: "100%", background: accountFull >= 0.9 ? "#ff6b78" : accountFull >= 0.7 ? "#ffd43b" : "#7c3aed" }} />
+          </div>
+          {accountFull >= 0.7 && <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 6, lineHeight: 1.5 }}>
+            Pages with lots of handwriting take the most space. Download a full backup, then delete pages you no longer need. At 100% new changes can't be saved.
+          </div>}
         </div>
         <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.55 }}>
           Downloaded backups are your independent copy if the entire site, account, or Firebase project is ever removed.

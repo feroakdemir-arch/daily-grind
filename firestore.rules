@@ -1,8 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Only the signed-in (Google) owner. The app never uses the cloud for anonymous sessions, so they get
+    // no access: anyone can create anonymous sessions, and they must not be able to store data here.
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
     match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, create, update: if isOwner(uid);
+      // The app never deletes a cloud document (deleting a habit, task or note rewrites the account
+      // document). Blocking deletes means a buggy client or a hijacked session can't wipe the recovery
+      // copies (dg-vault-*), task records or screenshots. Remove them from the Firebase console if needed.
+      allow delete: if false;
     }
 
     // Retain old migration records as an administrator-only emergency archive.
