@@ -1376,6 +1376,23 @@ function calendarTimeLabel(time) {
 function calendarLastHour(events, preferredHour) {
   return Math.min(47, events.reduce((last, event) => Math.max(last, Math.ceil(calendarEndMinutes(event.start, event.end) / 60) - 1), preferredHour));
 }
+// Every event is drawn exactly once. An event is drawn in its own day's column when it starts at or
+// after the grid's first hour; an earlier one is drawn in the past-midnight hours at the bottom of the
+// previous day's column (calendarSpillCutoffMin). The grid starts early enough for every event that
+// no previous column can show (the week's first column has none on screen), so nothing is left
+// above the top of the grid where it cannot be seen, and nothing appears twice.
+function calendarGridStartHour(eventsByColumn, preferredHour, endHour) {
+  const spillCutoffMin = endHour >= 24 ? (endHour - 24 + 1) * 60 : 0;
+  return Math.max(0, eventsByColumn.reduce((first, events, dayIndex) => events.reduce((earliest, event) => {
+    const minutes = calendarTimeMinutes(event.start);
+    if (!Number.isFinite(minutes) || (dayIndex > 0 && minutes < spillCutoffMin)) return earliest;
+    return Math.min(earliest, Math.floor(minutes / 60));
+  }, first), preferredHour));
+}
+// Next-day events starting before this minute are drawn under the previous day's column.
+function calendarSpillCutoffMin(startHour, endHour) {
+  return endHour >= 24 ? Math.min(endHour - 24 + 1, startHour) * 60 : 0;
+}
 
 function parseCalendarData(raw) {
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -2024,7 +2041,8 @@ function watchCalendarClock(onTick) {
 function calendarNowPosition(now, dates, startHour, endHour) {
   const displayDate = new Date(now);
   let minutes = now.getHours() * 60 + now.getMinutes();
-  if (endHour >= 24 && now.getHours() < endHour - 24 + 1) {
+  // Same rule as the events: early hours sit under the previous day only when this day's column does not show them.
+  if (endHour >= 24 && now.getHours() < Math.min(endHour - 24 + 1, startHour)) {
     displayDate.setDate(displayDate.getDate() - 1);
     minutes += 1440;
   }
@@ -4569,6 +4587,7 @@ function DailyGrind() {
       const restoredCalendar = bundle && bundle.format === "daily-grind-backup" && bundle.calendarEvents !== undefined
         ? parseCalendarData(bundle.calendarEvents)
         : null;
+      if (restoredCalendar !== null && !calEventsLoaded) throw new Error("Your calendar is still loading. Wait a moment, then restore again.");
       const noteCount = (parsed.notes || []).length;
       const taskCount = (parsed.taskLists || []).reduce((sum, list) => sum + (list.items || []).length, 0);
       if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
@@ -4610,6 +4629,7 @@ function DailyGrind() {
       const parsed = parseMainData(backup.value);
       if (window.noteImageStore.idsFor(parsed).length) await window.noteImageStore.exportAssets(parsed);
       const restoredCalendar = typeof backup.calendarValue === "string" ? parseCalendarData(backup.calendarValue) : null;
+      if (restoredCalendar !== null && !calEventsLoaded) throw new Error("Your calendar is still loading. Wait a moment, then restore again.");
       const noteCount = (parsed.notes || []).length;
       const selected = vaultItems.find((item) => item.id === vaultSelectedId);
       const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
@@ -5380,14 +5400,25 @@ function DailyGrind() {
               <button onClick={() => { setCalLoadError(false); setCalEventsLoaded(false); setCalLoadAttempt((n) => n + 1); }} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
             </div>
           );
+          // Until the saved calendar arrives the grid would look empty and take a new event that then
+          // cannot be saved. Nothing is editable until it loads.
+          if (!calEventsLoaded) return (
+            <div role="status" style={{ maxWidth: 440, margin: "80px auto", textAlign: "center", color: "#8b8b9e", fontSize: 12, fontWeight: 700, letterSpacing: 1.2 }}>LOADING YOUR CALENDAR…</div>
+          );
           const calDates = getCalWeekDates(calWeekOffset);
-          const calStartHour = data.calStartHour ?? 6;
+          const configuredStartHour = data.calStartHour ?? 6;
           const configuredEndHour = data.calEndHour ?? 23;
           const calEndHour = Math.min(47, Math.max(
             calendarLastHour(calDates.flatMap(d => getEventsForDate(localDateStr(d))), configuredEndHour),
             calCreating ? Math.ceil(calCreating.endMin / 60) - 1 : configuredEndHour,
             calDragging?.newEnd ? Math.ceil(calendarTimeMinutes(calDragging.newEnd) / 60) - 1 : configuredEndHour
           ));
+          // A blank or half-typed time, or Custom with no days, used to close the form and silently drop the event.
+          const calEventFormProblem = !(calendarTimeMinutes(calEventStart) < 1440) || !Number.isFinite(calendarTimeMinutes(calEventEnd))
+            ? "Enter a start and end time."
+            : calEventRepeat === "custom" && calEventRepeatDays.length === 0 ? "Pick at least one day to repeat on." : "";
+          const calStartHour = calendarGridStartHour(calDates.map(d => getEventsForDate(localDateStr(d))), configuredStartHour, calEndHour);
+          const spillCutoffMin = calendarSpillCutoffMin(calStartHour, calEndHour);
           const totalHours = calEndHour - calStartHour + 1;
           const hours = Array.from({ length: totalHours }, (_, i) => i + calStartHour);
           const startMinBase = calStartHour * 60;
@@ -5402,16 +5433,17 @@ function DailyGrind() {
           function shiftDateStr(ds, deltaDays) { const d = new Date(ds + "T12:00"); d.setDate(d.getDate() + deltaDays); return localDateStr(d); }
           // Returns events that should display in this column. Each item gets _displayMinFromStart (px-y math input).
           function getDisplayedEvents(ds) {
-            const normal = getEventsForDate(ds).map(e => {
+            // Events before the grid start are drawn under the previous day's column instead (see calendarGridStartHour).
+            const normal = getEventsForDate(ds).filter(e => timeToMin(e.start) >= calStartHour * 60).map(e => {
               const sm = timeToMin(e.start);
               return { ...e, _startOffsetMin: sm - startMinBase };
             });
             if (calEndHour < 24) return normal;
             // Pull next-day's events that fall in the post-midnight portion of this column
             const nextDs = shiftDateStr(ds, 1);
-            const spillCutoffHour = calEndHour - 24 + 1; // hours 0..(spillCutoffHour-1) belong to prev column
+            // Only next-day events that the next column cannot show itself (before the grid start), so none appear twice.
             const spill = getEventsForDate(nextDs)
-              .filter(e => parseInt(e.start.split(":")[0], 10) < spillCutoffHour)
+              .filter(e => timeToMin(e.start) < spillCutoffMin)
               .map(e => {
                 const sm = timeToMin(e.start) + 24 * 60;
                 return { ...e, _startOffsetMin: sm - startMinBase, _spilloverFromDate: nextDs };
@@ -5698,12 +5730,14 @@ function DailyGrind() {
                           }}
                           onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
                             const origId = evt._origId || evt.id;
-                            if (evt._repeating) return;
+                            // A drop rewrites the stored event, which for a repeating one is the whole series
+                            // (every past and future day), so repeating events are changed through Edit instead.
+                            if (evt._repeating || evt.repeat) return;
                             setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end, moved: false });
                           }}
                           onTouchStart={(e) => {
                             const origId = evt._origId || evt.id;
-                            if (evt._repeating) return;
+                            if (evt._repeating || evt.repeat) return;
                             const sx = e.touches[0].clientX;
                             const sy = e.touches[0].clientY;
                             const target = e.currentTarget;
@@ -5864,13 +5898,19 @@ function DailyGrind() {
                     )}
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
+                    {calEventFormProblem && <div role="alert" style={{ color: "#ff6b81", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{calEventFormProblem}</div>}
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
-                      <button onClick={() => {
+                      <button disabled={!!calEventFormProblem} onClick={() => {
+                        if (calEventFormProblem) return;
                         const isCustom = calEventRepeat === "custom" && calEventRepeatDays.length > 0;
-                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined });
+                        // Turning a series into a one-off keeps it on the day being edited. It used to fall back to
+                        // the series' first date (out of view, or invisible if that day had been deleted).
+                        const becomesOneOff = !!calSelectedEvent.repeat && calEventRepeat === "none";
+                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined,
+                          ...(becomesOneOff && calSelectedEvent._displayDate ? { date: calSelectedEvent._displayDate, exceptions: undefined, untilDate: undefined } : {}) });
                         setCalSelectedEvent(null); setCalEditMode(false);
-                      }} style={S.okBtn}>Save</button>
+                      }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Save</button>
                     </div>
                   </div>
                 </div>
@@ -5912,14 +5952,15 @@ function DailyGrind() {
                     )}
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
+                    {calEventFormProblem && <div role="alert" style={{ color: "#ff6b81", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{calEventFormProblem}</div>}
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
-                      <button onClick={() => {
-                        if (calEventTitle.trim()) {
+                      <button disabled={!!calEventFormProblem} onClick={() => {
+                        if (calEventTitle.trim() && !calEventFormProblem) {
                           addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim(), calEventRepeatDays);
                           setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc("");
                         }
-                      }} style={S.okBtn}>Add Event</button>
+                      }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Add Event</button>
                     </div>
                   </div>
                 </div>
@@ -5938,7 +5979,7 @@ function DailyGrind() {
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[4,5,6,7,8,9,10].map(h => (
                         <button key={h} onClick={() => save((current) => ({ ...current, calStartHour: h }))}
-                          style={{ padding: "8px 12px", borderRadius: 8, border: calStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calStartHour === h ? "#7c3aed22" : "#12122a", color: calStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          style={{ padding: "8px 12px", borderRadius: 8, border: configuredStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: configuredStartHour === h ? "#7c3aed22" : "#12122a", color: configuredStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                           {fmtHour(h)}
                         </button>
                       ))}
