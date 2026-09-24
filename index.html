@@ -562,23 +562,31 @@
       await _queueCloudWrite("task-ledger:" + entry.taskId, ref, payload);
       return true;
     }
+    const _locallyDeletedTasks = new Set();
+    function _applyLocalDeletes(entries) {
+      if (!_locallyDeletedTasks.size) return entries;
+      return entries.map((entry) => entry && !entry.deleted && _locallyDeletedTasks.has(entry.taskId) ? { taskId: entry.taskId, deleted: true } : entry);
+    }
     window.taskLedger = {
       async list() {
         await _fbReady;
         const collection = _taskLedgerCollection();
         if (!collection) return [];
         const snapshot = await collection.where("kind", "==", "daily-grind-task-v1").get();
-        return _parseTaskLedgerSnapshot(snapshot);
+        return _applyLocalDeletes(_parseTaskLedgerSnapshot(snapshot));
       },
+      // Tasks deleted on this device this session (checked by draft recovery, too).
+      wasDeletedHere(taskId) { return _locallyDeletedTasks.has(taskId); },
       async syncChanges(before, after) {
         const previous = _taskLedgerEntries(before);
         const next = _taskLedgerEntries(after);
         const jobs = [];
         next.forEach((entry, taskId) => {
+          _locallyDeletedTasks.delete(taskId);
           if (!previous.has(taskId) || previous.get(taskId).signature !== entry.signature) jobs.push(_writeTaskLedger(entry, false));
         });
         previous.forEach((entry, taskId) => {
-          if (!next.has(taskId)) jobs.push(_writeTaskLedger(entry, true));
+          if (!next.has(taskId)) { _locallyDeletedTasks.add(taskId); jobs.push(_writeTaskLedger(entry, true)); }
         });
         if (!jobs.length) return true;
         await Promise.all(jobs);
@@ -616,7 +624,7 @@
           const collection = _taskLedgerCollection();
           if (!collection) return;
           unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
-            if (!cancelled) callback(_parseTaskLedgerSnapshot(snapshot));
+            if (!cancelled) callback(_applyLocalDeletes(_parseTaskLedgerSnapshot(snapshot)));
           }, (error) => console.warn("Task recovery sync failed:", error));
         });
         return () => { cancelled = true; try { unsubscribe(); } catch (error) {} };
@@ -2201,7 +2209,7 @@ function SaveIndicator({ info, onRetry }) {
   );
 }
 
-function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
   const initialDraftRef = useRef(undefined);
   if (initialDraftRef.current === undefined) initialDraftRef.current = readTaskDraft(list.id);
   const [text, setText] = useState(() => initialDraftRef.current?.name || "");
@@ -2364,12 +2372,19 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
     ptsRef.current = "";
     setText(""); setPts("");
     let result = null;
-    try {
-      result = await onAdd(list.id, pendingDraft.name, Math.max(0, parseInt(pendingDraft.points) || 0), pendingDraft.id);
-    } catch (error) {
-      console.warn("Task cloud save failed:", error);
-    }
-    if (result) {
+    // onAdd applies the task to this device's lists synchronously (save() writes the device copy before any
+    // network call). From then on the journal is no longer the only copy, so clear it at once: a journal left
+    // behind until cloud confirmation re-added the task on the next visit even after it had been deleted.
+    let saving = null;
+    try { saving = onAdd(list.id, pendingDraft.name, Math.max(0, parseInt(pendingDraft.points) || 0), pendingDraft.id); }
+    catch (error) { console.warn("Task save failed:", error); }
+    const onDevice = !!taskState && taskState(pendingDraft.id) === "present";
+    if (onDevice) { clearTaskDraft(list.id); draftIdRef.current = makeId("t"); }
+    try { result = await saving; }
+    catch (error) { console.warn("Task cloud save failed:", error); }
+    if (onDevice) {
+      // Saved here; any cloud problem shows in the header's sync status with a retry.
+    } else if (result) {
       clearTaskDraft(list.id);
       draftIdRef.current = makeId("t");
     } else {
@@ -2390,6 +2405,16 @@ function TaskListCard({ list, listIdx, onToggle, onToggleTimer, onDelete, onDele
   useEffect(() => {
     if (!restoreDraftRef.current) return;
     restoreDraftRef.current = false;
+    // A leftover journal entry for a task that is already in the lists, or that was deleted, is stale:
+    // drop it instead of adding the task again.
+    const state = taskState ? taskState(draftIdRef.current) : "unknown";
+    if (state !== "unknown") {
+      clearTaskDraft(list.id);
+      draftIdRef.current = makeId("t");
+      textRef.current = ""; ptsRef.current = "";
+      setText(""); setPts("");
+      return;
+    }
     commitDraft();
   }, [commitDraft]);
 
@@ -3579,6 +3604,12 @@ function DailyGrind() {
       })) };
     });
   }, [save]);
+  // For the new-task journal: is this task in the lists on this device, known deleted, or unknown?
+  const taskState = useCallback((taskId) => {
+    if ((dataRef.current?.taskLists || []).some((list) => list.items.some((task) => task.id === taskId))) return "present";
+    if (window.taskLedger?.wasDeletedHere?.(taskId) || (taskLedgerRef.current || []).some((entry) => entry && entry.taskId === taskId && entry.deleted === true)) return "deleted";
+    return "unknown";
+  }, []);
   const deleteTaskItem = useCallback(async (listId, taskId) => {
     const task = dataRef.current?.taskLists.find((list) => list.id === listId)?.items.find((item) => item.id === taskId);
     if (!confirm(`Delete "${task?.name || "this task"}"? A safety copy will be kept first.`)) return false;
@@ -4556,7 +4587,7 @@ function DailyGrind() {
               </div>
             )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
