@@ -6,8 +6,8 @@ const html = fs.readFileSync(require.resolve("../index.html"), "utf8").replace(/
 const start = html.indexOf("  function calDeleteTransform(");
 const source = html.slice(start, html.indexOf("\n  }\n", html.indexOf("  async function deleteCalEvent(")) + 4);
 
-function harness() {
-  const state = { pending: [], saved: null, saves: 0, events: [
+function harness({ waitMs = 1000 } = {}) {
+  const state = { pending: [], saved: null, saves: 0, stored: {}, alerts: [], events: [
     { id: "cad", date: "2026-09-23", title: "CAD", start: "19:00", end: "21:00" },
     { id: "gym", date: "2026-09-23", title: "Gym", start: "07:00", end: "08:00", repeat: "daily" },
   ] };
@@ -17,6 +17,11 @@ function harness() {
     setCalPendingDeletes: update => { state.pending = update(state.pending); },
     protectBeforeDestructive: () => new Promise(resolve => { resolveCopy = resolve; }),
     saveCalEvents: transform => { state.saves += 1; state.events = transform(state.events); return Promise.resolve(true); },
+    setTimeout, CAL_DELETE_COPY_WAIT_MS: waitMs,
+    localStorage: { setItem: (k, v) => { state.stored[k] = v; } },
+    dataRef: { current: { habitSections: [], taskLists: [] } },
+    calEventsRef: { get current() { return state.events; } },
+    alert: message => state.alerts.push(message),
   };
   vm.runInNewContext(source + "; this.deleteCalEvent = deleteCalEvent; this.calDeleteTransform = calDeleteTransform;", ctx);
   const visible = () => state.pending.reduce((events, p) => p.transform(events), state.events).map(e => e.id);
@@ -75,4 +80,18 @@ test("\"All events\" removes only the chosen series, not other series with the s
     { id: "wrestle-fri", date: "2026-09-11", title: "wrestling", start: "18:00", end: "20:00", repeat: "weekly" },
   ];
   assert.deepEqual(ctx.calDeleteTransform("wrestle-mon", true)(series).map(e => e.id), ["wrestle-wed", "wrestle-fri"]);
+});
+
+test("with no signal the delete is saved after a short wait, keeping a safety copy on the device", async () => {
+  const { ctx, state, visible } = harness({ waitMs: 20 });
+  const done = ctx.deleteCalEvent("cad");                 // the cloud safety copy never confirms (offline)
+  assert.deepEqual(visible(), ["gym"]);
+  assert.equal(state.saves, 0);
+  assert.equal(await done, true);                          // it used to wait forever and never save
+  assert.equal(state.saves, 1);
+  assert.deepEqual(state.events.map(e => e.id), ["gym"]);
+  const copy = JSON.parse(state.stored["dg-vault-local-safety"]);
+  assert.equal(copy.reason, "before-calendar-delete");
+  assert.deepEqual(JSON.parse(copy.calendarValue).map(e => e.id), ["cad", "gym"]);  // the pre-delete calendar
+  assert.equal(state.pending.length, 0);
 });

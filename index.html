@@ -154,7 +154,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "dg-cal-events", "dg-cal-events_ts", "dg-cal-deleted", "dg-cal-deleted_ts", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -819,8 +819,11 @@
         _storageStatusListeners.add(callback);
         return () => _storageStatusListeners.delete(callback);
       },
-      // Subscribe to real-time cloud updates for a key
-      subscribe(key, callback) {
+      // Subscribe to real-time cloud updates for a key. With { deliverOlder: true } the callback also
+      // receives cloud copies older than this device's (e.g. a phone's queued offline save landing
+      // late), as callback(value, { older: true }), without touching the local copy, so a caller that
+      // merges can put back what that upload is missing.
+      subscribe(key, callback, options) {
         let unsub = () => {};
         let cancelled = false;
         const applyExternalWrite = (value, localTs, identity) => {
@@ -872,6 +875,8 @@
                 localStorage.setItem(key + "_ts", String(fbTs));
                 localStorage.setItem("dg-owner", _identity());
                 try { callback(d.value); } catch(e) { console.warn(e); }
+              } else if (options && options.deliverOlder && d.value !== localStorage.getItem(key)) {
+                try { callback(d.value, { older: true }); } catch(e) { console.warn(e); }
               }
             }, (err) => console.warn("Firestore subscribe failed:", err));
         });
@@ -1071,20 +1076,86 @@ function calendarTimeLabel(time) {
 function calendarLastHour(events, preferredHour) {
   return Math.min(47, events.reduce((last, event) => Math.max(last, Math.ceil(calendarEndMinutes(event.start, event.end) / 60) - 1), preferredHour));
 }
-// When the day runs past midnight, a day's early events (before the spillover cutoff) are drawn
-// at the bottom of the previous day's column, so that column owns them. The week's first column
-// has no previous column on screen and keeps its own early events.
-function calendarOwnColumnEvents(events, dayIndex, endHour) {
+// Every event is drawn exactly once. An event is drawn in its own day's column when it starts at or
+// after the grid's first hour; an earlier one is drawn in the past-midnight hours at the bottom of the
+// previous day's column (calendarSpillCutoffMin). The grid starts early enough for every event that
+// no previous column can show (the week's first column has none on screen), so nothing is left
+// above the top of the grid where it cannot be seen, and nothing appears twice.
+function calendarGridStartHour(eventsByColumn, preferredHour, endHour) {
   const spillCutoffMin = endHour >= 24 ? (endHour - 24 + 1) * 60 : 0;
-  return dayIndex > 0 && spillCutoffMin > 0 ? events.filter(event => calendarTimeMinutes(event.start) >= spillCutoffMin) : events;
-}
-// The grid starts early enough to show every event the columns draw, so an event before
-// "Day starts at" is never positioned above the top of the grid where it cannot be seen.
-function calendarFirstHour(eventsByColumn, preferredHour) {
-  return Math.max(0, eventsByColumn.reduce((first, events) => events.reduce((earliest, event) => {
-    const hour = Math.floor(calendarTimeMinutes(event.start) / 60);
-    return Number.isFinite(hour) ? Math.min(earliest, hour) : earliest;
+  return Math.max(0, eventsByColumn.reduce((first, events, dayIndex) => events.reduce((earliest, event) => {
+    const minutes = calendarTimeMinutes(event.start);
+    if (!Number.isFinite(minutes) || (dayIndex > 0 && minutes < spillCutoffMin)) return earliest;
+    return Math.min(earliest, Math.floor(minutes / 60));
   }, first), preferredHour));
+}
+// Next-day events starting before this minute are drawn under the previous day's column.
+function calendarSpillCutoffMin(startHour, endHour) {
+  return endHour >= 24 ? Math.min(endHour - 24 + 1, startHour) * 60 : 0;
+}
+
+// Calendar sync merge. Every device uploads its whole event list and the cloud keeps the last upload,
+// so a device that had not caught up (phone in a pocket, no signal, just opened) used to erase events
+// added elsewhere. Now each add or edit stamps the event's updatedAt, each delete records a tombstone
+// (dg-cal-deleted: { eventId: deletedAt }), and lists are merged event by event instead of replaced:
+// the newest version of each event wins, and a delete wins over any version not newer than it.
+function calendarEventVersion(event) {
+  return event && Number.isFinite(event.updatedAt) ? event.updatedAt : 0;
+}
+function parseCalendarTombstones(raw) {
+  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Saved calendar deletions have an invalid shape");
+  const tombstones = {};
+  Object.keys(parsed).forEach((id) => { if (id && Number.isFinite(parsed[id]) && parsed[id] > 0) tombstones[id] = parsed[id]; });
+  return tombstones;
+}
+function mergeCalendarTombstones(a, b) {
+  const merged = { ...a };
+  Object.keys(b || {}).forEach((id) => { if (!(merged[id] >= b[id])) merged[id] = b[id]; });
+  return merged;
+}
+function sameCalendarTombstones(a, b) {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((id) => a[id] === b[id]);
+}
+// Incoming events keep their order and local-only events follow, so an unchanged list compares equal.
+// A local-only event is kept only if it carries a stamp: events saved before stamping existed have no
+// tombstones either, so for them the incoming list decides, as it always did. Otherwise a device's old
+// copy would bring back events that were deleted before this update.
+function mergeCalendarEvents(localEvents, incomingEvents, tombstones) {
+  const incomingIds = new Set(incomingEvents.map((event) => event.id));
+  const byId = new Map();
+  const newer = (current, candidate) => {
+    if (!current) return candidate;
+    const a = calendarEventVersion(current), b = calendarEventVersion(candidate);
+    if (a !== b) return b > a ? candidate : current;
+    // Same stamp but different content (e.g. events saved before stamping existed): pick the same
+    // winner on every device so they agree instead of trading copies back and forth.
+    return JSON.stringify(candidate) > JSON.stringify(current) ? candidate : current;
+  };
+  incomingEvents.forEach((event) => byId.set(event.id, newer(byId.get(event.id), event)));
+  localEvents.forEach((event) => {
+    if (!incomingIds.has(event.id) && calendarEventVersion(event) === 0) return;
+    byId.set(event.id, newer(byId.get(event.id), event));
+  });
+  return [...byId.values()].filter((event) => !(tombstones[event.id] >= calendarEventVersion(event)));
+}
+function sameCalendarEvents(a, b) {
+  if (a.length !== b.length) return false;
+  const byId = new Map(a.map((event) => [event.id, JSON.stringify(event)]));
+  return b.every((event) => byId.get(event.id) === JSON.stringify(event));
+}
+// What this device changed between two lists: added or edited events get updatedAt = now, and the
+// ids of removed events are returned so the caller can record their tombstones.
+function stampCalendarChanges(before, after, now) {
+  const previous = new Map(before.map((event) => [event.id, event]));
+  const content = (event) => { const { updatedAt, ...rest } = event; return JSON.stringify(rest); };
+  const events = after.map((event) => {
+    const prior = previous.get(event.id);
+    return prior && content(prior) === content(event) ? prior : { ...event, updatedAt: now };
+  });
+  const kept = new Set(after.map((event) => event.id));
+  return { events, removedIds: before.filter((event) => !kept.has(event.id)).map((event) => event.id) };
 }
 
 function parseCalendarData(raw) {
@@ -1121,6 +1192,7 @@ function parseCalendarData(raw) {
     };
     if (repeats.has(event.repeat)) normalized.repeat = event.repeat; else delete normalized.repeat;
     if (validDate(event.untilDate)) normalized.untilDate = event.untilDate; else delete normalized.untilDate;
+    if (!(Number.isFinite(event.updatedAt) && event.updatedAt > 0)) delete normalized.updatedAt;
     return normalized;
   });
 }
@@ -1588,6 +1660,8 @@ const CAL_COLORS = [
   { name: "Pink", hex: "#e84393" }, { name: "Brown", hex: "#8d6e63" }, { name: "Graphite", hex: "#636e72" },
 ];
 const CAL_DEFAULT_COLOR = "#1e88e5";
+// How long a calendar delete waits for the cloud safety copy before keeping a device copy instead.
+const CAL_DELETE_COPY_WAIT_MS = 3000;
 // Dark text on light backgrounds (yellow, coral), white everywhere else.
 function calTextColor(hex) {
   const match = /^#([0-9a-f]{6})$/i.exec(hex || "");
@@ -1701,7 +1775,8 @@ function watchCalendarClock(onTick) {
 function calendarNowPosition(now, dates, startHour, endHour) {
   const displayDate = new Date(now);
   let minutes = now.getHours() * 60 + now.getMinutes();
-  if (endHour >= 24 && now.getHours() < endHour - 24 + 1) {
+  // Same rule as the events: early hours sit under the previous day only when this day's column does not show them.
+  if (endHour >= 24 && now.getHours() < Math.min(endHour - 24 + 1, startHour)) {
     displayDate.setDate(displayDate.getDate() - 1);
     minutes += 1440;
   }
@@ -3100,6 +3175,11 @@ function DailyGrind() {
   const [calLoadError, setCalLoadError] = useState(false);
   const [calLoadAttempt, setCalLoadAttempt] = useState(0);
   const calEventsRef = useRef([]);
+  // Calendar deletions (eventId -> deletedAt), synced as dg-cal-deleted; see mergeCalendarEvents.
+  const calTombstonesRef = useRef({});
+  // True once the load attempt has finished. Until then cloud updates only replace what is shown;
+  // merging and repair uploads wait for the load, which merges this device's saved copy too.
+  const calReadyRef = useRef(false);
   const [calView, setCalView] = useState("week");
   const [calAddEvent, setCalAddEvent] = useState(null);
   const [calEventTitle, setCalEventTitle] = useState("");
@@ -3405,7 +3485,10 @@ function DailyGrind() {
       jobs.push(window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)));
       jobs.push(window.taskLedger.seed(dataRef.current, taskLedgerRef.current));
     }
-    if (calEventsLoaded && !calLoadError) jobs.push(window.storage.set("dg-cal-events", JSON.stringify(calEventsRef.current)));
+    if (calEventsLoaded && !calLoadError) {
+      jobs.push(window.storage.set("dg-cal-deleted", JSON.stringify(calTombstonesRef.current)));
+      jobs.push(window.storage.set("dg-cal-events", JSON.stringify(calEventsRef.current)));
+    }
     Promise.allSettled(jobs);
   }, [calEventsLoaded, calLoadError]);
 
@@ -3471,14 +3554,14 @@ function DailyGrind() {
     });
   }, []);
 
-  // Real-time cloud sync subscription for calendar events
+  // Real-time cloud sync for calendar events and deletions. Incoming lists are merged event by event
+  // (mergeCalendarEvents) rather than replacing this device's list, and when the merge holds something
+  // the upload was missing, the merged list is uploaded so every device and the reminders catch up.
   useEffect(() => {
     if (!window.storage.subscribe) return;
-    const unsub = window.storage.subscribe("dg-cal-events", (newValue) => {
+    const unsubEvents = window.storage.subscribe("dg-cal-events", (newValue, info) => {
       try {
-        const parsed = parseCalendarData(newValue);
-        calEventsRef.current = parsed;
-        setCalEvents(parsed);
+        applyIncomingCalendar(newValue, info);
         setCalLoadError(false);
       }
       catch(e) {
@@ -3486,43 +3569,64 @@ function DailyGrind() {
         setCalLoadError(true);
         setSaveInfo({ state: "error", key: "dg-cal-events", error: "An invalid calendar update was blocked. Your current calendar was kept safe." });
       }
-    });
-    return unsub;
+    }, { deliverOlder: true });
+    const unsubDeleted = window.storage.subscribe("dg-cal-deleted", (newValue, info) => {
+      try { applyIncomingCalTombstones(newValue, info); }
+      catch (e) { console.warn("Calendar deletions sync failed:", e); }
+    }, { deliverOlder: true });
+    return () => { unsubEvents(); unsubDeleted(); };
   }, []);
 
-  // Load calendar events from cloud sync (single source of truth)
+  // Load calendar events and deletions, merging this device's saved copy with the cloud copy.
   useEffect(() => {
     if (calEventsLoaded) return;
+    calReadyRef.current = false;
+    // Read before storage.get() can replace them with the cloud copy, so events saved on this device
+    // but never uploaded (no signal, app closed early) are merged instead of dropped.
+    const ownerBefore = localStorage.getItem("dg-owner");
+    const localEventsBefore = localStorage.getItem("dg-cal-events");
+    const localDeletedBefore = localStorage.getItem("dg-cal-deleted");
     (async () => {
       try {
+        const deleted = await window.storage.get("dg-cal-deleted");
         const r = await window.storage.get("dg-cal-events");
-        if (r?.error) {
+        if (r?.error || deleted?.error) {
           setCalLoadError(true);
           setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar data could not be loaded safely." });
-          setCalEventsLoaded(true);
           return;
         }
-        if (r?.value) {
-          const parsed = parseCalendarData(r.value);
-          calEventsRef.current = parsed;
-          setCalEvents(parsed);
-        }
+        // Never merge in another account's copy left on a shared device (storage.get drops it too).
+        const sameAccount = !(ownerBefore && ownerBefore.indexOf("uid:") === 0 && ownerBefore !== _identity());
+        const deviceCopy = (raw, parse, empty) => {
+          if (!sameAccount || !raw) return empty;
+          try { return parse(raw); } catch (error) { return empty; }
+        };
+        const cloudTombstones = deleted?.value ? parseCalendarTombstones(deleted.value) : {};
+        const tombstones = mergeCalendarTombstones(mergeCalendarTombstones(calTombstonesRef.current, deviceCopy(localDeletedBefore, parseCalendarTombstones, {})), cloudTombstones);
+        calTombstonesRef.current = tombstones;
+        let loaded = [];
+        if (r?.value) loaded = parseCalendarData(r.value);
         else {
           // Fallback: read raw localStorage if storage.get returned nothing
           const raw = localStorage.getItem("dg-cal-events");
-          if (raw) {
-            const parsed = parseCalendarData(raw);
-            calEventsRef.current = parsed;
-            setCalEvents(parsed);
-          }
+          if (raw) loaded = parseCalendarData(raw);
         }
+        const onDevice = mergeCalendarEvents([], [...deviceCopy(localEventsBefore, parseCalendarData, []), ...calEventsRef.current], {});
+        const merged = parseCalendarData(mergeCalendarEvents(onDevice, loaded, tombstones));
+        calEventsRef.current = merged;
+        setCalEvents(merged);
+        calReadyRef.current = true;
+        if (!sameCalendarEvents(merged, loaded)) writeCalendar(merged);
+        if (!sameCalendarTombstones(tombstones, cloudTombstones)) writeCalTombstones(tombstones);
         setCalLoadError(false);
       } catch(e) {
         console.warn("Cal sync load failed:", e);
         setCalLoadError(true);
         setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar data could not be loaded safely." });
+      } finally {
+        calReadyRef.current = true;
+        setCalEventsLoaded(true);
       }
-      setCalEventsLoaded(true);
     })();
   }, [calEventsLoaded, calLoadAttempt]);
 
@@ -4417,16 +4521,60 @@ function DailyGrind() {
       setSaveInfo({ state: "error", key: "dg-cal-events", error: "Calendar changes were blocked because the data was invalid." });
       return Promise.resolve(null);
     }
-    const serialized = JSON.stringify(validated);
-    if (textByteSize(serialized) > MAX_SAFE_DOC_BYTES) {
-      const error = new Error("Calendar data reached the safe cloud size limit. Download a backup before adding more events.");
-      console.error(error);
-      setSaveInfo({ state: "error", key: "dg-cal-events", error: error.message });
-      return Promise.resolve(null);
+    const now = Date.now();
+    const { events, removedIds } = stampCalendarChanges(current, validated, now);
+    if (!calendarFitsCloudLimit(events)) return Promise.resolve(null);
+    // Deletions are recorded before the list is uploaded, so another device merging this list knows
+    // the missing events were deleted rather than simply not seen yet.
+    if (removedIds.length) {
+      const deletedNow = {};
+      removedIds.forEach((id) => { deletedNow[id] = now; });
+      writeCalTombstones(mergeCalendarTombstones(calTombstonesRef.current, deletedNow));
     }
-    calEventsRef.current = validated;
-    setCalEvents(validated);
-    return window.storage.set("dg-cal-events", serialized).catch((error) => { console.error(error); return null; });
+    return writeCalendar(events);
+  }
+  // The functions below run from the live-sync listeners registered at mount as well, so they use
+  // only refs, state setters and window.storage, never state values from a render.
+  function calendarFitsCloudLimit(events) {
+    if (textByteSize(JSON.stringify(events)) <= MAX_SAFE_DOC_BYTES) return true;
+    const error = new Error("Calendar data reached the safe cloud size limit. Download a backup before adding more events.");
+    console.error(error);
+    setSaveInfo({ state: "error", key: "dg-cal-events", error: error.message });
+    return false;
+  }
+  // Uploads a list that is already stamped or merged.
+  function writeCalendar(events) {
+    if (!calendarFitsCloudLimit(events)) return Promise.resolve(null);
+    calEventsRef.current = events;
+    setCalEvents(events);
+    return window.storage.set("dg-cal-events", JSON.stringify(events)).catch((error) => { console.error(error); return null; });
+  }
+  function writeCalTombstones(tombstones) {
+    calTombstonesRef.current = tombstones;
+    return window.storage.set("dg-cal-deleted", JSON.stringify(tombstones)).catch((error) => { console.error(error); return null; });
+  }
+  function applyIncomingCalendar(value, info) {
+    const incoming = parseCalendarData(value);
+    if (!calReadyRef.current) {
+      calEventsRef.current = incoming;
+      setCalEvents(incoming);
+      return;
+    }
+    const merged = parseCalendarData(mergeCalendarEvents(calEventsRef.current, incoming, calTombstonesRef.current));
+    // Upload when the incoming list was missing something, or when it was an older copy that replaced
+    // newer data in the cloud (the local copy was not updated for it, so re-uploading is harmless).
+    if (!sameCalendarEvents(merged, incoming) || (info && info.older)) { writeCalendar(merged); return; }
+    calEventsRef.current = merged;
+    setCalEvents(merged);
+  }
+  function applyIncomingCalTombstones(value, info) {
+    const incoming = parseCalendarTombstones(value);
+    const merged = mergeCalendarTombstones(calTombstonesRef.current, incoming);
+    calTombstonesRef.current = merged;
+    if (!calReadyRef.current) return;
+    if (!sameCalendarTombstones(merged, incoming) || (info && info.older)) writeCalTombstones(merged);
+    const kept = calEventsRef.current.filter((event) => !(merged[event.id] >= calendarEventVersion(event)));
+    if (kept.length !== calEventsRef.current.length) writeCalendar(kept);
   }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
     const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || CAL_DEFAULT_COLOR };
@@ -4459,12 +4607,29 @@ function DailyGrind() {
   }
   // The event disappears immediately; the safety copy still happens before the delete is saved, and if
   // it cannot be made (protectBeforeDestructive alerts) the event is shown again untouched.
+  // The cloud copy only finishes once the server confirms it, which never happens without signal, so the
+  // delete used to stay hidden-but-unsaved and the event came back after the app closed. After a short
+  // wait the pre-delete state is kept as this device's safety copy (the one listed as "local safety" in
+  // recovery), the delete is saved, and the cloud copy finishes by itself when the connection returns.
   async function deleteCalEvent(id, deleteAll, exceptionDate, untilDate) {
     const transform = calDeleteTransform(id, deleteAll, exceptionDate, untilDate);
     const key = makeId("caldel");
     const release = () => setCalPendingDeletes(list => list.filter(pending => pending.key !== key));
     setCalPendingDeletes(list => [...list, { key, transform }]);
-    if (!(await protectBeforeDestructive("before-calendar-delete"))) { release(); return false; }
+    const copied = await Promise.race([
+      protectBeforeDestructive("before-calendar-delete"),
+      new Promise(resolve => setTimeout(() => resolve("waiting"), CAL_DELETE_COPY_WAIT_MS)),
+    ]);
+    if (!copied) { release(); return false; }
+    if (copied === "waiting") {
+      try {
+        localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value: JSON.stringify(dataRef.current), calendarValue: JSON.stringify(calEventsRef.current), reason: "before-calendar-delete", at: Date.now() }));
+      } catch (error) {
+        release();
+        alert("The safety copy could not be created, so nothing was deleted. Check your connection and try again.");
+        return false;
+      }
+    }
     const saving = saveCalEvents(transform);
     release();
     return !!(await saving);
@@ -5011,7 +5176,12 @@ function DailyGrind() {
             calCreating ? Math.ceil(calCreating.endMin / 60) - 1 : configuredEndHour,
             calDragging?.newEnd ? Math.ceil(calendarTimeMinutes(calDragging.newEnd) / 60) - 1 : configuredEndHour
           ));
-          const calStartHour = calendarFirstHour(calDates.map((d, di) => calendarOwnColumnEvents(getEventsForDate(localDateStr(d)), di, calEndHour)), configuredStartHour);
+          // A blank or half-typed time, or Custom with no days, used to close the form and silently drop the event.
+          const calEventFormProblem = !(calendarTimeMinutes(calEventStart) < 1440) || !Number.isFinite(calendarTimeMinutes(calEventEnd))
+            ? "Enter a start and end time."
+            : calEventRepeat === "custom" && calEventRepeatDays.length === 0 ? "Pick at least one day to repeat on." : "";
+          const calStartHour = calendarGridStartHour(calDates.map(d => getEventsForDate(localDateStr(d))), configuredStartHour, calEndHour);
+          const spillCutoffMin = calendarSpillCutoffMin(calStartHour, calEndHour);
           const totalHours = calEndHour - calStartHour + 1;
           const hours = Array.from({ length: totalHours }, (_, i) => i + calStartHour);
           const startMinBase = calStartHour * 60;
@@ -5025,17 +5195,18 @@ function DailyGrind() {
           function fmtHour(h) { const hr = ((h % 24) + 24) % 24; if (hr === 0) return "12 AM"; if (hr < 12) return hr + " AM"; if (hr === 12) return "12 PM"; return (hr - 12) + " PM"; }
           function shiftDateStr(ds, deltaDays) { const d = new Date(ds + "T12:00"); d.setDate(d.getDate() + deltaDays); return localDateStr(d); }
           // Returns events that should display in this column. Each item gets _displayMinFromStart (px-y math input).
-          function getDisplayedEvents(ds, di) {
-            const normal = calendarOwnColumnEvents(getEventsForDate(ds), di, calEndHour).map(e => {
+          function getDisplayedEvents(ds) {
+            // Events before the grid start are drawn under the previous day's column instead (see calendarGridStartHour).
+            const normal = getEventsForDate(ds).filter(e => timeToMin(e.start) >= calStartHour * 60).map(e => {
               const sm = timeToMin(e.start);
               return { ...e, _startOffsetMin: sm - startMinBase };
             });
             if (calEndHour < 24) return normal;
             // Pull next-day's events that fall in the post-midnight portion of this column
             const nextDs = shiftDateStr(ds, 1);
-            const spillCutoffHour = calEndHour - 24 + 1; // hours 0..(spillCutoffHour-1) belong to prev column
+            // Only next-day events that the next column cannot show itself (before the grid start), so none appear twice.
             const spill = getEventsForDate(nextDs)
-              .filter(e => parseInt(e.start.split(":")[0], 10) < spillCutoffHour)
+              .filter(e => timeToMin(e.start) < spillCutoffMin)
               .map(e => {
                 const sm = timeToMin(e.start) + 24 * 60;
                 return { ...e, _startOffsetMin: sm - startMinBase, _spilloverFromDate: nextDs };
@@ -5273,7 +5444,7 @@ function DailyGrind() {
                   {/* Events overlay */}
                   {calDates.map((d, di) => {
                     const ds = localDateStr(d);
-                    const dayEvents = getDisplayedEvents(ds, di);
+                    const dayEvents = getDisplayedEvents(ds);
                     // Overlapping events split the column side by side. The event being dragged is left out
                     // (it floats full-width on top) so the rest do not reshuffle under the pointer.
                     const minVisibleMin = 20 / HOUR_H * 60; // blocks are at least 20px tall, so short ones overlap visually
@@ -5322,12 +5493,14 @@ function DailyGrind() {
                           }}
                           onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
                             const origId = evt._origId || evt.id;
-                            if (evt._repeating) return;
+                            // A drop rewrites the stored event, which for a repeating one is the whole series
+                            // (every past and future day), so repeating events are changed through Edit instead.
+                            if (evt._repeating || evt.repeat) return;
                             setCalDragging({ id: origId, origStart: evt.start, origEnd: evt.end, moved: false });
                           }}
                           onTouchStart={(e) => {
                             const origId = evt._origId || evt.id;
-                            if (evt._repeating) return;
+                            if (evt._repeating || evt.repeat) return;
                             const sx = e.touches[0].clientX;
                             const sy = e.touches[0].clientY;
                             const target = e.currentTarget;
@@ -5488,13 +5661,19 @@ function DailyGrind() {
                     )}
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
+                    {calEventFormProblem && <div role="alert" style={{ color: "#ff6b81", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{calEventFormProblem}</div>}
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
-                      <button onClick={() => {
+                      <button disabled={!!calEventFormProblem} onClick={() => {
+                        if (calEventFormProblem) return;
                         const isCustom = calEventRepeat === "custom" && calEventRepeatDays.length > 0;
-                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined });
+                        // Turning a series into a one-off keeps it on the day being edited. It used to fall back to
+                        // the series' first date (out of view, or invisible if that day had been deleted).
+                        const becomesOneOff = !!calSelectedEvent.repeat && calEventRepeat === "none";
+                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined,
+                          ...(becomesOneOff && calSelectedEvent._displayDate ? { date: calSelectedEvent._displayDate, exceptions: undefined, untilDate: undefined } : {}) });
                         setCalSelectedEvent(null); setCalEditMode(false);
-                      }} style={S.okBtn}>Save</button>
+                      }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Save</button>
                     </div>
                   </div>
                 </div>
@@ -5536,14 +5715,15 @@ function DailyGrind() {
                     )}
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
+                    {calEventFormProblem && <div role="alert" style={{ color: "#ff6b81", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{calEventFormProblem}</div>}
                     <div style={{ display: "flex", gap: 10 }}>
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
-                      <button onClick={() => {
-                        if (calEventTitle.trim()) {
+                      <button disabled={!!calEventFormProblem} onClick={() => {
+                        if (calEventTitle.trim() && !calEventFormProblem) {
                           addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim(), calEventRepeatDays);
                           setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc("");
                         }
-                      }} style={S.okBtn}>Add Event</button>
+                      }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Add Event</button>
                     </div>
                   </div>
                 </div>
