@@ -1071,6 +1071,21 @@ function calendarTimeLabel(time) {
 function calendarLastHour(events, preferredHour) {
   return Math.min(47, events.reduce((last, event) => Math.max(last, Math.ceil(calendarEndMinutes(event.start, event.end) / 60) - 1), preferredHour));
 }
+// When the day runs past midnight, a day's early events (before the spillover cutoff) are drawn
+// at the bottom of the previous day's column, so that column owns them. The week's first column
+// has no previous column on screen and keeps its own early events.
+function calendarOwnColumnEvents(events, dayIndex, endHour) {
+  const spillCutoffMin = endHour >= 24 ? (endHour - 24 + 1) * 60 : 0;
+  return dayIndex > 0 && spillCutoffMin > 0 ? events.filter(event => calendarTimeMinutes(event.start) >= spillCutoffMin) : events;
+}
+// The grid starts early enough to show every event the columns draw, so an event before
+// "Day starts at" is never positioned above the top of the grid where it cannot be seen.
+function calendarFirstHour(eventsByColumn, preferredHour) {
+  return Math.max(0, eventsByColumn.reduce((first, events) => events.reduce((earliest, event) => {
+    const hour = Math.floor(calendarTimeMinutes(event.start) / 60);
+    return Number.isFinite(hour) ? Math.min(earliest, hour) : earliest;
+  }, first), preferredHour));
+}
 
 function parseCalendarData(raw) {
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -4183,6 +4198,7 @@ function DailyGrind() {
       const restoredCalendar = bundle && bundle.format === "daily-grind-backup" && bundle.calendarEvents !== undefined
         ? parseCalendarData(bundle.calendarEvents)
         : null;
+      if (restoredCalendar !== null && !calEventsLoaded) throw new Error("Your calendar is still loading. Wait a moment, then restore again.");
       const noteCount = (parsed.notes || []).length;
       const taskCount = (parsed.taskLists || []).reduce((sum, list) => sum + (list.items || []).length, 0);
       if (!confirm(`Restore this backup with ${noteCount} notes and ${taskCount} open tasks?\n\nYour current data will be saved as a safety copy first.`)) return;
@@ -4224,6 +4240,7 @@ function DailyGrind() {
       const parsed = parseMainData(backup.value);
       if (window.noteImageStore.idsFor(parsed).length) await window.noteImageStore.exportAssets(parsed);
       const restoredCalendar = typeof backup.calendarValue === "string" ? parseCalendarData(backup.calendarValue) : null;
+      if (restoredCalendar !== null && !calEventsLoaded) throw new Error("Your calendar is still loading. Wait a moment, then restore again.");
       const noteCount = (parsed.notes || []).length;
       const selected = vaultItems.find((item) => item.id === vaultSelectedId);
       const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
@@ -4385,6 +4402,12 @@ function DailyGrind() {
   // Calendar helpers
   function saveCalEvents(nextOrUpdater) {
     if (calLoadError) return Promise.resolve(null);
+    // Before the saved calendar has loaded, calEventsRef holds an empty list; saving on top of it
+    // would replace every stored event.
+    if (!calEventsLoaded) {
+      setSaveInfo({ state: "error", key: "dg-cal-events", error: "Your calendar is still loading. Try that again in a moment." });
+      return Promise.resolve(null);
+    }
     const current = calEventsRef.current;
     const next = typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater;
     let validated;
@@ -4429,9 +4452,8 @@ function DailyGrind() {
         // Add exception date to skip this one instance
         return events.map(e => e.id === id ? { ...e, exceptions: e.exceptions ? [...new Set([...e.exceptions, exceptionDate])] : [exceptionDate] } : e);
       }
-      if (deleteAll && evt && evt.repeat) {
-        return events.filter(e => !(e.title === evt.title && e.start === evt.start && e.end === evt.end && e.repeat === evt.repeat));
-      }
+      // A whole series is one stored event, so "All events" removes only that id. Other series that
+      // share its title and times (e.g. separate Mon/Wed/Fri series) are different events and stay.
       return events.filter(e => e.id !== id);
     };
   }
@@ -4976,14 +4998,20 @@ function DailyGrind() {
               <button onClick={() => { setCalLoadError(false); setCalEventsLoaded(false); setCalLoadAttempt((n) => n + 1); }} style={{ ...S.okBtn, width: "100%" }}>Retry Loading</button>
             </div>
           );
+          // Until the saved calendar arrives the grid would look empty and accept a new event, and that
+          // save would replace every event with just the new one. Nothing is editable until it loads.
+          if (!calEventsLoaded) return (
+            <div role="status" style={{ maxWidth: 440, margin: "80px auto", textAlign: "center", color: "#8b8b9e", fontSize: 12, fontWeight: 700, letterSpacing: 1.2 }}>LOADING YOUR CALENDAR…</div>
+          );
           const calDates = getCalWeekDates(calWeekOffset);
-          const calStartHour = data.calStartHour ?? 6;
+          const configuredStartHour = data.calStartHour ?? 6;
           const configuredEndHour = data.calEndHour ?? 23;
           const calEndHour = Math.min(47, Math.max(
             calendarLastHour(calDates.flatMap(d => getEventsForDate(localDateStr(d))), configuredEndHour),
             calCreating ? Math.ceil(calCreating.endMin / 60) - 1 : configuredEndHour,
             calDragging?.newEnd ? Math.ceil(calendarTimeMinutes(calDragging.newEnd) / 60) - 1 : configuredEndHour
           ));
+          const calStartHour = calendarFirstHour(calDates.map((d, di) => calendarOwnColumnEvents(getEventsForDate(localDateStr(d)), di, calEndHour)), configuredStartHour);
           const totalHours = calEndHour - calStartHour + 1;
           const hours = Array.from({ length: totalHours }, (_, i) => i + calStartHour);
           const startMinBase = calStartHour * 60;
@@ -4997,8 +5025,8 @@ function DailyGrind() {
           function fmtHour(h) { const hr = ((h % 24) + 24) % 24; if (hr === 0) return "12 AM"; if (hr < 12) return hr + " AM"; if (hr === 12) return "12 PM"; return (hr - 12) + " PM"; }
           function shiftDateStr(ds, deltaDays) { const d = new Date(ds + "T12:00"); d.setDate(d.getDate() + deltaDays); return localDateStr(d); }
           // Returns events that should display in this column. Each item gets _displayMinFromStart (px-y math input).
-          function getDisplayedEvents(ds) {
-            const normal = getEventsForDate(ds).map(e => {
+          function getDisplayedEvents(ds, di) {
+            const normal = calendarOwnColumnEvents(getEventsForDate(ds), di, calEndHour).map(e => {
               const sm = timeToMin(e.start);
               return { ...e, _startOffsetMin: sm - startMinBase };
             });
@@ -5245,7 +5273,7 @@ function DailyGrind() {
                   {/* Events overlay */}
                   {calDates.map((d, di) => {
                     const ds = localDateStr(d);
-                    const dayEvents = getDisplayedEvents(ds);
+                    const dayEvents = getDisplayedEvents(ds, di);
                     // Overlapping events split the column side by side. The event being dragged is left out
                     // (it floats full-width on top) so the rest do not reshuffle under the pointer.
                     const minVisibleMin = 20 / HOUR_H * 60; // blocks are at least 20px tall, so short ones overlap visually
@@ -5534,7 +5562,7 @@ function DailyGrind() {
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
                       {[4,5,6,7,8,9,10].map(h => (
                         <button key={h} onClick={() => save((current) => ({ ...current, calStartHour: h }))}
-                          style={{ padding: "8px 12px", borderRadius: 8, border: calStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: calStartHour === h ? "#7c3aed22" : "#12122a", color: calStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          style={{ padding: "8px 12px", borderRadius: 8, border: configuredStartHour === h ? "2px solid #7c3aed" : "1px solid #2d2d3a", background: configuredStartHour === h ? "#7c3aed22" : "#12122a", color: configuredStartHour === h ? "#c4b5fd" : "#8b8b9e", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                           {fmtHour(h)}
                         </button>
                       ))}

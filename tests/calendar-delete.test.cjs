@@ -66,3 +66,13 @@ test("two quick deletes both vanish immediately and both land", async () => {
   assert.deepEqual(state.events, []);
   assert.deepEqual(visible(), []);
 });
+
+test("\"All events\" removes only the chosen series, not other series with the same name and times", () => {
+  const { ctx } = harness();
+  const series = [
+    { id: "wrestle-mon", date: "2026-09-07", title: "wrestling", start: "18:00", end: "20:00", repeat: "weekly" },
+    { id: "wrestle-wed", date: "2026-09-09", title: "wrestling", start: "18:00", end: "20:00", repeat: "weekly" },
+    { id: "wrestle-fri", date: "2026-09-11", title: "wrestling", start: "18:00", end: "20:00", repeat: "weekly" },
+  ];
+  assert.deepEqual(ctx.calDeleteTransform("wrestle-mon", true)(series).map(e => e.id), ["wrestle-wed", "wrestle-fri"]);
+});
