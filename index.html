@@ -1225,6 +1225,13 @@ const mkDefault = () => ({
 
 // Every account has one optional ("bonus") habit section; see habitPoints.
 const OPTIONAL_SECTION_ID = "optional";
+// Starred pages first; then the order the pages were dragged into (data.noteOrder); pages not placed yet
+// (new ones) go on top, newest first.
+function sortNotes(notes, noteOrder) {
+  const rank = new Map((Array.isArray(noteOrder) ? noteOrder : []).map((id, index) => [id, index]));
+  const place = (note) => rank.has(note.id) ? rank.get(note.id) : -1;
+  return [...notes].sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true) || place(a) - place(b) || (b.updatedAt || 0) - (a.updatedAt || 0));
+}
 function parseMainData(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
@@ -1328,6 +1335,7 @@ function parseMainData(raw) {
     habitSections: sections,
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
+    ...(Array.isArray(parsed.noteOrder) ? { noteOrder: [...new Set(parsed.noteOrder.filter((id) => typeof id === "string" && id))] } : {}),
     noteDrawings,
     noteTextBoxes,
     noteImages,
@@ -2206,11 +2214,13 @@ const ICON_PATHS = {
   calendar: ["M8 2v4", "M16 2v4", { rect: [3, 4, 18, 18, 2] }, "M3 10h18"],
   trophy: ["M6 9H4.5a2.5 2.5 0 0 1 0-5H6", "M18 9h1.5a2.5 2.5 0 0 0 0-5H18", "M4 22h16", "M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22", "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22", "M18 2H6v7a6 6 0 0 0 12 0V2Z"],
   alert: ["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"],
+  star: ["M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"],
+  grip: [{ circle: [9, 6, 1] }, { circle: [15, 6, 1] }, { circle: [9, 12, 1] }, { circle: [15, 12, 1] }, { circle: [9, 18, 1] }, { circle: [15, 18, 1] }],
   sparkles: ["M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"],
 };
-function Icon({ name, size = 18, stroke = 2.25, style }) {
+function Icon({ name, size = 18, stroke = 2.25, fill = "none", style }) {
   const parts = ICON_PATHS[name] || [];
-  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, display: "block", ...style }}>
+  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, display: "block", ...style }}>
     {parts.map((part, i) => typeof part === "string" ? <path key={i} d={part} />
       : part.circle ? <circle key={i} cx={part.circle[0]} cy={part.circle[1]} r={part.circle[2]} />
       : <rect key={i} x={part.rect[0]} y={part.rect[1]} width={part.rect[2]} height={part.rect[3]} rx={part.rect[4]} />)}
@@ -4343,6 +4353,56 @@ function DailyGrind() {
     if (!storeOpenNoteNow(draft)) return;
     setNoteDraft(null);
   }
+  // Dragging a page (by its grip): drop on another page to reorder, or on a section to move it there.
+  const [noteDrag, setNoteDrag] = useState(null);
+  const noteDragRef = useRef(null);
+  function reorderNote(dragId, targetId, after) {
+    if (!dragId || !targetId || dragId === targetId) return;
+    save((current) => {
+      const ids = sortNotes(current.notes || [], current.noteOrder).map((note) => note.id).filter((id) => id !== dragId);
+      let at = ids.indexOf(targetId);
+      if (at < 0) return current;
+      if (after) at += 1;
+      ids.splice(at, 0, dragId);
+      return { ...current, noteOrder: ids };
+    });
+  }
+  function moveNoteToSection(noteId, tag) {
+    if (noteDraft?.id === noteId) { setNoteDraft((draft) => ({ ...draft, tag })); return; }
+    save((current) => ({ ...current, notes: (current.notes || []).map((note) => note.id === noteId ? { ...note, tag } : note) }));
+  }
+  function updateNoteDrag(event) {
+    const drag = noteDragRef.current;
+    if (!drag) return;
+    const moved = drag.moved || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 5;
+    const hit = document.elementFromPoint(event.clientX, event.clientY);
+    const card = hit?.closest?.("[data-note-card]");
+    const section = hit?.closest?.("[data-note-drop-section]");
+    let overNote = null, after = false, overSection = null;
+    if (card) {
+      overNote = card.getAttribute("data-note-card");
+      const rect = card.getBoundingClientRect();
+      after = event.clientY > rect.top + rect.height / 2;
+    } else if (section) overSection = section.getAttribute("data-note-drop-section");
+    // Keep a long list scrolling while a page is carried to its top or bottom edge.
+    const list = hit?.closest?.(".notes-pages") || document.querySelector(".notes-pages");
+    if (moved && list) {
+      const box = list.getBoundingClientRect();
+      if (event.clientY < box.top + 40) list.scrollTop -= 14;
+      else if (event.clientY > box.bottom - 40) list.scrollTop += 14;
+    }
+    const next = { ...drag, moved, x: event.clientX, y: event.clientY, overNote, after, overSection };
+    noteDragRef.current = next;
+    setNoteDrag(next);
+  }
+  function finishNoteDrag(apply) {
+    const drag = noteDragRef.current;
+    noteDragRef.current = null;
+    setNoteDrag(null);
+    if (!apply || !drag || !drag.moved) return;
+    if (drag.overNote) reorderNote(drag.id, drag.overNote, drag.after);
+    else if (drag.overSection !== null && drag.overSection !== undefined) moveNoteToSection(drag.id, drag.overSection === "__untagged__" ? "" : drag.overSection);
+  }
   function toggleNotePin(noteId) {
     if (noteDraft?.id === noteId) {
       setNoteDraft((draft) => ({ ...draft, pinned: !draft.pinned }));
@@ -4943,7 +5003,8 @@ function DailyGrind() {
     if (noteTagFilter !== "all" && noteTagFilter !== "__untagged__" && note.tag !== noteTagFilter) return false;
     if (!noteNeedle) return true;
     return `${note.title || ""}\n${noteTextContent(note)}\n${note.tag || ""}`.toLowerCase().includes(noteNeedle);
-  }).sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  });
+  const sortedVisibleNotes = sortNotes(visibleNotes, data.noteOrder);
   const linkedTaskContext = noteDraft
     ? data.taskLists.map((list) => ({ list, task: list.items.find((task) => task.noteId === noteDraft.id) })).find((entry) => entry.task)
     : null;
@@ -5172,12 +5233,12 @@ function DailyGrind() {
                 <button onClick={() => setNoteTagFilter("all")} style={{ ...S.noteSectionBtn, background: noteTagFilter === "all" ? "#7c3aed2d" : "transparent", color: noteTagFilter === "all" ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === "all" ? "#7c3aed55" : "transparent" }}>
                   <span style={{ color: "#a78bfa" }}>▣</span><span style={{ flex: 1, textAlign: "left" }}>All Pages</span><span style={S.noteSectionCount}>{notes.length}</span>
                 </button>
-                <button onClick={() => setNoteTagFilter("__untagged__")} style={{ ...S.noteSectionBtn, background: noteTagFilter === "__untagged__" ? "#7c3aed2d" : "transparent", color: noteTagFilter === "__untagged__" ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === "__untagged__" ? "#7c3aed55" : "transparent" }}>
+                <button data-note-drop-section="__untagged__" onClick={() => setNoteTagFilter("__untagged__")} style={{ ...S.noteSectionBtn, background: noteDrag?.moved && noteDrag.overSection === "__untagged__" ? "#7c3aed55" : noteTagFilter === "__untagged__" ? "#7c3aed2d" : "transparent", color: noteTagFilter === "__untagged__" ? "#c4b5fd" : "#a0a0b0", borderColor: noteDrag?.moved && noteDrag.overSection === "__untagged__" ? "#a78bfa" : noteTagFilter === "__untagged__" ? "#7c3aed55" : "transparent" }}>
                   <span style={{ color: "#ffd43b" }}>◆</span><span style={{ flex: 1, textAlign: "left" }}>Quick Notes</span><span style={S.noteSectionCount}>{notes.filter((note) => !note.tag).length}</span>
                 </button>
                 {noteTags.map((tag, index) => (
                   <div key={tag} className="notes-section-row" style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4, minWidth: 0 }}>
-                  <button onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, flex: 1, minWidth: 0, marginBottom: 0, background: noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
+                  <button data-note-drop-section={tag} onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, flex: 1, minWidth: 0, marginBottom: 0, background: noteDrag?.moved && noteDrag.overSection === tag ? "#7c3aed55" : noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteDrag?.moved && noteDrag.overSection === tag ? "#a78bfa" : noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
                     <span style={{ color: ["#00d9ff","#00ff87","#ff922b","#f472b6","#a78bfa"][index % 5] }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
                   </button>
                   <button type="button" aria-label={`Delete section: ${tag}`} title={`Delete section: ${tag}`} onClick={() => { setDeleteSectionTarget(tag); setDeleteSectionError(""); }} className="quiet-danger" style={{ ...S.noteToolBtn, padding: 7, flexShrink: 0 }}><TrashIcon /></button>
@@ -5196,6 +5257,9 @@ function DailyGrind() {
               )}
             </aside>
 
+            {noteDrag?.moved && <div aria-hidden="true" style={{ position: "fixed", left: noteDrag.x + 14, top: noteDrag.y - 16, zIndex: 400, pointerEvents: "none", maxWidth: 220, padding: "7px 11px", borderRadius: 8, background: "#2a2a44", border: "1px solid #a78bfa", color: "#f0f0f4", fontSize: 11, fontWeight: 800, boxShadow: "0 10px 26px #000a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {noteDrag.title}{noteDrag.overSection !== null && noteDrag.overSection !== undefined ? ` → ${noteDrag.overSection === "__untagged__" ? "Quick Notes" : noteDrag.overSection}` : ""}
+            </div>}
             <section className="notes-pages" aria-label="Notebook pages">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 12px" }}>
                 <div><div style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.5, fontWeight: 900 }}>PAGES</div><div style={{ color: "#555566", fontSize: 10.5, marginTop: 3 }}>{visibleNotes.length} shown</div></div>
@@ -5207,17 +5271,43 @@ function DailyGrind() {
                 {noteSearch && <button onClick={() => setNoteSearch("")} aria-label="Clear note search" style={{ position: "absolute", right: 7, top: 5, width: 26, height: 26, background: "none", border: "none", color: "#77778a", cursor: "pointer", fontSize: 15 }}>×</button>}
               </div>
 
-              {visibleNotes.map((note) => {
+              {sortedVisibleNotes.map((note, noteIndex) => {
                 const selected = noteDraft?.id === note.id;
+                const dropHere = noteDrag?.moved && noteDrag.overNote === note.id && noteDrag.id !== note.id;
                 return (
                   <div key={note.id} style={{ position: "relative" }}>
-                  <article className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 44px 11px 15px", marginBottom: 5, cursor: "pointer", outline: "none" }}>
+                  <article className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 76px 11px 26px", marginBottom: 5, cursor: "pointer", outline: "none", opacity: noteDrag?.moved && noteDrag.id === note.id ? 0.4 : 1 }}>
                     <span style={{ position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderRadius: 3, background: selected ? "#a78bfa" : note.pinned ? "#ffd43b" : "#3d3d50" }} />
-                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div>{note.pinned && <span aria-label="Pinned" style={{ color: "#ffd43b", fontSize: 10 }}>◆</span>}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ flex: 1, minWidth: 0, color: selected ? "#fff" : "#e2e2ea", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title || "Untitled page"}</div></div>
                     <div style={{ color: "#666677", fontSize: 10, marginTop: 4 }}>{new Date(note.updatedAt || note.createdAt || Date.now()).toLocaleDateString("en-US", { month: "short", day: "numeric" })}{note.tag ? ` · ${note.tag}` : " · Quick Notes"}</div>
                     <div style={{ color: "#858596", fontSize: 10.5, lineHeight: 1.5, marginTop: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{noteTextContent(note) || (note.images?.length ? "Screenshot" : note.drawing?.length ? "Drawing" : "Empty page")}</div>
                   </article>
                   <button type="button" aria-label={`Delete page: ${note.title || "Untitled page"}`} title="Delete page" onClick={() => deleteNote(note)} className="quiet-danger" style={{ ...S.noteToolBtn, position: "absolute", right: 5, top: 8, padding: 7 }}><TrashIcon /></button>
+                  <button type="button" aria-pressed={note.pinned === true} aria-label={note.pinned ? `Unstar page: ${note.title || "Untitled page"}` : `Star page: ${note.title || "Untitled page"}`} title={note.pinned ? "Starred (kept at the top). Tap to unstar" : "Star (keep at the top)"}
+                    onClick={() => toggleNotePin(note.id)} style={{ position: "absolute", right: 38, top: 8, width: 30, height: 30, display: "grid", placeItems: "center", background: "none", border: "none", borderRadius: 7, cursor: "pointer", color: note.pinned ? "#ffd43b" : "#5a5a70", padding: 0 }}>
+                    <Icon name="star" size={15} stroke={2} fill={note.pinned ? "currentColor" : "none"} />
+                  </button>
+                  <button type="button" aria-label={`Move page: ${note.title || "Untitled page"}. Drag to reorder or onto a section; arrow keys move it up or down`} title="Drag to reorder, or drop on a section"
+                    onPointerDown={(event) => {
+                      if (event.button !== undefined && event.button !== 0) return;
+                      event.preventDefault();
+                      try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) {}
+                      noteDragRef.current = { id: note.id, title: note.title || "Untitled page", startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, moved: false, overNote: null, after: false, overSection: null };
+                      setNoteDrag(noteDragRef.current);
+                    }}
+                    onPointerMove={updateNoteDrag}
+                    onPointerUp={() => finishNoteDrag(true)}
+                    onPointerCancel={() => finishNoteDrag(false)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                      event.preventDefault();
+                      const neighbour = sortedVisibleNotes[noteIndex + (event.key === "ArrowUp" ? -1 : 1)];
+                      if (neighbour) reorderNote(note.id, neighbour.id, event.key === "ArrowDown");
+                    }}
+                    style={{ position: "absolute", left: 2, top: 6, bottom: 11, width: 22, display: "grid", placeItems: "center", background: "none", border: "none", borderRadius: 6, color: "#55556a", cursor: noteDrag ? "grabbing" : "grab", touchAction: "none", padding: 0 }}>
+                    <Icon name="grip" size={14} stroke={2.4} />
+                  </button>
+                  {dropHere && <span aria-hidden="true" style={{ position: "absolute", left: 6, right: 6, height: 3, borderRadius: 2, background: "#a78bfa", boxShadow: "0 0 8px #a78bfa", ...(noteDrag.after ? { bottom: 2 } : { top: -3 }) }} />}
                   </div>
                 );
               })}
@@ -5298,7 +5388,7 @@ function DailyGrind() {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #2d2d3a", background: "#151526", flexWrap: "wrap" }}>
                     <span style={{ color: "#555566", fontSize: 10, marginRight: "auto" }}>{noteTextContent(noteDraft).trim() ? noteTextContent(noteDraft).trim().split(/\s+/).length : 0} words · auto-saves to your account</span>
-                    <button onClick={() => toggleNotePin(noteDraft.id)} style={{ ...S.noteToolBtn, color: noteDraft.pinned ? "#ffd43b" : "#8b8b9e", borderColor: noteDraft.pinned ? "#ffd43b55" : "#353548" }}>{noteDraft.pinned ? "◆ PINNED" : "◇ PIN"}</button>
+                    <button onClick={() => toggleNotePin(noteDraft.id)} style={{ ...S.noteToolBtn, color: noteDraft.pinned ? "#ffd43b" : "#8b8b9e", borderColor: noteDraft.pinned ? "#ffd43b55" : "#353548" }}>{noteDraft.pinned ? "★ STARRED" : "☆ STAR"}</button>
                     {notes.some((note) => note.id === noteDraft.id) && <button onClick={() => deleteNote(noteDraft)} style={{ ...S.noteToolBtn, color: "#ff6b7a", borderColor: "#ff475744" }}>DELETE</button>}
                     <button onClick={finishNoteEditing} style={{ ...S.okBtn, flex: "none", padding: "8px 14px", fontSize: 10.5 }}>CLOSE</button>
                   </div>
