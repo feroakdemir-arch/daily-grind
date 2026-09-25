@@ -1223,6 +1223,8 @@ const mkDefault = () => ({
   dailyGoal: 100, dayResetHour: 0, log: {}, streak: 0, lastCompletedDate: null, history: {},
 });
 
+// Every account has one optional ("bonus") habit section; see habitPoints.
+const OPTIONAL_SECTION_ID = "optional";
 function parseMainData(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
@@ -1291,7 +1293,7 @@ function parseMainData(raw) {
   }, {}) : {};
   const history = objectOnly(parsed.history) ? Object.entries(parsed.history).reduce((days, [date, entry]) => {
     if (!objectOnly(entry)) return days;
-    const score = Math.max(0, finiteNumber(entry.score, 0));
+    const score = finiteNumber(entry.score, 0); // negative when missed required habits outweigh the day
     const goal = Math.max(1, finiteNumber(entry.goal, parsed.dailyGoal || 100));
     days[date] = { ...entry, score, goal, won: entry.won === true || score >= goal, ts: Math.max(0, finiteNumber(entry.ts, 0)) };
     return days;
@@ -1317,9 +1319,13 @@ function parseMainData(raw) {
   const noteTextBoxes = Object.fromEntries(Object.entries(parsed.noteTextBoxes || {}).map(([id, boxes]) => [id, normalizeNoteTextBoxes(boxes)]));
   if (parsed.noteImages !== undefined && !objectOnly(parsed.noteImages)) throw new Error("Saved note images are invalid");
   const noteImages = Object.fromEntries(Object.entries(parsed.noteImages || {}).map(([id, images]) => [id, normalizeNoteImages(images)]));
+  const sections = habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS));
+  if (!sections.some((section) => section.optional === true)) {
+    sections.push({ id: OPTIONAL_SECTION_ID, title: "OPTIONAL", icon: "\u2726", optional: true, items: [] });
+  }
   return {
     ...parsed,
-    habitSections: habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS)),
+    habitSections: sections,
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
     noteDrawings,
@@ -1860,11 +1866,24 @@ function mkStoreDefaults(goal) {
   ];
 }
 function totalEarnedPoints(data, todayScore) {
-  return Object.values(data.history || {}).reduce((s, h) => s + (h.score || 0), 0) + Math.max(0, todayScore);
+  return Object.values(data.history || {}).reduce((s, h) => s + (h.score || 0), 0) + todayScore;
 }
 
 function allHabits(secs) { return secs.flatMap((s) => s.items); }
-function habitScore(tl, secs) { return allHabits(secs).reduce((sc, i) => sc + (tl[i.id] === "done" ? i.points : 0), 0); }
+// Required habits (every section except the optional one) cost their points when a day marks them ✗,
+// including habits still unmarked when the day closes (they get stamped ✗). Optional habits only ever add.
+// The penalty starts on the day the rule was introduced; earlier days keep the scores they had.
+const HABIT_PENALTY_FROM = "2026-09-25";
+function habitPoints(status, item, optional, date) {
+  if (status === "done") return item.points;
+  if (status === "skip" && !optional && typeof date === "string" && date >= HABIT_PENALTY_FROM) return -item.points;
+  return 0;
+}
+function sectionScore(tl, sec, date) { return sec.items.reduce((sc, i) => sc + habitPoints(tl[i.id], i, sec.optional === true, date), 0); }
+function habitScore(tl, secs, date) { return secs.reduce((sc, sec) => sc + sectionScore(tl, sec, date), 0); }
+function requiredHabits(secs) { return secs.filter((s) => s.optional !== true).flatMap((s) => s.items); }
+// Optional sections always sit below the required ones.
+function orderedHabitSections(secs) { return [...secs.filter((s) => s.optional !== true), ...secs.filter((s) => s.optional === true)]; }
 function taskScore(lists, today) { return lists.flatMap((l) => l.items).reduce((sc, t) => sc + ((t.done && (!t.doneDate || t.doneDate === today)) ? t.points : 0), 0); }
 function getStreak(id, log, today) {
   if (log[today]?.[id] !== "done") return 0; let s = 1;
@@ -2187,6 +2206,7 @@ const ICON_PATHS = {
   calendar: ["M8 2v4", "M16 2v4", { rect: [3, 4, 18, 18, 2] }, "M3 10h18"],
   trophy: ["M6 9H4.5a2.5 2.5 0 0 1 0-5H6", "M18 9h1.5a2.5 2.5 0 0 0 0-5H18", "M4 22h16", "M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22", "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22", "M18 2H6v7a6 6 0 0 0 12 0V2Z"],
   alert: ["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"],
+  sparkles: ["M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"],
 };
 function Icon({ name, size = 18, stroke = 2.25, style }) {
   const parts = ICON_PATHS[name] || [];
@@ -2198,7 +2218,7 @@ function Icon({ name, size = 18, stroke = 2.25, style }) {
 }
 // Habit sections keep whatever icon the user picked; the three built-in glyphs render as line icons.
 function SectionIcon({ icon }) {
-  const name = { "\u2600": "sun", "\u26A1": "zap", "\u263E": "moon" }[icon];
+  const name = { "\u2600": "sun", "\u26A1": "zap", "\u263E": "moon", "\u2726": "sparkles" }[icon];
   return name ? <Icon name={name} size={16} style={{ color: "#a78bfa" }} /> : <span style={{ fontSize: 14 }}>{icon}</span>;
 }
 const prefersReducedMotion = () => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (error) { return false; } };
@@ -3106,10 +3126,9 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
       // Keep that day's archived history score in sync when editing the past
       const entry = current.history[targetDate];
       if (entry && targetDate !== today) {
-        const habits = allHabits(current.habitSections);
-        const hsBefore = habits.reduce((sc, h) => sc + (dtl[h.id] === "done" ? h.points : 0), 0);
+        const hsBefore = habitScore(dtl, current.habitSections, targetDate);
         const ts = entry.ts !== undefined ? entry.ts : Math.max(0, (entry.score || 0) - hsBefore);
-        const hsAfter = habits.reduce((sc, h) => sc + (ntl[h.id] === "done" ? h.points : 0), 0);
+        const hsAfter = habitScore(ntl, current.habitSections, targetDate);
         const score = hsAfter + ts;
         nd.history = { ...current.history, [targetDate]: { ...entry, score, won: score >= (entry.goal || current.dailyGoal), ts } };
       }
@@ -3923,7 +3942,7 @@ function DailyGrind() {
     if (data.lastTaskResetDate && data.lastTaskResetDate < today) startDs = data.lastTaskResetDate;
     if (data.log[yday] && !data.history[yday] && (!startDs || yday < startDs)) startDs = yday;
     if (startDs) {
-      const habits = allHabits(data.habitSections);
+      const habits = requiredHabits(data.habitSections);
       const allTasks = data.taskLists.flatMap((l) => l.items);
       const newLog = { ...updated.log };
       const newHistory = { ...updated.history };
@@ -3937,7 +3956,7 @@ function DailyGrind() {
           const dl = { ...(newLog[ds] || {}) };
           habits.forEach((h) => { if (dl[h.id] === undefined) dl[h.id] = "skip"; });
           newLog[ds] = dl;
-          const hs = habits.reduce((sc, i) => sc + (dl[i.id] === "done" ? i.points : 0), 0);
+          const hs = habitScore(dl, data.habitSections, ds);
           const ts = allTasks.reduce((sc, t) => sc + ((t.done && (t.doneDate ? t.doneDate === ds : ds === yday)) ? t.points : 0), 0);
           const totalScore = hs + ts;
           const won = totalScore >= data.dailyGoal;
@@ -4654,7 +4673,7 @@ function DailyGrind() {
 
   useEffect(() => {
     if (!data) return;
-    const sc = habitScore(getTL(), data.habitSections) + taskScore(data.taskLists, today);
+    const sc = habitScore(getTL(), data.habitSections, today) + taskScore(data.taskLists, today);
     if (sc >= data.dailyGoal && prevScoreRef.current < data.dailyGoal && data.dailyGoal > 0) { setWinAnim(true); setTimeout(() => setWinAnim(false), 3000); }
     prevScoreRef.current = sc;
     // Level-up detection from lifetime points
@@ -4901,7 +4920,7 @@ function DailyGrind() {
   }
 
   const tl = getTL();
-  const hScore = habitScore(tl, data.habitSections);
+  const hScore = habitScore(tl, data.habitSections, today);
   const tScore = taskScore(data.taskLists, today);
   const score = hScore + tScore;
   const lifePts = lifetimePoints(data, score);
@@ -4913,7 +4932,9 @@ function DailyGrind() {
   const allH = allHabits(data.habitSections);
   const allT = data.taskLists.flatMap((l) => l.items);
   const doneN = Object.values(tl).filter((v) => v === "done").length + allT.filter((t) => t.done && (!t.doneDate || t.doneDate === today)).length;
-  const totalN = allH.length + allT.length;
+  // Optional habits count toward "done" only once they're done; they never make the day look unfinished.
+  const optionalDoneN = data.habitSections.filter((sec) => sec.optional === true).flatMap((sec) => sec.items).filter((item) => tl[item.id] === "done").length;
+  const totalN = requiredHabits(data.habitSections).length + optionalDoneN + allT.length;
   const notes = Array.isArray(data.notes) ? data.notes : [];
   const noteTags = noteSectionNames(data);
   const noteNeedle = noteSearch.trim().toLowerCase();
@@ -5041,19 +5062,26 @@ function DailyGrind() {
           </div>
         )}
 
-        {page === "habits" && data.habitSections.map((sec) => {
-          const sp = sec.items.reduce((s, i) => s + (tl[i.id] === "done" ? i.points : 0), 0);
+        {page === "habits" && orderedHabitSections(data.habitSections).map((sec) => {
+          const sp = sectionScore(tl, sec, today);
           const sm = sec.items.reduce((s, i) => s + i.points, 0);
+          const optional = sec.optional === true;
           return (
             <div key={sec.id} style={{ marginBottom: 20 }} data-habitsec={sec.id}>
               <div style={S.secH}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <SectionIcon icon={sec.icon} />
                   <span style={S.secLbl}>{sec.title}</span>
                   <span style={S.secCnt}>{sec.items.length}</span>
+                  {optional && <span style={{ fontSize: 10, color: "#8b8b9e", letterSpacing: 0.4 }}>Bonus · no penalty</span>}
                 </div>
-                <span style={S.secPt}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>
+                {optional
+                  ? <span style={{ ...S.secPt, color: sp > 0 ? "#5ff0a6" : S.secPt.color }}>+{sp}</span>
+                  : <span style={{ ...S.secPt, color: sp < 0 ? "#ff6b78" : S.secPt.color }}>{sp}<span style={{ color: "#b0b0be" }}>/{sm}</span></span>}
               </div>
+              {optional && !sec.items.length && <div style={{ fontSize: 11, color: "#8b8b9e", lineHeight: 1.5, margin: "2px 2px 8px" }}>
+                Extras that add points when you do them. Skipping one never costs points. Required habits above lose their points when marked {"\u2717"}.
+              </div>}
               {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} habitDragSessionRef={habitDragSessionRef} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} />)}
               <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
@@ -6031,7 +6059,7 @@ function DailyGrind() {
       <label style={S.lbl}>{"\uD83D\uDCDD"} Today's Comment</label><textarea style={{ ...S.textarea, borderColor: "#7c3aed44" }} value={formComment} onChange={(e) => setFormComment(e.target.value)} placeholder="e.g., 82.5kg, skipped because sick, did 30 min instead..." rows={2} />
       <label style={S.lbl}>Move to section</label>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
-        {data.habitSections.map((sec) => <button key={sec.id} onClick={() => moveHabitTo(sec.id)} style={{ padding: "7px 12px", background: editSection === sec.id ? "#7c3aed33" : "#12122a", border: `1px solid ${editSection === sec.id ? "#7c3aed" : "#2d2d3a"}`, borderRadius: 8, color: editSection === sec.id ? "#7c3aed" : "#8b8b9e", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>{sec.icon} {sec.title}</button>)}
+        {orderedHabitSections(data.habitSections).map((sec) => <button key={sec.id} onClick={() => moveHabitTo(sec.id)} style={{ padding: "7px 12px", background: editSection === sec.id ? "#7c3aed33" : "#12122a", border: `1px solid ${editSection === sec.id ? "#7c3aed" : "#2d2d3a"}`, borderRadius: 8, color: editSection === sec.id ? "#7c3aed" : "#8b8b9e", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>{sec.icon} {sec.title}</button>)}
       </div>
       <div style={S.fAct}>
         <button onClick={() => deleteHabit(editItem.id)} style={S.dBtn}>Delete</button>
