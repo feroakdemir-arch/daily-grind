@@ -89,6 +89,12 @@
     .side-quote-left { left: max(32px, calc((100vw - 900px) / 4 - 150px)); }
     .side-quote-right { right: max(32px, calc((100vw - 900px) / 4 - 150px)); text-align: right; }
     .side-quote-right [aria-hidden="true"] { text-align: right; }
+    .section-drop-line { position: absolute; left: 4px; right: 4px; height: 3px; border-radius: 2px; background: #a78bfa; box-shadow: 0 0 8px #a78bfa; pointer-events: none; top: -3px; }
+    .section-drop-line[data-after="1"] { top: auto; bottom: -3px; }
+    @media (max-width: 760px) {
+      .section-drop-line { left: -4px; right: auto; top: 4px; bottom: 4px; width: 3px; height: auto; }
+      .section-drop-line[data-after="1"] { left: auto; right: -4px; top: 4px; bottom: 4px; }
+    }
     .inline-quote { display: block; }
     @media (min-width: 1480px) { .side-quote { display: block; } .inline-quote { display: none; } }
     @keyframes quoteIn { from { opacity: 0; transform: translateY(calc(-50% + 10px)); } to { opacity: 1; transform: translateY(-50%); } }
@@ -1345,6 +1351,7 @@ function parseMainData(raw) {
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
     ...(Array.isArray(parsed.noteOrder) ? { noteOrder: [...new Set(parsed.noteOrder.filter((id) => typeof id === "string" && id))] } : {}),
+    ...(Array.isArray(parsed.noteSectionOrder) ? { noteSectionOrder: [...new Set(parsed.noteSectionOrder.filter((name) => typeof name === "string" && name))] } : {}),
     noteDrawings,
     noteTextBoxes,
     noteImages,
@@ -1671,8 +1678,16 @@ function drawingStrokeHit(stroke, point, radius = 12) {
 }
 
 function noteSectionNames(data) {
+  const rank = new Map((Array.isArray(data.noteSectionOrder) ? data.noteSectionOrder : []).map((name, index) => [name, index]));
+  const place = (name) => rank.has(name) ? rank.get(name) : Number.MAX_SAFE_INTEGER;
   return normalizeNoteSections([...(data.noteSections || []), ...(data.notes || []).map(note => note.tag)])
-    .sort((a, b) => a.localeCompare(b));
+    .sort((a, b) => place(a) - place(b) || a.localeCompare(b));
+}
+// A section keeps its colour wherever it is dragged to.
+function noteSectionColor(name) {
+  let hash = 0;
+  for (const ch of String(name)) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return ["#00d9ff", "#00ff87", "#ff922b", "#f472b6", "#a78bfa", "#ffd43b"][hash % 6];
 }
 
 function addNoteSection(current, section, draft) {
@@ -4427,6 +4442,17 @@ function DailyGrind() {
       return { ...current, noteOrder: ids };
     });
   }
+  function reorderNoteSection(dragTag, targetTag, after) {
+    if (!dragTag || !targetTag || dragTag === targetTag) return;
+    save((current) => {
+      const names = noteSectionNames(current).filter((name) => name !== dragTag);
+      let at = names.indexOf(targetTag);
+      if (at < 0) return current;
+      if (after) at += 1;
+      names.splice(at, 0, dragTag);
+      return { ...current, noteSectionOrder: names };
+    });
+  }
   function moveNoteToSection(noteId, tag) {
     if (noteDraft?.id === noteId) { setNoteDraft((draft) => ({ ...draft, tag })); return; }
     save((current) => ({ ...current, notes: (current.notes || []).map((note) => note.id === noteId ? { ...note, tag } : note) }));
@@ -4436,6 +4462,21 @@ function DailyGrind() {
     if (!drag) return;
     const moved = drag.moved || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 5;
     const hit = document.elementFromPoint(event.clientX, event.clientY);
+    if (drag.kind === "section") {
+      // Sections: drop before/after another section (a row on phones, a column otherwise).
+      const row = hit?.closest?.("[data-note-section-row]");
+      const overRow = row ? row.getAttribute("data-note-section-row") : null;
+      let rowAfter = false;
+      if (row) {
+        const rect = row.getBoundingClientRect();
+        const sideways = window.matchMedia("(max-width: 760px)").matches;
+        rowAfter = sideways ? event.clientX > rect.left + rect.width / 2 : event.clientY > rect.top + rect.height / 2;
+      }
+      const nextSection = { ...drag, moved, x: event.clientX, y: event.clientY, overRow, after: rowAfter };
+      noteDragRef.current = nextSection;
+      setNoteDrag(nextSection);
+      return;
+    }
     const card = hit?.closest?.("[data-note-card]");
     const section = hit?.closest?.("[data-note-drop-section]");
     let overNote = null, after = false, overSection = null;
@@ -4460,6 +4501,7 @@ function DailyGrind() {
     noteDragRef.current = null;
     setNoteDrag(null);
     if (!apply || !drag || !drag.moved) return;
+    if (drag.kind === "section") { if (drag.overRow) reorderNoteSection(drag.id, drag.overRow, drag.after); return; }
     if (drag.overNote) reorderNote(drag.id, drag.overNote, drag.after);
     else if (drag.overSection !== null && drag.overSection !== undefined) moveNoteToSection(drag.id, drag.overSection === "__untagged__" ? "" : drag.overSection);
   }
@@ -5304,9 +5346,31 @@ function DailyGrind() {
                   <span style={{ color: "#ffd43b" }}>◆</span><span style={{ flex: 1, textAlign: "left" }}>Quick Notes</span><span style={S.noteSectionCount}>{notes.filter((note) => !note.tag).length}</span>
                 </button>
                 {noteTags.map((tag, index) => (
-                  <div key={tag} className="notes-section-row" style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4, minWidth: 0 }}>
+                  <div key={tag} className="notes-section-row" data-note-section-row={tag} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2, marginBottom: 4, minWidth: 0, opacity: noteDrag?.moved && noteDrag.kind === "section" && noteDrag.id === tag ? 0.4 : 1 }}>
+                  <button type="button" aria-label={`Move section: ${tag}. Drag to reorder; arrow keys move it up or down`} title="Drag to reorder sections"
+                    onPointerDown={(event) => {
+                      if (event.button !== undefined && event.button !== 0) return;
+                      event.preventDefault();
+                      try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) {}
+                      noteDragRef.current = { kind: "section", id: tag, title: tag, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, moved: false, overRow: null, after: false };
+                      setNoteDrag(noteDragRef.current);
+                    }}
+                    onPointerMove={updateNoteDrag}
+                    onPointerUp={() => finishNoteDrag(true)}
+                    onPointerCancel={() => finishNoteDrag(false)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                      event.preventDefault();
+                      const back = event.key === "ArrowUp" || event.key === "ArrowLeft";
+                      const neighbour = noteTags[index + (back ? -1 : 1)];
+                      if (neighbour) reorderNoteSection(tag, neighbour, !back);
+                    }}
+                    style={{ flexShrink: 0, width: 18, height: 32, display: "grid", placeItems: "center", background: "none", border: "none", borderRadius: 6, color: "#55556a", cursor: noteDrag ? "grabbing" : "grab", touchAction: "none", padding: 0 }}>
+                    <Icon name="grip" size={13} stroke={2.4} />
+                  </button>
+                  {noteDrag?.moved && noteDrag.kind === "section" && noteDrag.overRow === tag && noteDrag.id !== tag && <span aria-hidden="true" className="section-drop-line" data-after={noteDrag.after ? "1" : "0"} />}
                   <button data-note-drop-section={tag} onClick={() => setNoteTagFilter(tag)} style={{ ...S.noteSectionBtn, flex: 1, minWidth: 0, marginBottom: 0, background: noteDrag?.moved && noteDrag.overSection === tag ? "#7c3aed55" : noteTagFilter === tag ? "#7c3aed2d" : "transparent", color: noteTagFilter === tag ? "#c4b5fd" : "#a0a0b0", borderColor: noteDrag?.moved && noteDrag.overSection === tag ? "#a78bfa" : noteTagFilter === tag ? "#7c3aed55" : "transparent" }}>
-                    <span style={{ color: ["#00d9ff","#00ff87","#ff922b","#f472b6","#a78bfa"][index % 5] }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
+                    <span style={{ color: noteSectionColor(tag) }}>●</span><span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis" }}>{tag}</span><span style={S.noteSectionCount}>{notes.filter((note) => note.tag === tag).length}</span>
                   </button>
                   <button type="button" aria-label={`Delete section: ${tag}`} title={`Delete section: ${tag}`} onClick={() => { setDeleteSectionTarget(tag); setDeleteSectionError(""); }} className="quiet-danger" style={{ ...S.noteToolBtn, padding: 7, flexShrink: 0 }}><TrashIcon /></button>
                   </div>
@@ -5340,7 +5404,7 @@ function DailyGrind() {
 
               {sortedVisibleNotes.map((note, noteIndex) => {
                 const selected = noteDraft?.id === note.id;
-                const dropHere = noteDrag?.moved && noteDrag.overNote === note.id && noteDrag.id !== note.id;
+                const dropHere = noteDrag?.moved && noteDrag.kind === "page" && noteDrag.overNote === note.id && noteDrag.id !== note.id;
                 return (
                   <div key={note.id} style={{ position: "relative" }}>
                   <article className="note-page-button" data-note-card={note.id} role="button" tabIndex="0" aria-label={`Open page: ${note.title || "Untitled page"}`} onClick={() => openNote(note)} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNote(note); } }} style={{ position: "relative", background: selected ? "#292940" : note.pinned ? "#211e34" : "transparent", border: selected ? "1px solid #7c3aed88" : "1px solid transparent", borderRadius: 10, padding: "12px 76px 11px 26px", marginBottom: 5, cursor: "pointer", outline: "none", opacity: noteDrag?.moved && noteDrag.id === note.id ? 0.4 : 1 }}>
@@ -5359,7 +5423,7 @@ function DailyGrind() {
                       if (event.button !== undefined && event.button !== 0) return;
                       event.preventDefault();
                       try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) {}
-                      noteDragRef.current = { id: note.id, title: note.title || "Untitled page", startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, moved: false, overNote: null, after: false, overSection: null };
+                      noteDragRef.current = { kind: "page", id: note.id, title: note.title || "Untitled page", startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, moved: false, overNote: null, after: false, overSection: null };
                       setNoteDrag(noteDragRef.current);
                     }}
                     onPointerMove={updateNoteDrag}

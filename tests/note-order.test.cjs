@@ -20,3 +20,12 @@ test("a dragged order holds even when a page is edited later; new pages go on to
   assert.deepEqual(ids(context.sortNotes(edited, ["b", "a", "c"])), ["c", "new", "b", "a"]);
   assert.deepEqual(ids(context.sortNotes(edited, ["a", "b", "c", "new"])), ["c", "a", "b", "new"]);
 });
+
+const sections = {};
+vm.runInNewContext(html.slice(html.indexOf("function normalizeNoteSections("), html.indexOf("function drawingStrokeHit(")) + html.slice(html.indexOf("function noteSectionNames("), html.indexOf("function addNoteSection(")), sections);
+test("sections follow the dragged order; sections never placed come after it, A-Z", () => {
+  const data = { noteSections: ["Marketing", "BOOKS", "cs2100", "Microecon"], notes: [{ tag: "Cs1800" }] };
+  assert.deepEqual([...sections.noteSectionNames(data)], ["BOOKS", "Cs1800", "cs2100", "Marketing", "Microecon"]);
+  assert.deepEqual([...sections.noteSectionNames({ ...data, noteSectionOrder: ["Microecon", "BOOKS"] })], ["Microecon", "BOOKS", "Cs1800", "cs2100", "Marketing"]);
+  assert.equal(sections.noteSectionColor("BOOKS"), sections.noteSectionColor("BOOKS"));
+});
