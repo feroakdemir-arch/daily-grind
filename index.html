@@ -84,6 +84,15 @@
       .notes-editor { min-height: 440px; }
     }
     @media (prefers-reduced-motion: reduce) { .overlay-pop, .xp-fill { animation: none; } }
+    /* Quote of the day: in the empty side margins on wide screens, one line under the date otherwise. */
+    .side-quote { display: none; position: fixed; top: 50%; transform: translateY(-50%); width: min(300px, calc((100vw - 900px) / 2 - 72px)); margin: 0; z-index: 1; animation: quoteIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) both; }
+    .side-quote-left { left: max(32px, calc((100vw - 900px) / 4 - 150px)); }
+    .side-quote-right { right: max(32px, calc((100vw - 900px) / 4 - 150px)); text-align: right; }
+    .side-quote-right [aria-hidden="true"] { text-align: right; }
+    .inline-quote { display: block; }
+    @media (min-width: 1480px) { .side-quote { display: block; } .inline-quote { display: none; } }
+    @keyframes quoteIn { from { opacity: 0; transform: translateY(calc(-50% + 10px)); } to { opacity: 1; transform: translateY(-50%); } }
+    @media (prefers-reduced-motion: reduce) { .side-quote { animation: none; } }
   </style>
 </head>
 <body>
@@ -2227,6 +2236,56 @@ function Icon({ name, size = 18, stroke = 2.25, fill = "none", style }) {
   </svg>;
 }
 // Habit sections keep whatever icon the user picked; the three built-in glyphs render as line icons.
+// Daily quotes: one pair per day (left and right margins), the same on every device, changing at the
+// day's reset hour. Attributions are to the people who actually said or wrote them.
+const DAILY_QUOTES = [
+  ["You do not rise to the level of your goals. You fall to the level of your systems.", "James Clear"],
+  ["Every action you take is a vote for the type of person you wish to become.", "James Clear"],
+  ["We are what we repeatedly do. Excellence, then, is not an act, but a habit.", "Will Durant"],
+  ["The most beloved deeds to Allah are the most consistent of them, even if they are small.", "Prophet Muhammad \uFDFA (Bukhari)"],
+  ["Verily, with hardship comes ease.", "Quran 94:6"],
+  ["Allah does not burden a soul beyond what it can bear.", "Quran 2:286"],
+  ["Discipline is the bridge between goals and accomplishment.", "Jim Rohn"],
+  ["Motivation is what gets you started. Habit is what keeps you going.", "Jim Ryun"],
+  ["Hard work beats talent when talent doesn't work hard.", "Tim Notke"],
+  ["Amateurs sit and wait for inspiration, the rest of us just get up and go to work.", "Stephen King"],
+  ["Don't count the days, make the days count.", "Muhammad Ali"],
+  ["Suffer now and live the rest of your life as a champion.", "Muhammad Ali"],
+  ["Great things are done by a series of small things brought together.", "Vincent van Gogh"],
+  ["Success is the sum of small efforts, repeated day in and day out.", "Robert Collier"],
+  ["Do what you can, with what you have, where you are.", "Theodore Roosevelt"],
+  ["Well begun is half done.", "Aristotle"],
+  ["Energy and persistence conquer all things.", "Benjamin Franklin"],
+  ["Nothing will work unless you do.", "Maya Angelou"],
+  ["Champions keep playing until they get it right.", "Billie Jean King"],
+  ["Focus on being productive instead of busy.", "Tim Ferriss"],
+  ["Small deeds done are better than great deeds planned.", "Peter Marshall"],
+  ["The best time to plant a tree was 20 years ago. The second best time is now.", "Proverb"],
+  ["It always seems impossible until it's done.", "Nelson Mandela"],
+  ["Well done is better than well said.", "Benjamin Franklin"],
+  ["The harder the conflict, the more glorious the triumph.", "Thomas Paine"],
+  ["Patience is bitter, but its fruit is sweet.", "Jean-Jacques Rousseau"],
+  ["If you want to lift yourself up, lift up someone else.", "Booker T. Washington"],
+  ["What you do today can improve all your tomorrows.", "Ralph Marston"],
+  ["Either you run the day or the day runs you.", "Jim Rohn"],
+  ["The impediment to action advances action. What stands in the way becomes the way.", "Marcus Aurelius"],
+];
+function dailyQuotes(dateKey) {
+  const day = Math.floor(Date.parse(`${dateKey}T12:00:00Z`) / 864e5) || 0;
+  const n = DAILY_QUOTES.length;
+  const first = ((day % n) + n) % n;
+  return [DAILY_QUOTES[first], DAILY_QUOTES[(first + Math.floor(n / 2)) % n]];
+}
+function QuoteOfTheDay({ quote, label, side }) {
+  return (
+    <figure className={`side-quote side-quote-${side}`} aria-label={label}>
+      <div className="eyebrow" style={{ fontSize: 10, letterSpacing: 2, color: "#7c7c94", marginBottom: 12 }}>{label}</div>
+      <span aria-hidden="true" className="display" style={{ display: "block", fontSize: 54, lineHeight: 0.6, height: 26, color: "#7c3aed", opacity: 0.85 }}>{"\u201C"}</span>
+      <blockquote className="display" style={{ margin: 0, fontSize: 19, lineHeight: 1.42, fontWeight: 700, color: "#e4e4ee", letterSpacing: 0.1, textWrap: "balance" }}>{quote[0]}</blockquote>
+      <figcaption style={{ marginTop: 14, fontSize: 11, fontWeight: 800, letterSpacing: 1.4, color: "#a78bfa", textTransform: "uppercase" }}>{"\u2014"} {quote[1]}</figcaption>
+    </figure>
+  );
+}
 function SectionIcon({ icon }) {
   const name = { "\u2600": "sun", "\u26A1": "zap", "\u263E": "moon", "\u2726": "sparkles" }[icon];
   return name ? <Icon name={name} size={16} style={{ color: "#a78bfa" }} /> : <span style={{ fontSize: 14 }}>{icon}</span>;
@@ -3569,6 +3628,7 @@ function DailyGrind() {
   }, [resetHour]);
   const today = getToday(resetHour);
   const weekDates = getWeekDates(today);
+  const todaysQuotes = dailyQuotes(today);
   // How full the one cloud document is (it has a hard cap). Measured shortly after changes settle.
   const [accountBytes, setAccountBytes] = useState(0);
   useEffect(() => {
@@ -5031,6 +5091,10 @@ function DailyGrind() {
   // MAIN
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
+      {page !== "calendar" && page !== "notes" && view === "main" && <>
+        <QuoteOfTheDay quote={todaysQuotes[0]} label="QUOTE OF THE DAY" side="left" />
+        <QuoteOfTheDay quote={todaysQuotes[1]} label="KEEP GOING" side="right" />
+      </>}
       <div className={page === "notes" ? "notes-screen" : undefined} style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : page === "notes" ? { ...S.box, maxWidth: "none", margin: 0, padding: "14px 0 calc(54px + env(safe-area-inset-bottom, 0px))", display: "flex", flexDirection: "column", overflow: "hidden", boxSizing: "border-box" } : S.box}>
         {page !== "calendar" && winAnim && <div className="overlay-pop" style={S.win}><div style={{ marginBottom: 14, color: "#00ff87", filter: "drop-shadow(0 0 18px #00ff87aa)" }}><Icon name="zap" size={64} stroke={2} /></div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
         {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ marginBottom: 14, color: "#ffd43b", filter: "drop-shadow(0 0 18px #ffd43baa)" }}><Icon name="trophy" size={64} stroke={2} /></div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
@@ -5039,6 +5103,9 @@ function DailyGrind() {
           <div>
             <h1 style={{ ...S.title, display: "flex", alignItems: "center", gap: 9, letterSpacing: 1.5, color: "#f0f0f4" }}><img src="icon.svg?v=classic-g" alt="" width="32" height="32" style={{ flexShrink: 0, borderRadius: 7 }} />ORGANIZED ME</h1>
             <div style={S.date}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
+            {page === "habits" && <div className="inline-quote" style={{ fontSize: 11, color: "#9a9ab0", fontStyle: "italic", lineHeight: 1.45, marginTop: 4, maxWidth: 520 }}>
+              {"\u201C"}{todaysQuotes[0][0]}{"\u201D"} <span style={{ fontStyle: "normal", color: "#a78bfa", fontWeight: 700 }}>{"\u2014"} {todaysQuotes[0][1]}</span>
+            </div>}
             <SaveIndicator info={saveInfo} onRetry={retrySaves} />
             {accountFull >= 0.7 && <button onClick={() => setView("settings")} style={{ display: "block", background: "none", border: "none", padding: 0, marginTop: 4, cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: accountFull >= 0.9 ? "#ff6b78" : "#ffd43b" }}>
               {`● ACCOUNT ${Math.round(accountFull * 100)}% FULL · SEE SETTINGS`}
