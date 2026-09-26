@@ -108,6 +108,9 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
     setInterval: () => 0, clearInterval() {},
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
+    document: { addEventListener() {}, visibilityState: "visible" },
+    location: { pathname: "/" },
+    fetch: () => Promise.reject(new Error("no network in tests")),
   };
   Object.defineProperty(sandbox.navigator, "onLine", { get: () => dev.online });
   sandbox.window = sandbox;
@@ -280,4 +283,26 @@ test("reordering on one device and adding on the other keeps both", async () => 
   ]);
   await settle();
   assert.deepEqual(habitNames(cloud()), ["Run", "Read", "Journal"]);
+});
+
+test("an event deleted on one device stays deleted even if the other device's copy lists its fields in another order", () => {
+  const ctx = {};
+  vm.runInNewContext(source.slice(source.indexOf("    function _hasOwn("), source.indexOf("    // Returns the merged document text")), ctx);
+  const base = [{ id: "e1", title: "Gym", start: "09:00" }, { id: "e2", title: "Class", start: "10:00" }];
+  const local = [{ start: "09:00", title: "Gym", id: "e1" }, { title: "Class", id: "e2", start: "10:00" }, { id: "e3", title: "New", start: "12:00" }];
+  const remote = [{ id: "e2", title: "Class", start: "10:00" }]; // e1 deleted on the other device
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx._merge3(base, local, remote, ""))).map((e) => e.id), ["e2", "e3"]);
+});
+
+test("taking another device's calendar keeps that version's timestamp", async () => {
+  const server = makeServer();
+  const event = (id, title) => ({ id, title, date: "2026-09-25", start: "09:00", end: "10:00" });
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify([event("e1", "Class")]), localTs: 1000 });
+  const a = device(server), b = device(server);
+  for (const dev of [a, b]) { await dev.storageApi.get(CAL); dev.storageApi.subscribe(CAL, () => {}); }
+  await settle();
+  await a.storageApi.set(CAL, JSON.stringify([]));
+  await settle();
+  assert.equal(b.storage.get(CAL), "[]");
+  assert.equal(b.storage.get(CAL + "_ts"), String(server.docs.get(`users/u1/data/${CAL}`).localTs));
 });

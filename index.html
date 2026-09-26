@@ -287,7 +287,14 @@
       window._lastLocalTs[key] = ts;
     }
     function _hasOwn(object, key) { return Object.prototype.hasOwnProperty.call(object, key); }
-    function _sameJson(a, b) { return a === b || JSON.stringify(a) === JSON.stringify(b); }
+    // Same value regardless of the order an object's fields were written in (a reordered copy of an
+    // event is not an "edit" that should outvote a delete made on another device).
+    function _canonical(value) {
+      if (Array.isArray(value)) return value.map(_canonical);
+      if (value && typeof value === "object") return Object.keys(value).sort().reduce((out, key) => { out[key] = _canonical(value[key]); return out; }, {});
+      return value;
+    }
+    function _sameJson(a, b) { return a === b || JSON.stringify(_canonical(a)) === JSON.stringify(_canonical(b)); }
     function _isPlainObject(value) { return !!value && typeof value === "object" && !Array.isArray(value); }
     function _isIdList(value) { return Array.isArray(value) && value.every((item) => _isPlainObject(item) && typeof item.id === "string" && item.id); }
     function _isStringList(value) { return Array.isArray(value) && value.every((item) => typeof item === "string"); }
@@ -420,7 +427,7 @@
       let local = null;
       try { local = localStorage.getItem(key); } catch (e) {}
       if (local !== sent) return;
-      const ts = _nextLocalTs(key);
+      const ts = Math.max(Number(doc.localTs) || 0, parseInt(localStorage.getItem(key + "_ts") || "0") || 0);
       _storeLocal(key, doc.value, ts);
       _setBase(key, doc.value, version);
       _announceStorageWrite(key, doc.value, ts);
@@ -923,7 +930,7 @@
       _setBase(key, d.value, version);
       window._lastLocalTs = window._lastLocalTs || {};
       if (next === d.value) {
-        const ts = Math.max(_nextLocalTs(key), Number(d.localTs) || 0);
+        const ts = Math.max(Number(d.localTs) || 0, parseInt(localStorage.getItem(key + "_ts") || "0") || 0);
         _storeLocal(key, next, ts);
         localStorage.setItem("dg-owner", _identity());
         _announceStorageWrite(key, next, ts);
@@ -933,6 +940,39 @@
       }
       try { callback(next); } catch (error) { console.warn(error); }
     }
+
+    // A copy of the app left open for days (a home-screen app, an old tab) keeps running the code it
+    // loaded with. When the app comes back to the screen (and every 30 minutes), ask the site whether a
+    // newer version is live; the app switches to it as soon as nothing is being edited.
+    (function watchForNewVersion() {
+      let known = null, checking = false;
+      const tagOf = async () => {
+        const response = await fetch(location.pathname, { method: "HEAD", cache: "no-store" });
+        return response.ok ? (response.headers.get("etag") || response.headers.get("last-modified")) : null;
+      };
+      const check = async (resumed) => {
+        if (checking) return;
+        checking = true;
+        try {
+          const tag = await tagOf();
+          if (!tag) return;
+          if (known === null) { known = tag; return; }
+          if (tag === known) return;
+          // Confirm once, so a single odd response can't trigger a reload.
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          if ((await tagOf()) === tag) {
+            known = tag;
+            window.__dgUpdateReady = true;
+            window.dispatchEvent(new CustomEvent("dg-update-ready", { detail: { resumed: !!resumed } }));
+          }
+        } catch (error) {
+          // Offline: try again next time.
+        } finally { checking = false; }
+      };
+      check(false);
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") check(true); });
+      setInterval(() => check(false), 30 * 60 * 1000);
+    })();
 
     // Storage that syncs localStorage + Firestore.
     // Policy: when cloud is enabled, CLOUD is the source of truth on page load.
@@ -3644,6 +3684,22 @@ function DailyGrind() {
   const today = getToday(resetHour);
   const weekDates = getWeekDates(today);
   const todaysQuotes = dailyQuotes(today);
+  // A newer version of the app is live: reload into it when nothing is open or unsaved; otherwise a
+  // pill offers it (after saving what's open).
+  const [updateReady, setUpdateReady] = useState(() => !!window.__dgUpdateReady);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  useEffect(() => {
+    const onReady = (event) => {
+      setUpdateReady(true);
+      // Just brought back to the screen, nothing open, nothing typed, nothing unsynced: switch now.
+      const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+      if (event.detail && event.detail.resumed && !typing && !noteDraftRef.current && viewRef.current === "main"
+        && !(window.storage.hasUnsyncedChanges && window.storage.hasUnsyncedChanges())) location.reload();
+    };
+    window.addEventListener("dg-update-ready", onReady);
+    return () => window.removeEventListener("dg-update-ready", onReady);
+  }, []);
   // How full the one cloud document is (it has a hard cap). Measured shortly after changes settle.
   const [accountBytes, setAccountBytes] = useState(0);
   useEffect(() => {
@@ -5133,6 +5189,13 @@ function DailyGrind() {
   // MAIN
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
+      {updateReady && <button onClick={async () => {
+        try { await flushCurrentNote(); } catch (error) { console.warn(error); }
+        await window.storage.flush(8000);
+        location.reload();
+      }} style={{ position: "fixed", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 320, padding: "8px 14px", borderRadius: 999, border: "1px solid #a78bfa", background: "#2a2a44", color: "#e9e3ff", fontSize: 11, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 8px 24px #000a" }}>
+        {"\u25CF"} NEW VERSION READY {"\u00B7"} TAP TO UPDATE
+      </button>}
       {page !== "calendar" && page !== "notes" && view === "main" && <>
         <QuoteOfTheDay quote={todaysQuotes[0]} label="QUOTE OF THE DAY" side="left" />
         <QuoteOfTheDay quote={todaysQuotes[1]} label="KEEP GOING" side="right" />

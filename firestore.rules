@@ -8,11 +8,25 @@ service cloud.firestore {
         && request.auth.token.firebase.sign_in_provider != 'anonymous';
     }
 
-    match /users/{uid}/{document=**} {
+    // The account and the calendar are merged between devices: every save says which version it was
+    // built on (rev) and who wrote it (writer). Saves without them come from an out-of-date copy of the
+    // app (a tab or home-screen app left open since before Sep 24) that would overwrite the other
+    // devices' edits and deletes; they are refused, and that copy shows "sync failed" until reloaded.
+    function mergedSave() {
+      return request.resource.data.writer is string && request.resource.data.rev is number;
+    }
+
+    // The app never deletes a cloud document (deleting a habit, task or note rewrites the account
+    // document). Blocking deletes means a buggy client or a hijacked session can't wipe the recovery
+    // copies (dg-vault-*), task records or screenshots. Remove them from the Firebase console if needed.
+    match /users/{uid}/data/{docId} {
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && (!(docId in ['daily-grind-v13', 'dg-cal-events']) || mergedSave());
+      allow delete: if false;
+    }
+    match /users/{uid}/noteImages/{imageId} {
       allow read, create, update: if isOwner(uid);
-      // The app never deletes a cloud document (deleting a habit, task or note rewrites the account
-      // document). Blocking deletes means a buggy client or a hijacked session can't wipe the recovery
-      // copies (dg-vault-*), task records or screenshots. Remove them from the Firebase console if needed.
       allow delete: if false;
     }
 
