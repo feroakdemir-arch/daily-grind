@@ -89,6 +89,8 @@
     .side-quote-left { left: max(32px, calc((100vw - 900px) / 4 - 150px)); }
     .side-quote-right { right: max(32px, calc((100vw - 900px) / 4 - 150px)); text-align: right; }
     .side-quote-right [aria-hidden="true"] { text-align: right; }
+    .cal-day-head:hover { background: #ffffff0f !important; }
+    .cal-day-head:focus-visible { outline: 2px solid #a78bfa; outline-offset: 1px; }
     .section-drop-line { position: absolute; left: 4px; right: 4px; height: 3px; border-radius: 2px; background: #a78bfa; box-shadow: 0 0 8px #a78bfa; pointer-events: none; top: -3px; }
     .section-drop-line[data-after="1"] { top: auto; bottom: -3px; }
     @media (max-width: 760px) {
@@ -3590,6 +3592,8 @@ function DailyGrind() {
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
   const [pomoTask, setPomoTask] = useState("");
   const [showScoreDetail, setShowScoreDetail] = useState(false);
+  // One-day view: the date (YYYY-MM-DD) shown on its own, or null for the week.
+  const [calDayView, setCalDayView] = useState(null);
   const [calWeekOffset, setCalWeekOffset] = useState(() => reminderWeekOffset(new URLSearchParams(location.search).get("date")));
   const [showCalSettings, setShowCalSettings] = useState(false);
   const [calEvents, setCalEvents] = useState([]);
@@ -5731,7 +5735,19 @@ function DailyGrind() {
           if (!calEventsLoaded) return (
             <div role="status" style={{ maxWidth: 440, margin: "80px auto", textAlign: "center", color: "#8b8b9e", fontSize: 12, fontWeight: 700, letterSpacing: 1.2 }}>LOADING YOUR CALENDAR…</div>
           );
-          const calDates = getCalWeekDates(calWeekOffset);
+          const calDates = calDayView ? [new Date(calDayView + "T12:00:00")] : getCalWeekDates(calWeekOffset);
+          const calCols = calDates.length;
+          // Weeks between the week holding `ds` and this week (keeps the week view in step with the day view).
+          const weekOffsetFor = (ds) => {
+            const monday = (date) => { const d = new Date(date); d.setHours(12, 0, 0, 0); const wd = d.getDay(); d.setDate(d.getDate() - (wd === 0 ? 6 : wd - 1)); return d; };
+            return Math.round((monday(new Date(ds + "T12:00:00")) - monday(new Date())) / (7 * 864e5));
+          };
+          const showCalDay = (ds) => { setCalDayView(ds); setCalWeekOffset(weekOffsetFor(ds)); };
+          const stepCal = (dir) => {
+            if (!calDayView) { setCalWeekOffset(calWeekOffset + dir); return; }
+            const next = new Date(calDayView + "T12:00:00"); next.setDate(next.getDate() + dir);
+            showCalDay(localDateStr(next));
+          };
           const configuredStartHour = data.calStartHour ?? 6;
           const configuredEndHour = data.calEndHour ?? 23;
           const calEndHour = Math.min(47, Math.max(
@@ -5751,7 +5767,7 @@ function DailyGrind() {
           const HOUR_H = calHourH; // pixels per hour (calendar zoom)
           const eventFont = Math.max(10, Math.min(14, HOUR_H / 6.5));
           const todayStr = getToday(resetHour);
-          const dayNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+          const dayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
           const weekDeadlines = calDates.map(d => taskDeadlinesForDate(data.taskLists, localDateStr(d)));
 
           function timeToMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
@@ -5778,8 +5794,10 @@ function DailyGrind() {
           }
 
           const weekStart = calDates[0];
-          const weekEnd = calDates[6];
-          const monthLabel = weekStart.getMonth() === weekEnd.getMonth()
+          const weekEnd = calDates[calCols - 1];
+          const monthLabel = calDayView
+            ? weekStart.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })
+            : weekStart.getMonth() === weekEnd.getMonth()
             ? weekStart.toLocaleString("default", { month: "long", year: "numeric" })
             : weekStart.toLocaleString("default", { month: "short" }) + " - " + weekEnd.toLocaleString("default", { month: "short", year: "numeric" });
 
@@ -5787,14 +5805,15 @@ function DailyGrind() {
             <div style={{ display: "flex", flexDirection: "column", height: "calc(100dvh - 68px)", minHeight: 360 }}>
               {/* Header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexShrink: 0 }}>
-                <button onClick={() => setCalWeekOffset(calWeekOffset - 1)} aria-label="Previous week" className="icon-btn" style={{ background: "none", border: "none", color: "#a0a0b4", cursor: "pointer", padding: 0 }}><Icon name="left" size={20} /></button>
+                <button onClick={() => stepCal(-1)} aria-label={calDayView ? "Previous day" : "Previous week"} className="icon-btn" style={{ background: "none", border: "none", color: "#a0a0b4", cursor: "pointer", padding: 0 }}><Icon name="left" size={20} /></button>
                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
                    <div className="display" style={{ fontSize: 15, color: "#f4f4f8", whiteSpace: "nowrap" }}>{monthLabel}</div>
-                   <button onClick={() => setCalWeekOffset(0)} style={{ background: "#7c3aed22", border: "1px solid #7c3aed55", borderRadius: 999, color: "#c4b5fd", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit" }}>Today</button>
+                   {calDayView && <button type="button" onClick={() => setCalDayView(null)} aria-label="Back to week view" style={{ background: "#ffffff0d", border: "1px solid #3b3b4e", borderRadius: 999, color: "#d0d0dc", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 3 }}><Icon name="left" size={12} stroke={2.6} />Week</button>}
+                   <button onClick={() => { if (calDayView) showCalDay(todayStr); else setCalWeekOffset(0); }} style={{ background: "#7c3aed22", border: "1px solid #7c3aed55", borderRadius: 999, color: "#c4b5fd", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit" }}>Today</button>
                    <SaveIndicator info={saveInfo} onRetry={retrySaves} />
                  </div>
                 <div style={{ display: "flex", alignItems: "center" }}>
-                  <button onClick={() => setCalWeekOffset(calWeekOffset + 1)} aria-label="Next week" className="icon-btn" style={{ background: "none", border: "none", color: "#a0a0b4", cursor: "pointer", padding: 0 }}><Icon name="right" size={20} /></button>
+                  <button onClick={() => stepCal(1)} aria-label={calDayView ? "Next day" : "Next week"} className="icon-btn" style={{ background: "none", border: "none", color: "#a0a0b4", cursor: "pointer", padding: 0 }}><Icon name="right" size={20} /></button>
                   <div role="group" aria-label="Calendar zoom" style={{ display: "flex", alignItems: "center", gap: 2, marginRight: 4, border: "1px solid #2d2d3a", borderRadius: 8, padding: 2 }}>
                     <button type="button" onClick={() => zoomCalendar(0.8)} disabled={calHourH <= 40} aria-label="Zoom out" title="Zoom out (Ctrl + scroll on the grid)" style={{ background: "none", border: "none", color: calHourH <= 40 ? "#44445a" : "#b5b5c9", fontSize: 18, lineHeight: 1, cursor: "pointer", width: 28, height: 26, borderRadius: 6 }}>{"\u2212"}</button>
                     <button type="button" onClick={() => zoomCalendar(1.25)} disabled={calHourH >= 160} aria-label="Zoom in" title="Zoom in (Ctrl + scroll on the grid)" style={{ background: "none", border: "none", color: calHourH >= 160 ? "#44445a" : "#b5b5c9", fontSize: 18, lineHeight: 1, cursor: "pointer", width: 28, height: 26, borderRadius: 6 }}>+</button>
@@ -5804,22 +5823,25 @@ function DailyGrind() {
               </div>
 
               {/* Day headers */}
-              <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 2, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
+              <div style={{ display: "grid", gridTemplateColumns: `40px repeat(${calCols}, minmax(0, 1fr))`, gap: 0, marginBottom: 2, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
                 <div />
                 {calDates.map((d, i) => {
                   const ds = localDateStr(d);
                   const isToday = ds === todayStr;
+                  const longName = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
                   return (
-                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "3px 0" }}>
-                      <span style={{ fontSize: 12, color: isToday ? "#c4b5fd" : "#77778a", fontWeight: 700 }}>{dayNames[i]}</span>
+                    <button key={ds} type="button" className="cal-day-head" onClick={() => { if (calDayView) setCalDayView(null); else showCalDay(ds); }}
+                      aria-label={calDayView ? `Back to the week of ${longName}` : `Show ${longName} only`} title={calDayView ? "Back to the week" : "Show this day only"}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "3px 0", background: "none", border: "none", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", minWidth: 0 }}>
+                      <span style={{ fontSize: 12, color: isToday ? "#c4b5fd" : "#77778a", fontWeight: 700 }}>{dayNames[d.getDay()]}</span>
                       <span className="num" style={{ fontSize: 14, fontWeight: 700, color: isToday ? "#fff" : "#b5b5c9", background: isToday ? "#7c3aed" : "transparent", borderRadius: 999, minWidth: 26, height: 24, padding: "0 5px", display: "flex", alignItems: "center", justifyContent: "center" }}>{d.getDate()}</span>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
 
               {weekDeadlines.some(items => items.length > 0) && (
-                <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", gap: 0, marginBottom: 4, borderBottom: "1px solid #ef444426", paddingBottom: 4, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
+                <div role="region" aria-label="Task deadlines" style={{ display: "grid", gridTemplateColumns: `40px repeat(${calCols}, minmax(0, 1fr))`, gap: 0, marginBottom: 4, borderBottom: "1px solid #ef444426", paddingBottom: 4, flexShrink: 0, overflowY: "hidden", scrollbarGutter: "stable" }}>
                   <div style={{ fontSize: 10, color: "#fca5a5", fontWeight: 800, paddingTop: 5, letterSpacing: 0.6 }}>DUE</div>
                   {weekDeadlines.map((deadlines, di) => (
                     <div key={localDateStr(calDates[di])} data-deadline-date={localDateStr(calDates[di])} style={{ minWidth: 0, maxHeight: calDueExpanded ? 160 : undefined, overflowY: calDueExpanded ? "auto" : "visible", padding: "0 2px", display: "flex", flexDirection: "column", gap: 3 }}>
@@ -5841,7 +5863,7 @@ function DailyGrind() {
 
               {/* Time grid */}
               <div ref={setCalScroller} style={{ overflowX: "hidden", overflowY: "auto", scrollbarGutter: "stable", flex: "1 1 auto", minHeight: 200, background: "#1a1a2e", border: "none", borderRadius: 0 }}>
-                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, minmax(0, 1fr))", position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
+                <div ref={calGridRef} style={{ display: "grid", gridTemplateColumns: `40px repeat(${calCols}, minmax(0, 1fr))`, position: "relative", minHeight: hours.length * HOUR_H, userSelect: "none", WebkitUserSelect: "none" }}
                   onMouseMove={(e) => {
                     if (!calGridRef.current) return;
                     const rect = calGridRef.current.getBoundingClientRect();
@@ -5849,8 +5871,8 @@ function DailyGrind() {
                     const x = e.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + startMinBase;
                     const snapped = Math.round(totalMin / 15) * 15;
-                    const colW = (rect.width - 40) / 7;
-                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    const colW = (rect.width - 40) / calCols;
+                    const dayIdx = Math.max(0, Math.min(calCols - 1, Math.floor((x - 40) / colW)));
                     // Drag-to-create on empty space
                     if (calCreating) {
                       setCalCreating({ ...calCreating, endMin: Math.max(calCreating.startMin + 15, snapped) });
@@ -5927,8 +5949,8 @@ function DailyGrind() {
                     const x = touch.clientX - rect.left;
                     const totalMin = Math.round((y / HOUR_H) * 60) + startMinBase;
                     const snapped = Math.round(totalMin / 15) * 15;
-                    const colW = (rect.width - 40) / 7;
-                    const dayIdx = Math.max(0, Math.min(6, Math.floor((x - 40) / colW)));
+                    const colW = (rect.width - 40) / calCols;
+                    const dayIdx = Math.max(0, Math.min(calCols - 1, Math.floor((x - 40) / colW)));
                     if (calCreating) {
                       setCalCreating({ ...calCreating, endMin: Math.max(calCreating.startMin + 15, snapped) });
                       return;
@@ -5994,7 +6016,7 @@ function DailyGrind() {
                     const fmtT = m => calendarTimeLabel(calendarStoredTime(m));
                     return (
                       <div style={{
-                        position: "absolute", left: `calc(40px + ${calCreating.di} * ((100% - 40px) / 7) + 1px)`, width: `calc((100% - 40px) / 7 - 3px)`,
+                        position: "absolute", left: `calc(40px + ${calCreating.di} * ((100% - 40px) / ${calCols}) + 1px)`, width: `calc((100% - 40px) / ${calCols} - 3px)`,
                         top: topPx, height: heightPx, background: "#7c3aed88", border: "2px solid #7c3aed", borderRadius: 4, padding: "2px 6px",
                         fontSize: 10, color: "#fff", fontWeight: 700, zIndex: 25, pointerEvents: "none",
                       }}>
@@ -6049,10 +6071,10 @@ function DailyGrind() {
                         if (idx >= 0) displayDi = idx;
                       }
                       const { col, cols } = overlap.get(evt.id) || { col: 0, cols: 1 };
-                      const slotW = `(((100% - 40px) / 7 - 3px) / ${cols})`;
+                      const slotW = `(((100% - 40px) / ${calCols} - 3px) / ${cols})`;
                       return (
                         <div key={evt.id} data-calendar-event={evt.id} style={{
-                          position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
+                          position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / ${calCols}) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
                           top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: tiny ? "0 4px" : cols > 1 ? "2px 3px" : "2px 4px", overflow: "hidden",
                           fontSize: cols > 2 ? eventFont - 1 : eventFont, color: calTextColor(evt.color || "#4fc3f7"), fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
@@ -6119,7 +6141,7 @@ function DailyGrind() {
                     const nowDay = position.dayIndex;
                     const topPx = position.offset / 60 * HOUR_H;
                     return (
-                      <div data-calendar-now aria-label="Current time" style={{ position: "absolute", left: `calc(40px + ${nowDay} * ((100% - 40px) / 7))`, width: `calc((100% - 40px) / 7)`, top: topPx, height: 2, background: "#e84118", zIndex: 20, pointerEvents: "none" }}>
+                      <div data-calendar-now aria-label="Current time" style={{ position: "absolute", left: `calc(40px + ${nowDay} * ((100% - 40px) / ${calCols}))`, width: `calc((100% - 40px) / ${calCols})`, top: topPx, height: 2, background: "#e84118", zIndex: 20, pointerEvents: "none" }}>
                         <div style={{ position: "absolute", left: -4, top: -4, width: 10, height: 10, borderRadius: "50%", background: "#e84118" }} />
                       </div>
                     );
