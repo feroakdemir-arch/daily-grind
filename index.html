@@ -2012,12 +2012,16 @@ function fmtDoneDate(d) {
 }
 
 // Calendar event colors: one clearly different hue per swatch, ordered around the color wheel.
-const CAL_COLORS = [
-  { name: "Red", hex: "#e53935" }, { name: "Coral", hex: "#ff7a6b" }, { name: "Orange", hex: "#fb8c00" },
-  { name: "Yellow", hex: "#fdd835" }, { name: "Green", hex: "#2e9d58" }, { name: "Teal", hex: "#00a39a" },
-  { name: "Blue", hex: "#1e88e5" }, { name: "Indigo", hex: "#5c6bc0" }, { name: "Purple", hex: "#7c3aed" },
-  { name: "Pink", hex: "#e84393" }, { name: "Brown", hex: "#8d6e63" }, { name: "Graphite", hex: "#636e72" },
+// 40 colours: eight families, light to deep (one column each), plus a row of neutrals. Every colour the
+// earlier 12-colour palette offered is still here, so existing events keep a selectable colour.
+const CAL_COLOR_ROWS = [
+  [["Coral", "#ff7a6b"], ["Apricot", "#ffb74d"], ["Lemon", "#fff176"], ["Mint", "#a5d6a7"], ["Aqua", "#80deea"], ["Sky", "#90caf9"], ["Lavender", "#b39ddb"], ["Blush", "#f8bbd0"]],
+  [["Tomato", "#ff5252"], ["Orange", "#fb8c00"], ["Yellow", "#fdd835"], ["Lime", "#4cd137"], ["Cyan", "#00bcd4"], ["Light blue", "#4fc3f7"], ["Indigo", "#5c6bc0"], ["Rose", "#f06292"]],
+  [["Red", "#e53935"], ["Tangerine", "#f4511e"], ["Amber", "#ffb300"], ["Green", "#2e9d58"], ["Teal", "#00a39a"], ["Blue", "#1e88e5"], ["Purple", "#7c3aed"], ["Pink", "#e84393"]],
+  [["Crimson", "#b71c1c"], ["Rust", "#bf360c"], ["Mustard", "#c79100"], ["Forest", "#1b5e20"], ["Deep teal", "#00695c"], ["Navy", "#0d47a1"], ["Violet", "#4527a0"], ["Magenta", "#ad1457"]],
+  [["Silver", "#e0e0e0"], ["Cloud", "#b0bec5"], ["Steel", "#90a4ae"], ["Graphite", "#636e72"], ["Sand", "#d7ccc8"], ["Latte", "#a1887f"], ["Brown", "#8d6e63"], ["Cocoa", "#5d4037"]],
 ];
+const CAL_COLORS = CAL_COLOR_ROWS.flat().map(([name, hex]) => ({ name, hex }));
 const CAL_DEFAULT_COLOR = "#1e88e5";
 // Dark text on light backgrounds (yellow, coral), white everywhere else.
 function calTextColor(hex) {
@@ -2028,17 +2032,27 @@ function calTextColor(hex) {
 }
 function CalColorPicker({ value, onChange }) {
   const current = (value || "").toLowerCase();
-  // An event saved with a retired color keeps it visible and selected until another is picked.
-  const options = CAL_COLORS.some(c => c.hex === current) || !current ? CAL_COLORS : [...CAL_COLORS, { name: "Current color", hex: current }];
-  return <div role="radiogroup" aria-label="Event color" style={{ display: "grid", gridTemplateColumns: "repeat(6, 30px)", gap: 10, marginBottom: 16 }}>
-    {options.map(c => {
-      const selected = current === c.hex;
-      return <button key={c.hex} type="button" role="radio" aria-checked={selected} aria-label={c.name} title={c.name} onClick={() => onChange(c.hex)}
-        style={{ width: 30, height: 30, borderRadius: 15, background: c.hex, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
-          border: "2px solid transparent", boxShadow: selected ? "0 0 0 2px #1a1a2e, 0 0 0 4px #fff" : "none", color: calTextColor(c.hex), fontSize: 13, fontWeight: 900, fontFamily: "inherit" }}>
-        {selected ? "\u2713" : ""}
-      </button>;
-    })}
+  const inPalette = CAL_COLORS.some(c => c.hex === current);
+  // Any colour at all: the system colour picker. A colour chosen there (or saved before) shows here, selected.
+  const custom = current && !inPalette ? current : "";
+  return <div style={{ marginBottom: 16 }}>
+    <div role="radiogroup" aria-label="Event color" style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(0, 30px))", justifyContent: "space-between", gap: "9px 6px" }}>
+      {CAL_COLORS.map(c => {
+        const selected = current === c.hex;
+        return <button key={c.hex} type="button" role="radio" aria-checked={selected} aria-label={c.name} title={c.name} onClick={() => onChange(c.hex)}
+          style={{ width: "100%", aspectRatio: "1", borderRadius: "50%", background: c.hex, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            border: "none", boxShadow: selected ? "0 0 0 2px #1a1a2e, 0 0 0 4px #fff" : "inset 0 0 0 1px #ffffff14", color: calTextColor(c.hex), fontSize: 13, fontWeight: 900, fontFamily: "inherit" }}>
+          {selected ? "\u2713" : ""}
+        </button>;
+      })}
+    </div>
+    <label title="Pick any colour" style={{ position: "relative", marginTop: 12, display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, border: `1px solid ${custom ? "#fff" : "#353548"}`, background: "#141424", cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#c0c0cc" }}>
+      <span aria-hidden="true" style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900,
+        background: custom || "conic-gradient(#e53935, #fdd835, #2e9d58, #00bcd4, #1e88e5, #7c3aed, #e84393, #e53935)", color: custom ? calTextColor(custom) : "transparent" }}>{custom ? "\u2713" : ""}</span>
+      <span style={{ flex: 1 }}>{custom ? `Custom colour ${custom.toUpperCase()}` : "Custom colour\u2026"}</span>
+      <input type="color" aria-label="Custom event colour" value={custom || current || CAL_DEFAULT_COLOR} onChange={(event) => onChange(event.target.value.toLowerCase())}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: "none", padding: 0 }} />
+    </label>
   </div>;
 }
 
