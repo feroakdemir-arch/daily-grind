@@ -14,7 +14,10 @@ const MAIN = "daily-grind-v13", CAL = "dg-cal-events";
 const settle = async (rounds = 30) => { for (let i = 0; i < rounds; i++) await new Promise((resolve) => setTimeout(resolve, 1)); };
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
-function makeServer() { return { docs: new Map(), listeners: new Set() }; }
+function makeServer() { return { docs: new Map(), listeners: new Set(), writes: [] }; }
+// Firestore hands a document's map fields back in alphabetical order, whatever order they were written in.
+const sortKeys = (value) => Array.isArray(value) ? value.map(sortKeys)
+  : value && typeof value === "object" ? Object.keys(value).sort().reduce((out, key) => { out[key] = sortKeys(value[key]); return out; }, {}) : value;
 
 function stamp(data) {
   const out = {};
@@ -26,14 +29,14 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
   const dev = { online: true, held: [], storage };
   const snap = (path) => {
     const data = server.docs.get(path);
-    return { id: path.split("/").pop(), exists: data !== undefined, data: () => clone(data), metadata: { hasPendingWrites: false, fromCache: false } };
+    return { id: path.split("/").pop(), exists: data !== undefined, data: () => sortKeys(clone(data)), metadata: { hasPendingWrites: false, fromCache: false } };
   };
   const notify = (path) => {
     server.listeners.forEach((listener) => {
       if (listener.path === path && listener.dev.online && !listener.closed) setTimeout(() => !listener.closed && listener.cb(snap(path)), 2);
     });
   };
-  const apply = (path, data) => { server.docs.set(path, stamp(data)); notify(path); };
+  const apply = (path, data) => { server.writes.push(path); server.docs.set(path, stamp(data)); notify(path); };
   function docRef(path) {
     return {
       path,
@@ -305,4 +308,22 @@ test("taking another device's calendar keeps that version's timestamp", async ()
   await settle();
   assert.equal(b.storage.get(CAL), "[]");
   assert.equal(b.storage.get(CAL + "_ts"), String(server.docs.get(`users/u1/data/${CAL}`).localTs));
+});
+
+test("opening the app again rewrites no task records (the quota burner)", async () => {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  const first = device(server);
+  const data = JSON.parse((await first.storageApi.get(MAIN)).value);
+  await first.window.taskLedger.seed(data, await first.window.taskLedger.list());
+  await settle();
+  const recordWrites = () => server.writes.filter((path) => path.includes("/dg-task-item-")).length;
+  assert.equal(recordWrites(), 1); // the one task gets its record once
+  for (let open = 0; open < 3; open++) {
+    const again = device(server);
+    const loaded = JSON.parse((await again.storageApi.get(MAIN)).value);
+    await again.window.taskLedger.seed(loaded, await again.window.taskLedger.list());
+    await settle();
+  }
+  assert.equal(recordWrites(), 1);
 });

@@ -794,7 +794,7 @@
             resetsDaily: list.resetsDaily === true,
             task: JSON.parse(JSON.stringify(task)),
           };
-          entry.signature = JSON.stringify(entry);
+          entry.signature = JSON.stringify(_canonical(entry));
           entries.set(task.id, entry);
         });
       });
@@ -851,13 +851,47 @@
       if (!_locallyDeletedTasks.size) return entries;
       return entries.map((entry) => entry && !entry.deleted && _locallyDeletedTasks.has(entry.taskId) ? { taskId: entry.taskId, deleted: true } : entry);
     }
+    // One shared live connection to the task records: the app's first load and its live updates both
+    // use it, so opening the app reads every record once instead of twice.
+    let _ledgerFeed = null;
+    function _ledgerConnection() {
+      if (_ledgerFeed && !_ledgerFeed.failed) return _ledgerFeed;
+      const feed = { entries: null, fromServer: false, failed: null, callbacks: new Set(), waiters: [], unsubscribe: () => {} };
+      const settle = () => { feed.waiters.splice(0).forEach((waiter) => waiter()); };
+      _ledgerFeed = feed;
+      _fbReady.then(() => {
+        const collection = _taskLedgerCollection();
+        if (!collection) { feed.entries = []; feed.fromServer = true; settle(); return; }
+        feed.unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
+          feed.entries = _parseTaskLedgerSnapshot(snapshot);
+          if (!(snapshot.metadata && snapshot.metadata.fromCache)) feed.fromServer = true;
+          settle();
+          feed.callbacks.forEach((callback) => { try { callback(_applyLocalDeletes(feed.entries)); } catch (error) { console.warn(error); } });
+        }, (error) => {
+          console.warn("Task recovery sync failed:", error);
+          feed.failed = error;
+          settle();
+        });
+      });
+      return feed;
+    }
     window.taskLedger = {
+      // The records as the cloud has them. Waits up to 6 s for the cloud's answer, then settles for this
+      // device's cached copy; throws when neither is available (the app then skips anything that needs them).
       async list() {
         await _fbReady;
-        const collection = _taskLedgerCollection();
-        if (!collection) return [];
-        const snapshot = await collection.where("kind", "==", "daily-grind-task-v1").get();
-        return _applyLocalDeletes(_parseTaskLedgerSnapshot(snapshot));
+        if (!_taskLedgerCollection()) return [];
+        const feed = _ledgerConnection();
+        if (!feed.fromServer && !feed.failed) {
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, 6000);
+            const check = () => { if (feed.fromServer || feed.failed) { clearTimeout(timer); resolve(); } else feed.waiters.push(check); };
+            check();
+          });
+        }
+        if (feed.failed) throw feed.failed;
+        if (!feed.fromServer) throw new Error("Task records are still loading");
+        return _applyLocalDeletes(feed.entries || []);
       },
       // Tasks deleted on this device this session (checked by draft recovery, too).
       wasDeletedHere(taskId) { return _locallyDeletedTasks.has(taskId); },
@@ -881,13 +915,15 @@
         const known = new Map();
         (Array.isArray(knownEntries) ? knownEntries : []).forEach((entry) => {
           if (!entry || !entry.taskId) return;
-          const signature = entry.deleted === true ? "deleted" : JSON.stringify({
+          // Same field-order-free form as _taskLedgerEntries: the cloud returns a record's fields in
+          // alphabetical order, and comparing text would make every task look changed on every open.
+          const signature = entry.deleted === true ? "deleted" : JSON.stringify(_canonical({
             taskId: entry.taskId,
             listId: entry.listId,
             listTitle: entry.listTitle,
             resetsDaily: entry.resetsDaily === true,
             task: entry.task,
-          });
+          }));
           known.set(entry.taskId, { ...entry, signature });
         });
         const jobs = [];
@@ -902,16 +938,14 @@
       },
       subscribe(callback) {
         let cancelled = false;
-        let unsubscribe = () => {};
+        const deliver = (entries) => { if (!cancelled) callback(entries); };
         _fbReady.then(() => {
-          if (cancelled) return;
-          const collection = _taskLedgerCollection();
-          if (!collection) return;
-          unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
-            if (!cancelled) callback(_applyLocalDeletes(_parseTaskLedgerSnapshot(snapshot)));
-          }, (error) => console.warn("Task recovery sync failed:", error));
+          if (cancelled || !_taskLedgerCollection()) return;
+          const feed = _ledgerConnection();
+          feed.callbacks.add(deliver);
+          if (feed.entries) setTimeout(() => deliver(_applyLocalDeletes(feed.entries)), 0);
         });
-        return () => { cancelled = true; try { unsubscribe(); } catch (error) {} };
+        return () => { cancelled = true; if (_ledgerFeed) _ledgerFeed.callbacks.delete(deliver); };
       },
     };
 
