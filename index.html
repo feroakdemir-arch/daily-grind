@@ -6010,14 +6010,20 @@ function DailyGrind() {
                     const dayEvents = getDisplayedEvents(ds);
                     // Overlapping events split the column side by side. The event being dragged is left out
                     // (it floats full-width on top) so the rest do not reshuffle under the pointer.
-                    const minVisibleMin = 20 / HOUR_H * 60; // blocks are at least 20px tall, so short ones overlap visually
-                    const overlap = layoutDayEvents(dayEvents
+                    // Side by side only when the real times overlap: an event ending at 10:00 and one starting
+                    // at 10:00 each keep the full column width.
+                    const layoutItems = dayEvents
                       .filter(evt => !(calDragging && calDragging.id === (evt._origId || evt.id)))
                       .map(evt => {
                         const shift = evt._spilloverFromDate ? 24 * 60 : 0;
                         const start = timeToMin(evt.start) + shift;
-                        return { key: evt.id, start, end: Math.max(calendarEndMinutes(evt.start, evt.end) + shift, start + minVisibleMin) };
-                      }));
+                        return { key: evt.id, start, end: Math.max(calendarEndMinutes(evt.start, evt.end) + shift, start + 1) };
+                      });
+                    const overlap = layoutDayEvents(layoutItems);
+                    // Very short events are drawn at least 20px tall so their title fits, but never down into
+                    // the next event: the extra height stops where the next one starts.
+                    const nextStartAfter = new Map(layoutItems.map(item => [item.key,
+                      layoutItems.reduce((next, other) => other.key !== item.key && other.start >= item.end && other.start < next ? other.start : next, Infinity)]));
                     return dayEvents.map(evt => {
                       const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
                       if (isDraggingThis && calDragging.newDate && calDragging.newDate !== ds) return null; // hide from original column
@@ -6027,7 +6033,9 @@ function DailyGrind() {
                       const endMin = calendarEndMinutes(displayStart, displayEnd);
                       const spillShift = evt._spilloverFromDate ? 24 * 60 : 0;
                       const topPx = ((startMin + spillShift - startMinBase) / 60) * HOUR_H;
-                      const heightPx = Math.max(((endMin - startMin) / 60) * HOUR_H, 20);
+                      const trueHeightPx = ((endMin - startMin) / 60) * HOUR_H;
+                      const roomPx = isDraggingThis ? Infinity : ((nextStartAfter.get(evt.id) ?? Infinity) - (startMin + spillShift)) / 60 * HOUR_H - 1;
+                      const heightPx = Math.max(trueHeightPx, Math.min(20, roomPx));
                       const fmtTime = calendarTimeLabel;
                       const isRepeating = evt._repeating || evt.repeat;
                       // If dragging to a different day, render at that column
