@@ -6036,6 +6036,10 @@ function DailyGrind() {
                       const trueHeightPx = ((endMin - startMin) / 60) * HOUR_H;
                       const roomPx = isDraggingThis ? Infinity : ((nextStartAfter.get(evt.id) ?? Infinity) - (startMin + spillShift)) / 60 * HOUR_H - 1;
                       const heightPx = Math.max(trueHeightPx, Math.min(20, roomPx));
+                      // Too short for the usual two lines (a 15-minute event when zoomed out): one line whose
+                      // text is sized to the block, so it never spills onto the next event.
+                      const tiny = heightPx < 18;
+                      const tinyFont = Math.max(7.5, Math.min(eventFont, heightPx - 2));
                       const fmtTime = calendarTimeLabel;
                       const isRepeating = evt._repeating || evt.repeat;
                       // If dragging to a different day, render at that column
@@ -6049,7 +6053,7 @@ function DailyGrind() {
                       return (
                         <div key={evt.id} data-calendar-event={evt.id} style={{
                           position: "absolute", left: `calc(40px + ${displayDi} * ((100% - 40px) / 7) + 1px + ${col} * ${slotW})`, width: `calc(${slotW} - ${cols > 1 ? 1 : 0}px)`,
-                          top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: cols > 1 ? "2px 3px" : "2px 4px", overflow: "hidden",
+                          top: topPx, height: heightPx, background: evt.color || "#4fc3f7", borderRadius: 4, padding: tiny ? "0 4px" : cols > 1 ? "2px 3px" : "2px 4px", overflow: "hidden",
                           fontSize: cols > 2 ? eventFont - 1 : eventFont, color: calTextColor(evt.color || "#4fc3f7"), fontWeight: 700, cursor: isDraggingThis ? "grabbing" : "grab", zIndex: isDraggingThis ? 30 : 10,
                           boxShadow: isDraggingThis ? "0 4px 12px #00000088" : "0 1px 3px #00000044", lineHeight: 1.2,
                           borderLeft: isRepeating ? "3px solid #ffffff88" : "none", opacity: isDraggingThis ? 0.85 : 1,
@@ -6098,10 +6102,11 @@ function DailyGrind() {
                         >
                           {/* Shared (narrow) slots: the left repeat stripe already marks repeats, titles may wrap to two lines,
                               and only the start time is shown, so short names like "CAD" stay readable. */}
-                          <div style={cols > 1 && heightPx > 36
+                          {tiny ? (heightPx >= 8 && <div title={`${evt.title} \u00B7 ${fmtTime(displayStart)}`} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: tinyFont, lineHeight: `${heightPx}px` }}>{evt.title}</div>)
+                          : <div style={cols > 1 && heightPx > 36
                             ? { overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "break-word" }
-                            : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating && cols === 1 ? "\u21BB " : ""}{evt.title}</div>
-                          {heightPx > 24 && <div style={{ fontSize: Math.max(9.5, eventFont - 1.5), opacity: 0.8, fontWeight: 600, whiteSpace: cols > 1 ? "nowrap" : undefined, overflow: "hidden", textOverflow: "ellipsis" }}>{cols > 1 ? fmtTime(displayStart) : <>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</>}</div>}
+                            : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isRepeating && cols === 1 ? "\u21BB " : ""}{evt.title}</div>}
+                          {!tiny && heightPx > 24 && <div style={{ fontSize: Math.max(9.5, eventFont - 1.5), opacity: 0.8, fontWeight: 600, whiteSpace: cols > 1 ? "nowrap" : undefined, overflow: "hidden", textOverflow: "ellipsis" }}>{cols > 1 ? fmtTime(displayStart) : <>{fmtTime(displayStart)} - {fmtTime(displayEnd)}</>}</div>}
                         </div>
                       );
                     });
