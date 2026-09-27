@@ -1165,14 +1165,21 @@
       },
       async set(key, value) {
         let ts;
+        if (!_validStorageValue(key, value)) {
+          const invalid = new Error(`Invalid data was blocked for ${key}`);
+          _emitStorageStatus("error", key, invalid);
+          throw invalid;
+        }
+        ts = _nextLocalTs(key);
         try {
-          if (!_validStorageValue(key, value)) throw new Error(`Invalid data was blocked for ${key}`);
-          ts = _nextLocalTs(key);
           _storeLocal(key, value, ts);
           _announceStorageWrite(key, value, ts);
         } catch (e) {
-          _emitStorageStatus("error", key, e);
-          throw e;
+          // This device's storage is full: the change can't be kept here, so the cloud copy is all it
+          // has. Keep going and upload it rather than dropping it.
+          console.warn("Device storage is full; uploading without a device copy:", e);
+          window._lastLocalTs = window._lastLocalTs || {};
+          window._lastLocalTs[key] = ts;
         }
 
         _pendingStorageWrites[key] = (_pendingStorageWrites[key] || 0) + 1;
@@ -4958,6 +4965,45 @@ function DailyGrind() {
     }
   }
 
+  // What the selected recovery copy's calendar holds, so the right copy can be picked before restoring.
+  const [vaultPreview, setVaultPreview] = useState("");
+  useEffect(() => {
+    if (!vaultSelectedId) { setVaultPreview(""); return; }
+    let cancelled = false;
+    setVaultPreview("Reading this copy\u2026");
+    window.dataVault.read(vaultSelectedId).then((backup) => {
+      if (cancelled) return;
+      if (typeof backup.calendarValue !== "string") { setVaultPreview("This copy has no calendar."); return; }
+      const events = parseCalendarData(backup.calendarValue);
+      const titles = [...new Set(events.map((event) => event.title))];
+      setVaultPreview(`Calendar in this copy: ${events.length} events \u00B7 ${titles.slice(0, 6).join(", ")}${titles.length > 6 ? ", \u2026" : ""}`);
+    }).catch((error) => { if (!cancelled) setVaultPreview(`This copy could not be read: ${error.message || error}`); });
+    return () => { cancelled = true; };
+  }, [vaultSelectedId]);
+  async function restoreCalendarOnly() {
+    if (!vaultSelectedId) return;
+    setVaultLoading(true);
+    setVaultMessage("");
+    try {
+      if (!calEventsLoaded) throw new Error("Your calendar is still loading. Wait a moment, then try again.");
+      const backup = await window.dataVault.read(vaultSelectedId);
+      if (typeof backup.calendarValue !== "string") throw new Error("This copy has no calendar. Pick another one.");
+      const restoredCalendar = parseCalendarData(backup.calendarValue);
+      const selected = vaultItems.find((item) => item.id === vaultSelectedId);
+      const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
+      if (!confirm(`Replace your calendar with the one from ${when} (${restoredCalendar.length} events)?\n\nOnly the calendar changes; habits, tasks and notes stay as they are. Your current calendar (${calEventsRef.current.length} events) is saved as a safety copy first.`)) return;
+      await window.dataVault.capture(serializeMainData(dataRef.current), "before-calendar-restore", true);
+      const result = await saveCalEvents(restoredCalendar);
+      setVaultMessage(result
+        ? `Calendar restored from ${when}. Your previous calendar is kept as a safety copy.`
+        : "Calendar restored on this device. It uploads when the cloud accepts saves again.");
+      await loadCloudBackups();
+    } catch (error) {
+      setVaultMessage(`Restore failed: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
+  }
   async function restoreCloudBackup() {
     if (!vaultSelectedId) return;
     setVaultLoading(true);
@@ -6715,6 +6761,7 @@ function DailyGrind() {
             {vaultLoading ? "Loading Recovery History…" : "View Recovery History"}
           </button>
           {vaultItems.length > 0 && <button onClick={restoreCloudBackup} disabled={vaultLoading || !vaultSelectedId} style={{ ...S.okBtn, flex: "1 1 180px", opacity: vaultLoading ? 0.6 : 1 }}>Restore Selected Copy</button>}
+          {vaultItems.length > 0 && <button onClick={restoreCalendarOnly} disabled={vaultLoading || !vaultSelectedId} style={{ ...S.cBtn, flex: "1 1 180px", opacity: vaultLoading ? 0.6 : 1 }}>Restore Calendar Only</button>}
         </div>
         {vaultItems.length > 0 && (
           <select value={vaultSelectedId} onChange={(event) => setVaultSelectedId(event.target.value)} style={{ ...S.inp, marginTop: 10, fontSize: 10 }}>
@@ -6725,6 +6772,7 @@ function DailyGrind() {
             ))}
           </select>
         )}
+        {vaultItems.length > 0 && vaultPreview && <div style={{ marginTop: 8, fontSize: 10.5, color: "#aaaabb", lineHeight: 1.5 }}>{vaultPreview}</div>}
         {vaultMessage && <div style={{ marginTop: 9, fontSize: 10, color: vaultMessage.toLowerCase().includes("failed") || vaultMessage.toLowerCase().includes("could not") ? "#ff6b7a" : "#4cd137", lineHeight: 1.5 }}>{vaultMessage}</div>}
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
