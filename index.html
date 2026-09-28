@@ -267,6 +267,9 @@
     // cloud still holds that version; if another device saved in between, the three versions are merged so
     // both devices' edits survive instead of the later upload silently erasing the other's.
     const _MERGE_KEYS = new Set(["daily-grind-v13", "dg-cal-events"]);
+    // Raise this (and the number in firestore.rules) whenever a sync fix must reach every device: the
+    // cloud then refuses saves from app copies still running older code, so they can't overwrite anything.
+    const _SYNC_CLIENT = 5;
     const _writerId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     const _memoryBase = {};
     function _docVersion(doc) {
@@ -406,9 +409,26 @@
     }
     // Compare-and-merge upload: read the cloud copy and write in one transaction, so another device's save
     // can never be overwritten unseen.
+    // A save that drops several of the cloud's events the user never deleted comes from a stale copy of
+    // the calendar (an old app copy, a device that missed the latest version), not from an edit: those
+    // events are kept. Deletes and restores say which events they remove (or `true` for a restore).
+    const _BULK_REMOVAL = 3;
+    function _keepUnexpectedRemovals(serverValue, value, removing) {
+      if (removing === true) return null;
+      try {
+        const server = JSON.parse(serverValue), next = JSON.parse(value);
+        if (!Array.isArray(server) || !Array.isArray(next)) return null;
+        const allowed = new Set(Array.isArray(removing) ? removing : []);
+        const kept = new Set(next.map((event) => event && event.id));
+        const lost = server.filter((event) => event && event.id && !kept.has(event.id) && !allowed.has(event.id));
+        if (lost.length < _BULK_REMOVAL) return null;
+        console.warn(`A calendar save would have removed ${lost.length} events nobody deleted; they were kept.`);
+        return JSON.stringify([...next, ...lost]);
+      } catch (e) { return null; }
+    }
     function _mergingWrite(key, ref) {
       return (payload) => {
-        const { base, ...doc } = payload;
+        const { base, removing, ...doc } = payload;
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
           return Promise.reject(new Error("You're offline. Your change is saved on this device and will upload when you reconnect."));
         }
@@ -428,6 +448,10 @@
               const merged = _mergeValues(key, base ? base.value : null, value, server.value);
               if (merged !== null) value = merged;
             }
+          }
+          if (key === "dg-cal-events" && serverValid) {
+            const guarded = _keepUnexpectedRemovals(server.value, value, removing);
+            if (guarded !== null) value = guarded;
           }
           const written = { ...doc, value, rev: ((server && Number(server.rev)) || 0) + 1 };
           tx.set(ref, written);
@@ -456,10 +480,12 @@
       _notifyLocalSubscribers(key, doc.value);
     }
     // Every upload of the account or calendar goes through here.
-    function _upload(key, ref, value, localTs) {
+    function _upload(key, ref, value, localTs, options) {
       const payload = { value, localTs, writer: _writerId, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
       if (!_MERGE_KEYS.has(key)) return _queueCloudWrite(key, ref, payload);
+      payload.client = _SYNC_CLIENT;
       payload.base = _getBase(key);
+      if (options && options.removing) payload.removing = options.removing;
       return _queueCloudWrite(key, ref, payload, _mergingWrite(key, ref)).then((result) => { _afterCommit(key, result); return result; });
     }
     // Uploads that failed (offline, flaky network) retry by themselves when the connection comes back.
@@ -503,7 +529,12 @@
     function _queueCloudWrite(key, ref, payload, write) {
       const slotKey = `${key}|${ref.path || ""}`; // never merge writes meant for different accounts
       const slot = _cloudWriteQueues[slotKey] || (_cloudWriteQueues[slotKey] = { running: false, waiting: null });
-      if (slot.waiting) { slot.waiting.payload = payload; slot.waiting.write = write; return slot.waiting.promise; }
+      if (slot.waiting) {
+        // The newer payload replaces the waiting one; the events the waiting one deleted stay deleted.
+        const before = slot.waiting.payload && slot.waiting.payload.removing;
+        if (before && payload.removing !== true) payload.removing = before === true ? true : [...before, ...(payload.removing || [])];
+        slot.waiting.payload = payload; slot.waiting.write = write; return slot.waiting.promise;
+      }
       const entry = { payload, write };
       entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
       slot.waiting = entry;
@@ -1212,7 +1243,7 @@
           return { error: true };
         }
       },
-      async set(key, value) {
+      async set(key, value, options) {
         let ts;
         if (!_validStorageValue(key, value)) {
           const invalid = new Error(`Invalid data was blocked for ${key}`);
@@ -1239,7 +1270,7 @@
           if (ref) {
             localStorage.setItem("dg-owner", _identity());
             _unsyncedKeys.add(key);
-            await _upload(key, ref, value, ts);
+            await _upload(key, ref, value, ts, options);
             _unsyncedKeys.delete(key);
           }
           if (key === "daily-grind-v13") window.dataVault.schedule(value);
@@ -4989,7 +5020,7 @@ function DailyGrind() {
       await window.dataVault?.capture(serializeMainData(dataRef.current), "before-file-restore", true);
       if (hasImages && bundle.version >= 3) await window.noteImageStore.importAssets(bundle.imageAssets, parsed);
       const mainResult = await save(parsed);
-      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
+      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar, { removing: true }) : true;
       setGoalInput(String(parsed.dailyGoal || 100));
       setHasSavedData(true);
       setVaultMessage(mainResult && calendarResult ? "Backup restored and synced." : "Backup restored on this device. Cloud sync needs to reconnect; use the save-status retry when it does.");
@@ -5074,7 +5105,7 @@ function DailyGrind() {
     setVaultLoading(true);
     try {
       await window.dataVault.capture(serializeMainData(dataRef.current), "before-calendar-restore", true);
-      const result = await saveCalEvents(parseCalendarData(copy.value));
+      const result = await saveCalEvents(parseCalendarData(copy.value), { removing: true });
       setVaultMessage(result ? `Calendar restored from ${when}. Your previous calendar is kept as a safety copy.` : "Calendar restored on this device. It uploads when the cloud accepts saves again.");
     } catch (error) {
       setVaultMessage(`Restore failed: ${error.message || error}`);
@@ -5095,7 +5126,7 @@ function DailyGrind() {
       const when = selected?.at ? new Date(selected.at).toLocaleString() : "the selected time";
       if (!confirm(`Replace your calendar with the one from ${when} (${restoredCalendar.length} events)?\n\nOnly the calendar changes; habits, tasks and notes stay as they are. Your current calendar (${calEventsRef.current.length} events) is saved as a safety copy first.`)) return;
       await window.dataVault.capture(serializeMainData(dataRef.current), "before-calendar-restore", true);
-      const result = await saveCalEvents(restoredCalendar);
+      const result = await saveCalEvents(restoredCalendar, { removing: true });
       setVaultMessage(result
         ? `Calendar restored from ${when}. Your previous calendar is kept as a safety copy.`
         : "Calendar restored on this device. It uploads when the cloud accepts saves again.");
@@ -5123,7 +5154,7 @@ function DailyGrind() {
       await flushCurrentNote();
       await window.dataVault.capture(serializeMainData(dataRef.current), "before-cloud-restore", true);
       const result = await save(parsed);
-      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar) : true;
+      const calendarResult = restoredCalendar !== null ? await saveCalEvents(restoredCalendar, { removing: true }) : true;
       setGoalInput(String(parsed.dailyGoal || 100));
       setVaultMessage(result && calendarResult
         ? restoredCalendar !== null
@@ -5285,7 +5316,8 @@ function DailyGrind() {
   }
 
   // Calendar helpers
-  function saveCalEvents(nextOrUpdater) {
+  // options.removing: the ids of events the user deleted (or true for a restore); see _keepUnexpectedRemovals.
+  function saveCalEvents(nextOrUpdater, options) {
     if (calLoadError) return Promise.resolve(null);
     if (!calEventsLoaded) {
       setSaveInfo({ state: "error", key: "dg-cal-events", error: "Your calendar is still loading. Try that again in a moment." });
@@ -5309,7 +5341,12 @@ function DailyGrind() {
     }
     calEventsRef.current = validated;
     setCalEvents(validated);
-    return window.storage.set("dg-cal-events", serialized).catch((error) => { console.error(error); return null; });
+    let removing = options && options.removing;
+    if (removing === "diff") {
+      const keptIds = new Set(validated.map((event) => event.id));
+      removing = current.filter((event) => !keptIds.has(event.id)).map((event) => event.id);
+    }
+    return window.storage.set("dg-cal-events", serialized, removing ? { removing } : undefined).catch((error) => { console.error(error); return null; });
   }
   function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
     const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || CAL_DEFAULT_COLOR };
@@ -5354,7 +5391,7 @@ function DailyGrind() {
     const release = () => setCalPendingDeletes(list => list.filter(pending => pending.key !== key));
     setCalPendingDeletes(list => [...list, { key, transform }]);
     if (!(await protectBeforeDestructive("before-calendar-delete"))) { release(); return false; }
-    const saving = saveCalEvents(transform);
+    const saving = saveCalEvents(transform, { removing: "diff" });
     release();
     return !!(await saving);
   }

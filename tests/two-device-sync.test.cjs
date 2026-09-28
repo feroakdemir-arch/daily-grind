@@ -349,3 +349,43 @@ test("a device that lost its merge base (storage full) never overwrites another 
   const cloud = JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value);
   assert.deepEqual(cloud.map((e) => e.id).sort(), ["e1", "l1", "p1"]);
 });
+
+test("a stale calendar copy saved over a newer one can't drop events nobody deleted (Sep 28)", async () => {
+  const server = makeServer();
+  const event = (id) => ({ id, title: id, date: "2026-09-28", start: "09:00", end: "10:00" });
+  const restored = ["e1", "e2", "r1", "r2", "r3", "r4"].map(event);
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify(restored), localTs: 1000, rev: 7, writer: "laptop" });
+  const phone = device(server);
+  await phone.storageApi.get(CAL); await settle();
+  // The phone's app still holds last night's calendar (before r1-r4 came back) and saves it whole, built on
+  // the version it just received: without the guard this replaces the cloud copy outright.
+  await phone.storageApi.set(CAL, JSON.stringify([event("e1"), event("e2"), event("p1")]));
+  await settle();
+  const cloud = JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value);
+  assert.deepEqual(cloud.map((e) => e.id).sort(), ["e1", "e2", "p1", "r1", "r2", "r3", "r4"]);
+  assert.equal(server.docs.get(`users/u1/data/${CAL}`).client, 5, "saves say which sync code made them (the rules require it)");
+  // The phone shows the kept events too.
+  assert.deepEqual(phone.local(CAL).map((e) => e.id).sort(), ["e1", "e2", "p1", "r1", "r2", "r3", "r4"]);
+});
+
+test("deleting events and restoring a copy still remove events", async () => {
+  const server = makeServer();
+  const event = (id) => ({ id, title: id, date: "2026-09-28", start: "09:00", end: "10:00" });
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify(["a", "b", "c", "d", "e"].map(event)), localTs: 1000, rev: 1, writer: "x" });
+  const laptop = device(server);
+  await laptop.storageApi.get(CAL); await settle();
+  // "All events" delete of a series with three copies names the ids it removes.
+  await laptop.storageApi.set(CAL, JSON.stringify(["a", "b"].map(event)), { removing: ["c", "d", "e"] });
+  await settle();
+  assert.deepEqual(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => e.id), ["a", "b"]);
+  // A single delete (under the limit) needs no note, as with an offline delete retried later.
+  await laptop.storageApi.set(CAL, JSON.stringify(["a"].map(event)));
+  await settle();
+  assert.deepEqual(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => e.id), ["a"]);
+  // Replacing the calendar with a copy removes whatever the copy lacks.
+  await laptop.storageApi.set(CAL, JSON.stringify(["a", "b", "c", "d", "e"].map(event)));
+  await settle();
+  await laptop.storageApi.set(CAL, JSON.stringify(["z"].map(event)), { removing: true });
+  await settle();
+  assert.deepEqual(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => e.id), ["z"]);
+});

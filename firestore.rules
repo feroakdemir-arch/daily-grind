@@ -12,8 +12,11 @@ service cloud.firestore {
     // built on (rev) and who wrote it (writer). Saves without them come from an out-of-date copy of the
     // app (a tab or home-screen app left open since before Sep 24) that would overwrite the other
     // devices' edits and deletes; they are refused, and that copy shows "sync failed" until reloaded.
+    // `client` is the version of the app's sync code (_SYNC_CLIENT in index.html). Raising it here locks out
+    // every copy of the app older than that; 5 = Sep 28 (a phone copy saved a day-old calendar over the new one).
     function mergedSave() {
-      return request.resource.data.writer is string && request.resource.data.rev is number;
+      return request.resource.data.writer is string && request.resource.data.rev is number
+        && request.resource.data.client is number && request.resource.data.client >= 5;
     }
 
     // The app never deletes a cloud document (deleting a habit, task or note rewrites the account
