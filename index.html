@@ -2582,8 +2582,19 @@ function WeekRecord({ history, today, wonToday }) {
 // never change with the interface font (and no webfont with one of these names may be loaded).
 const NOTE_FONT_STACK = "'SF Mono','Fira Code','JetBrains Mono',monospace";
 
+// The canvas needs a font it can use. The computed `font` shorthand is often empty (any font-variant
+// longhand the shorthand can't express blanks it), which left text measured in 10px sans-serif: note text
+// and text boxes came out narrower than their words and wrapped early.
+function canvasFontOf(node) {
+  const style = getComputedStyle(node);
+  return style.font || `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+}
+
 function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
   const [mode, setMode] = useState("text");
+  const [typeMode, setTypeModeState] = useState(() => { try { return localStorage.getItem("dg-note-type-mode") === "normal" ? "normal" : "anywhere"; } catch (e) { return "anywhere"; } });
+  const setTypeMode = value => { setTypeModeState(value); try { localStorage.setItem("dg-note-type-mode", value); } catch (e) {} };
+  const typeNormally = typeMode === "normal";
   const [color, setColor] = useState("#f8fafc");
   const [width, setWidth] = useState(3);
   const [message, setMessage] = useState("");
@@ -2646,6 +2657,13 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   const startTextBox = event => {
     if (mode !== "text" || event.button !== 0 || event.target.closest("textarea,button")) return;
     event.preventDefault();
+    if (typeNormally) {
+      const text = textRef.current;
+      setPendingBox(null); setActiveTextId(null);
+      text.focus({ preventScroll: true });
+      text.setSelectionRange(text.value.length, text.value.length);
+      return;
+    }
     const rect = svgRef.current.getBoundingClientRect();
     const x = Math.round(Math.max(0, event.clientX - rect.left)), y = Math.round(Math.max(0, event.clientY - rect.top));
     const fixedWidth = pageWidth || rect.width;
@@ -2690,9 +2708,9 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     const paperWidth = svgRef.current.getBoundingClientRect().width;
     const availableWidth = Math.min(paperWidth, pageWidth || Infinity);
     const measure = document.createElement("canvas").getContext("2d");
-    measure.font = getComputedStyle(text).font;
+    measure.font = canvasFontOf(text);
     const contentWidth = body.includes("\t") ? availableWidth : body.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line).width + 8), 80);
-    const nextBodySize = { width: Math.min(availableWidth, contentWidth), height: Math.max(28, textHeight) };
+    const nextBodySize = { width: typeNormally ? availableWidth : Math.min(availableWidth, contentWidth), height: Math.max(28, textHeight) };
     setBodySize(previous => previous.width === nextBodySize.width && previous.height === nextBodySize.height ? previous : nextBodySize);
     const size = legacySize.current;
     const strokes = size ? anchorNoteDrawing(drawingRef.current, size.width, size.height) : drawingRef.current;
@@ -2707,7 +2725,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       if (box && frame && boxResize?.id === box.id) frame.style.width = `${boxResize.width}px`;
       else if (box && frame && box.sized) frame.style.width = `${box.width}px`;
       else if (box && frame) {
-        measure.font = getComputedStyle(input).font;
+        measure.font = canvasFontOf(input);
         const longestLine = input.value.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line.replace(/\t/g, "        ")).width), 0);
         const maxWidth = Math.max(box.width, paperWidth - box.x);
         frame.style.width = `${Math.ceil(Math.min(maxWidth, Math.max(box.width, longestLine + 12)))}px`;
@@ -2719,7 +2737,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       height = Math.max(height, Number(input.dataset.boxY) + boxHeight + extraSpace);
     }
     setPaperHeight(height);
-  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize]);
+  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize, typeNormally]);
   const pointAt = event => {
     const rect = event.currentTarget.getBoundingClientRect();
     return [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
@@ -2759,17 +2777,20 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0, fontFamily: NOTE_FONT_STACK }}>
     {toolbarHost && ReactDOM.createPortal(<div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "transparent", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: 0 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
+      {mode === "text" && <div role="group" aria-label="Where typing goes" style={{ display: "flex", border: "1px solid #353548", borderRadius: 7, overflow: "hidden" }}>
+        {[["normal", "Normal", "Type like a document: clicking the page keeps writing where your text is"], ["anywhere", "Anywhere", "Click any spot on the page to put text there"]].map(([value, label, title]) => <button key={value} type="button" aria-pressed={typeMode === value} title={title} onClick={() => setTypeMode(value)} style={{ ...S.noteToolBtn, border: "none", borderRadius: 0, color: typeMode === value ? "#f0e9ff" : "#8b8b9e", background: typeMode === value ? "#7c3aed55" : "#1a1a2b" }}>{label}</button>)}
+      </div>}
       <button type="button" aria-label="Undo drawing" disabled={!history.undo.length} onClick={() => travel("undo")} style={{ ...S.noteToolBtn, opacity: history.undo.length ? 1 : 0.4 }}>Undo</button>
       <button type="button" aria-label="Redo drawing" disabled={!history.redo.length} onClick={() => travel("redo")} style={{ ...S.noteToolBtn, opacity: history.redo.length ? 1 : 0.4 }}>Redo</button>
       {mode !== "text" && <>
         <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: "#b5b5c9" }}>Ink <input aria-label="Pen color" type="color" value={color} onChange={event => setColor(event.target.value)} style={{ width: 30, height: 28, border: 0, padding: 0, background: "transparent" }} /></label>
         <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
       </>}
-      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag \u2725 to move, the right edge to resize" : "Click any blank spot to type"}</span>
+      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag \u2725 to move, the right edge to resize" : typeNormally ? "Type like a document" : "Click any blank spot to type"}</span>
     </div>, toolbarHost)}
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
     <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
-      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && body.length ? 0 : -1} placeholder="" style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && body.length ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && (body.length || typeNormally) ? 0 : -1} placeholder={mode === "text" && typeNormally && !textBoxes.length && !drawing.length ? "Start typing\u2026" : ""} style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && (body.length || typeNormally) ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
       {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].map(box => <div key={box.id} data-note-textbox-frame={box.id} style={{ position: "absolute", left: boxDrag?.id === box.id ? boxDrag.x : box.x, top: boxDrag?.id === box.id ? boxDrag.y : box.y, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none", opacity: boxDrag?.id === box.id ? 0.85 : 1 }}>
         <textarea data-note-textbox={box.id} data-box-y={box.y} aria-label="Positioned note text" placeholder="Type here…" value={box.text} readOnly={mode !== "text"} maxLength={20000}
           onFocus={() => setActiveTextId(box.id)}
