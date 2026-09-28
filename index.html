@@ -386,14 +386,18 @@
     // Returns the merged document text, or null when the versions can't be merged safely.
     function _mergeValues(key, baseValue, localValue, remoteValue) {
       try {
-        const base = JSON.parse(baseValue), local = JSON.parse(localValue), remote = JSON.parse(remoteValue);
+        // No base (this device couldn't keep one): merge as if nothing was shared, so every item from
+        // both sides is kept. Deletions may need redoing, but no edit is ever lost.
+        const base = typeof baseValue === "string" ? JSON.parse(baseValue) : undefined;
+        const local = JSON.parse(localValue), remote = JSON.parse(remoteValue);
         if (key === "daily-grind-v13") {
           // "Reset Everything" is meant to replace everything: the device that reset wins outright.
           const baseReset = _isPlainObject(base) ? base.resetStamp : undefined;
-          if (_isPlainObject(local) && local.resetStamp && local.resetStamp !== baseReset) return localValue;
-          if (_isPlainObject(remote) && remote.resetStamp && remote.resetStamp !== baseReset) return remoteValue;
+          const localReset = _isPlainObject(local) ? local.resetStamp : undefined, remoteReset = _isPlainObject(remote) ? remote.resetStamp : undefined;
+          if (localReset && localReset !== baseReset && localReset !== remoteReset) return localValue;
+          if (remoteReset && remoteReset !== baseReset && remoteReset !== localReset) return remoteValue;
         }
-        const merged = JSON.stringify(_merge3(base, local, remote, ""));
+        const merged = JSON.stringify(base === undefined ? _merge3({}, local, remote, "") : _merge3(base, local, remote, ""));
         return _validStorageValue(key, merged) ? merged : null;
       } catch (error) {
         console.warn("Could not merge edits from two devices:", error);
@@ -413,14 +417,15 @@
           const server = snap.exists ? snap.data() : null;
           let value = doc.value;
           const serverValid = server && typeof server.value === "string" && _validStorageValue(key, server.value);
-          if (serverValid && server.value !== value && base && base.version !== _docVersion(server)) {
+          // Replace the cloud copy only when it is exactly the version this change was built on.
+          if (serverValid && server.value !== value && (!base || base.version !== _docVersion(server))) {
             // Never merge with an empty starter that replaced real data; that is what healing is for.
             const starterOverReal = key === "daily-grind-v13" && (() => {
               const rc = _mainRichness(server.value), rl = _mainRichness(value);
               return rc !== null && rl !== null && rc <= 2 && rl >= rc + 3;
             })();
             if (!starterOverReal) {
-              const merged = _mergeValues(key, base.value, value, server.value);
+              const merged = _mergeValues(key, base ? base.value : null, value, server.value);
               if (merged !== null) value = merged;
             }
           }
@@ -562,9 +567,11 @@
     }
     function _writeLocalSafety(entry) {
       try {
-        const current = localStorage.getItem("dg-vault-local-safety");
-        if (current) localStorage.setItem("dg-vault-local-safety-previous", current);
-      } catch (e) { console.warn("Previous device safety copy not kept:", e); }
+        const current = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
+        if (current && typeof current.calendarValue === "string") {
+          localStorage.setItem("dg-vault-local-safety-previous", JSON.stringify({ calendarValue: current.calendarValue, reason: current.reason, at: current.at }));
+        }
+      } catch (e) { console.warn("Previous device calendar copy not kept:", e); }
       localStorage.setItem("dg-vault-local-safety", JSON.stringify(entry));
     }
     function _calendarValueForVault() {
@@ -710,7 +717,7 @@
       async list() {
         await _fbReady;
         const localItems = [];
-        [["dg-vault-local-safety", "local-safety"], ["dg-vault-local-safety-previous", "local-safety-previous"]].forEach(([storageKey, suffix]) => {
+        [["dg-vault-local-safety", "local-safety"]].forEach(([storageKey, suffix]) => {
           try {
             const local = JSON.parse(localStorage.getItem(storageKey) || "null");
             if (local && typeof local.value === "string") localItems.push({
@@ -742,8 +749,8 @@
       },
       async read(id) {
         if (typeof id !== "string" || !id.startsWith(VAULT_PREFIX)) throw new Error("Invalid backup selection");
-        if (id === `${VAULT_PREFIX}local-safety` || id === `${VAULT_PREFIX}local-safety-previous`) {
-          const local = JSON.parse(localStorage.getItem(id.endsWith("-previous") ? "dg-vault-local-safety-previous" : "dg-vault-local-safety") || "null");
+        if (id === `${VAULT_PREFIX}local-safety`) {
+          const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
           if (!local || typeof local.value !== "string" || _mainRichness(local.value) === null) throw new Error("That local safety copy is invalid");
           return { value: local.value, calendarValue: typeof local.calendarValue === "string" ? local.calendarValue : null, kind: "safety", at: local.at || 0 };
         }
@@ -5039,6 +5046,27 @@ function DailyGrind() {
       setVaultLoading(false);
     }
   }
+  // Adds a copy's events back: events missing now come back, events in both take the copy's version,
+  // and events added since the copy stay.
+  async function addCalendarCopy(copy) {
+    if (!calEventsLoaded) { setVaultMessage("Your calendar is still loading. Wait a moment, then try again."); return; }
+    const when = copy.at ? new Date(copy.at).toLocaleString() : "an unknown time";
+    const fromCopy = parseCalendarData(copy.value);
+    const copyIds = new Set(fromCopy.map((event) => event.id));
+    const kept = calEventsRef.current.filter((event) => !copyIds.has(event.id));
+    const returning = fromCopy.filter((event) => !calEventsRef.current.some((current) => current.id === event.id)).length;
+    if (!confirm(`Add the calendar from ${when} to your current one?\n\n${returning} events come back, ${fromCopy.length - returning} take that copy's version, and ${kept.length} events you added since stay. Your current calendar is saved as a safety copy first.`)) return;
+    setVaultLoading(true);
+    try {
+      await window.dataVault.capture(serializeMainData(dataRef.current), "before-calendar-add", true);
+      const result = await saveCalEvents([...fromCopy, ...kept]);
+      setVaultMessage(result ? `Added the calendar from ${when}: ${fromCopy.length + kept.length} events now.` : "Added on this device. It uploads when the cloud accepts saves again.");
+    } catch (error) {
+      setVaultMessage(`Adding failed: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
+  }
   async function restoreCalendarCopy(copy) {
     if (!calEventsLoaded) { setVaultMessage("Your calendar is still loading. Wait a moment, then try again."); return; }
     const when = copy.at ? new Date(copy.at).toLocaleString() : "an unknown time";
@@ -6857,7 +6885,10 @@ function DailyGrind() {
                     <div style={{ fontSize: 11, fontWeight: 800, color: "#e6e6ee" }}>{copy.at ? new Date(copy.at).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Time unknown"} {"\u00B7"} {copy.count} events</div>
                     <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 2, lineHeight: 1.45 }}>{copy.kind} {"\u00B7"} {copy.titles.slice(0, 8).join(", ")}{copy.titles.length > 8 ? ", \u2026" : ""}</div>
                   </div>
-                  <button onClick={() => restoreCalendarCopy(copy)} disabled={vaultLoading} style={{ ...S.okBtn, flex: "none", padding: "7px 12px", fontSize: 10.5 }}>Restore</button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5, flex: "none" }}>
+                    <button onClick={() => addCalendarCopy(copy)} disabled={vaultLoading} title="Bring this copy's events back and keep everything added since" style={{ ...S.okBtn, flex: "none", padding: "7px 12px", fontSize: 10.5 }}>Add to calendar</button>
+                    <button onClick={() => restoreCalendarCopy(copy)} disabled={vaultLoading} title="Replace the calendar with exactly this copy" style={{ ...S.cBtn, flex: "none", padding: "6px 12px", fontSize: 10.5 }}>Replace with this</button>
+                  </div>
                 </div>
               ))}
             </div>)}

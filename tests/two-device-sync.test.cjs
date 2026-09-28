@@ -327,3 +327,25 @@ test("opening the app again rewrites no task records (the quota burner)", async 
   }
   assert.equal(recordWrites(), 1);
 });
+
+test("a device that lost its merge base (storage full) never overwrites another device's edits", async () => {
+  const server = makeServer();
+  const event = (id, title) => ({ id, title, date: "2026-09-26", start: "09:00", end: "10:00" });
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify([event("e1", "Class")]), localTs: 1000 });
+  const laptop = device(server), phone = device(server);
+  for (const dev of [laptop, phone]) { await dev.storageApi.get(CAL); dev.storageApi.subscribe(CAL, () => {}); }
+  await settle();
+  // Cloud refusing saves: the phone's edit stays on the phone.
+  phone.goOffline();
+  await phone.storageApi.set(CAL, JSON.stringify([event("e1", "Class"), event("p1", "Phone event")])).catch(() => {});
+  // Meanwhile the laptop edits and saves.
+  await laptop.storageApi.set(CAL, JSON.stringify([event("e1", "Class — moved"), event("l1", "Laptop event")]));
+  await settle();
+  // The phone's storage filled up, so it no longer knows which cloud version it was built on; it reopens.
+  phone.storage.delete(CAL + "_base"); phone.storage.delete(CAL + "_basever");
+  phone.storage.set(CAL + "_ts", String(Date.now() + 60000));
+  const reopened = device(server, { storage: phone.storage });
+  await reopened.storageApi.get(CAL); await settle();
+  const cloud = JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value);
+  assert.deepEqual(cloud.map((e) => e.id).sort(), ["e1", "l1", "p1"]);
+});
