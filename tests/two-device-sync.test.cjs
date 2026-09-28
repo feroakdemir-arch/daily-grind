@@ -107,7 +107,9 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
     },
     navigator: {},
     TextEncoder, console: { ...console, warn() {}, log() {} },
-    setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms || 0, 3)), clearTimeout,
+    // Timers run fast, but a long wait (a timeout like "give the cloud 6 s to answer") must still end after
+    // the short steps it waits for; squeezing it to 3 ms too let it expire before the fake cloud replied.
+    setTimeout: (fn, ms) => setTimeout(fn, (ms || 0) >= 1000 ? 60 : Math.min(ms || 0, 3)), clearTimeout,
     setInterval: () => 0, clearInterval() {},
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
