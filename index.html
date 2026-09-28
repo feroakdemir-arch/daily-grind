@@ -186,7 +186,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-task-drafts-v1"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-vault-local-safety-previous", "dg-task-drafts-v1"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -560,6 +560,13 @@
       const bytes = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
       return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
     }
+    function _writeLocalSafety(entry) {
+      try {
+        const current = localStorage.getItem("dg-vault-local-safety");
+        if (current) localStorage.setItem("dg-vault-local-safety-previous", current);
+      } catch (e) { console.warn("Previous device safety copy not kept:", e); }
+      localStorage.setItem("dg-vault-local-safety", JSON.stringify(entry));
+    }
     function _calendarValueForVault() {
       const raw = localStorage.getItem("dg-cal-events");
       if (raw === null) return "[]";
@@ -608,7 +615,7 @@
       const calendarValue = _calendarValueForVault();
       if (!collection) {
         if (safetyCopy) {
-          try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, calendarValue, reason, at: Date.now() })); }
+          try { _writeLocalSafety({ value, calendarValue, reason, at: Date.now() }); }
           catch (e) { throw new Error("A local safety copy could not be created"); }
         }
         _emitVaultStatus("local-only", { message: "Sign in to enable automatic cloud history." });
@@ -635,7 +642,7 @@
       // A safety copy is also kept on this device at once, so a delete never waits on the network.
       let deviceCopy = false;
       if (safetyCopy) {
-        try { localStorage.setItem("dg-vault-local-safety", JSON.stringify({ value, calendarValue, reason, at: now })); deviceCopy = true; }
+        try { _writeLocalSafety({ value, calendarValue, reason, at: now }); deviceCopy = true; }
         catch (e) { console.warn("Device safety copy skipped:", e); }
       }
       const cloudCopies = Promise.all(targets.flatMap((target) => [
@@ -702,13 +709,15 @@
       },
       async list() {
         await _fbReady;
-        let localItems = [];
-        try {
-          const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
-          if (local && typeof local.value === "string") localItems = [{
-            id: `${VAULT_PREFIX}local-safety`, calendarId: `${VAULT_CAL_PREFIX}local-safety`, kind: "safety", reason: local.reason || "local-safety", at: local.at || 0, sizeBytes: _byteSize(local.value), calendarSizeBytes: typeof local.calendarValue === "string" ? _byteSize(local.calendarValue) : 0,
-          }];
-        } catch (e) {}
+        const localItems = [];
+        [["dg-vault-local-safety", "local-safety"], ["dg-vault-local-safety-previous", "local-safety-previous"]].forEach(([storageKey, suffix]) => {
+          try {
+            const local = JSON.parse(localStorage.getItem(storageKey) || "null");
+            if (local && typeof local.value === "string") localItems.push({
+              id: `${VAULT_PREFIX}${suffix}`, calendarId: `${VAULT_CAL_PREFIX}${suffix}`, kind: "safety", reason: `${local.reason || "local-safety"} (on this device)`, at: local.at || 0, sizeBytes: _byteSize(local.value), calendarSizeBytes: typeof local.calendarValue === "string" ? _byteSize(local.calendarValue) : 0,
+            });
+          } catch (e) {}
+        });
         const collection = _vaultCollection();
         if (!collection) return localItems;
         const snap = await collection
@@ -733,8 +742,8 @@
       },
       async read(id) {
         if (typeof id !== "string" || !id.startsWith(VAULT_PREFIX)) throw new Error("Invalid backup selection");
-        if (id === `${VAULT_PREFIX}local-safety`) {
-          const local = JSON.parse(localStorage.getItem("dg-vault-local-safety") || "null");
+        if (id === `${VAULT_PREFIX}local-safety` || id === `${VAULT_PREFIX}local-safety-previous`) {
+          const local = JSON.parse(localStorage.getItem(id.endsWith("-previous") ? "dg-vault-local-safety-previous" : "dg-vault-local-safety") || "null");
           if (!local || typeof local.value !== "string" || _mainRichness(local.value) === null) throw new Error("That local safety copy is invalid");
           return { value: local.value, calendarValue: typeof local.calendarValue === "string" ? local.calendarValue : null, kind: "safety", at: local.at || 0 };
         }
@@ -762,6 +771,39 @@
           calendarValue = calendarItem.value;
         }
         return { value: item.value, calendarValue, kind: item.kind || "snapshot", at: item.clientCreatedAt || 0 };
+      },
+      // Every calendar copy from the last few days, found by the ids the vault writes (hourly, daily, weekly,
+      // latest, safety) rather than through the monthly index, which can miss copies written while the cloud
+      // was refusing saves. Calendar copies are small, so this is cheap. Identical copies are listed once.
+      async findCalendarCopies(days) {
+        await _fbReady;
+        const found = [];
+        [["dg-vault-local-safety", "on this device"], ["dg-vault-local-safety-previous", "on this device, earlier"]].forEach(([storageKey, where]) => {
+          try {
+            const local = JSON.parse(localStorage.getItem(storageKey) || "null");
+            if (local && typeof local.calendarValue === "string") found.push({ id: storageKey, kind: `safety (${where})`, at: local.at || 0, value: local.calendarValue });
+          } catch (e) {}
+        });
+        const collection = _vaultCollection();
+        if (collection) {
+          const now = Date.now(), span = Math.max(1, days || 4);
+          const ids = new Set([`${VAULT_CAL_PREFIX}latest`]);
+          for (let h = 0; h < span * 24; h++) ids.add(`${VAULT_CAL_PREFIX}hourly-${_localDateParts(now - h * 3600e3).hour}`);
+          for (let d = 0; d <= span + 3; d++) ids.add(`${VAULT_CAL_PREFIX}daily-${_localDateParts(now - d * 864e5).day}`);
+          for (let w = 0; w < 3; w++) ids.add(`${VAULT_CAL_PREFIX}weekly-${_weekStart(now - w * 7 * 864e5)}`);
+          const docs = await Promise.all([...ids].map((id) => collection.doc(id).get().catch(() => null)));
+          const safety = await collection.orderBy(firebase.firestore.FieldPath.documentId())
+            .startAt(`${VAULT_CAL_PREFIX}safety-${now - span * 864e5}`).endAt(`${VAULT_CAL_PREFIX}safety-\uf8ff`).get().catch(() => null);
+          [...docs, ...(safety ? safety.docs : [])].forEach((doc) => {
+            if (!doc || !doc.exists) return;
+            const item = doc.data() || {};
+            found.push({ id: doc.id, kind: item.kind || "copy", at: item.clientCreatedAt || 0, value: item.value });
+          });
+        }
+        const seen = new Set();
+        return found.filter((copy) => _validStorageValue("dg-cal-events", copy.value))
+          .sort((a, b) => (b.at || 0) - (a.at || 0))
+          .filter((copy) => { if (seen.has(copy.value)) return false; seen.add(copy.value); return true; });
       },
       onStatus(callback) {
         _vaultStatusListeners.add(callback);
@@ -4980,6 +5022,38 @@ function DailyGrind() {
     }).catch((error) => { if (!cancelled) setVaultPreview(`This copy could not be read: ${error.message || error}`); });
     return () => { cancelled = true; };
   }, [vaultSelectedId]);
+  const [calendarCopies, setCalendarCopies] = useState(null);
+  async function findCalendarCopies() {
+    setVaultLoading(true);
+    setVaultMessage("");
+    try {
+      const copies = await window.dataVault.findCalendarCopies(4);
+      setCalendarCopies(copies.map((copy) => {
+        const events = parseCalendarData(copy.value);
+        const titles = [...new Set(events.map((event) => event.title))];
+        return { ...copy, count: events.length, titles };
+      }));
+    } catch (error) {
+      setVaultMessage(`Calendar copies could not be loaded: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
+  }
+  async function restoreCalendarCopy(copy) {
+    if (!calEventsLoaded) { setVaultMessage("Your calendar is still loading. Wait a moment, then try again."); return; }
+    const when = copy.at ? new Date(copy.at).toLocaleString() : "an unknown time";
+    if (!confirm(`Replace your calendar with the copy from ${when} (${copy.count} events)?\n\nOnly the calendar changes. Your current calendar (${calEventsRef.current.length} events) is saved as a safety copy first.`)) return;
+    setVaultLoading(true);
+    try {
+      await window.dataVault.capture(serializeMainData(dataRef.current), "before-calendar-restore", true);
+      const result = await saveCalEvents(parseCalendarData(copy.value));
+      setVaultMessage(result ? `Calendar restored from ${when}. Your previous calendar is kept as a safety copy.` : "Calendar restored on this device. It uploads when the cloud accepts saves again.");
+    } catch (error) {
+      setVaultMessage(`Restore failed: ${error.message || error}`);
+    } finally {
+      setVaultLoading(false);
+    }
+  }
   async function restoreCalendarOnly() {
     if (!vaultSelectedId) return;
     setVaultLoading(true);
@@ -6773,6 +6847,20 @@ function DailyGrind() {
           </select>
         )}
         {vaultItems.length > 0 && vaultPreview && <div style={{ marginTop: 8, fontSize: 10.5, color: "#aaaabb", lineHeight: 1.5 }}>{vaultPreview}</div>}
+        <button onClick={findCalendarCopies} disabled={vaultLoading} style={{ ...S.cBtn, width: "100%", marginTop: 10, opacity: vaultLoading ? 0.6 : 1 }}>Find Calendar Copies (Last 4 Days)</button>
+        {calendarCopies && (calendarCopies.length === 0
+          ? <div style={{ marginTop: 8, fontSize: 10.5, color: "#aaaabb" }}>No calendar copies from the last 4 days were found.</div>
+          : <div style={{ marginTop: 8, display: "grid", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+              {calendarCopies.map((copy) => (
+                <div key={copy.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", border: "1px solid #2d2d3a", borderRadius: 8, background: "#141424" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: "#e6e6ee" }}>{copy.at ? new Date(copy.at).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Time unknown"} {"\u00B7"} {copy.count} events</div>
+                    <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 2, lineHeight: 1.45 }}>{copy.kind} {"\u00B7"} {copy.titles.slice(0, 8).join(", ")}{copy.titles.length > 8 ? ", \u2026" : ""}</div>
+                  </div>
+                  <button onClick={() => restoreCalendarCopy(copy)} disabled={vaultLoading} style={{ ...S.okBtn, flex: "none", padding: "7px 12px", fontSize: 10.5 }}>Restore</button>
+                </div>
+              ))}
+            </div>)}
         {vaultMessage && <div style={{ marginTop: 9, fontSize: 10, color: vaultMessage.toLowerCase().includes("failed") || vaultMessage.toLowerCase().includes("could not") ? "#ff6b7a" : "#4cd137", lineHeight: 1.5 }}>{vaultMessage}</div>}
       </div>
       <div style={{ marginTop: 28, borderTop: "1px solid #2d2d3a", paddingTop: 20 }}>
