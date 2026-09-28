@@ -320,8 +320,9 @@
     function _isStringList(value) { return Array.isArray(value) && value.every((item) => typeof item === "string"); }
     const _GONE = { gone: true };
     // A value changed on one side only takes that change. Changed on both sides: objects and lists of
-    // items with ids merge deeper; two different values for the very same field keep this device's.
-    function _merge3(base, local, remote, path) {
+    // items with ids merge deeper; two different values for the very same field keep the newer side's
+    // (localWins: this device's copy was edited after the cloud's).
+    function _merge3(base, local, remote, path, localWins = true) {
       if (_sameJson(local, remote)) return local;
       if (base !== undefined && _sameJson(base, local)) return remote;
       if (base !== undefined && _sameJson(base, remote)) return local;
@@ -331,31 +332,31 @@
         const b = _isPlainObject(base) ? base : {};
         const out = {};
         new Set([...Object.keys(local), ...Object.keys(remote)]).forEach((key) => {
-          const merged = _mergeEntry(b, local, remote, key, path ? path + "." + key : key);
+          const merged = _mergeEntry(b, local, remote, key, path ? path + "." + key : key, localWins);
           if (merged !== _GONE) out[key] = merged;
         });
         return out;
       }
-      if (_isIdList(local) && _isIdList(remote)) return _mergeIdList(_isIdList(base) ? base : [], local, remote, path);
+      if (_isIdList(local) && _isIdList(remote)) return _mergeIdList(_isIdList(base) ? base : [], local, remote, path, localWins);
       if (_isStringList(local) && _isStringList(remote)) {
         const b = _isStringList(base) ? base : [];
         const kept = local.filter((item) => remote.includes(item) || !b.includes(item));
         remote.forEach((item) => { if (!kept.includes(item) && !b.includes(item)) kept.push(item); });
         return kept;
       }
-      return local;
+      return localWins ? local : remote;
     }
     // One field (or one list item, by id). Added on one side: kept. Removed on one side and untouched on
     // the other: removed. Removed on one side but edited on the other: the edit is kept, never lost.
-    function _mergeEntry(b, l, r, key, path) {
+    function _mergeEntry(b, l, r, key, path, localWins) {
       const inL = _hasOwn(l, key), inR = _hasOwn(r, key), inB = _hasOwn(b, key);
-      if (inL && inR) return _merge3(inB ? b[key] : undefined, l[key], r[key], path);
+      if (inL && inR) return _merge3(inB ? b[key] : undefined, l[key], r[key], path, localWins);
       const kept = inL ? l[key] : r[key];
       if (!inB) return kept;
       if (_sameJson(b[key], kept)) return _GONE;
       return kept;
     }
-    function _mergeIdList(base, local, remote, path) {
+    function _mergeIdList(base, local, remote, path, localWins) {
       const byId = (list) => { const map = Object.create(null); list.forEach((item) => { if (!(item.id in map)) map[item.id] = item; }); return map; };
       const B = byId(base), L = byId(local), R = byId(remote);
       const order = (list, other) => list.map((item) => item.id).filter((id) => id in B && id in other);
@@ -367,7 +368,7 @@
       skeleton.forEach((item) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
-        const merged = _mergeEntry(B, L, R, item.id, itemPath);
+        const merged = _mergeEntry(B, L, R, item.id, itemPath, localWins);
         if (merged !== _GONE) out.push(merged);
       });
       // Items only the other side has go right before their nearest later neighbour there (new items at
@@ -375,7 +376,7 @@
       other.forEach((item, index) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
-        const merged = _mergeEntry(B, L, R, item.id, itemPath);
+        const merged = _mergeEntry(B, L, R, item.id, itemPath, localWins);
         if (merged === _GONE) return;
         let at = out.length;
         for (let j = index + 1; j < other.length; j++) {
@@ -387,7 +388,9 @@
       return out;
     }
     // Returns the merged document text, or null when the versions can't be merged safely.
-    function _mergeValues(key, baseValue, localValue, remoteValue) {
+    // localTs / remoteTs: when each copy was last edited; on a field both changed, the later edit wins.
+    function _mergeValues(key, baseValue, localValue, remoteValue, localTs, remoteTs) {
+      const localWins = !(Number(remoteTs) > Number(localTs));
       try {
         // No base (this device couldn't keep one): merge as if nothing was shared, so every item from
         // both sides is kept. Deletions may need redoing, but no edit is ever lost.
@@ -400,7 +403,7 @@
           if (localReset && localReset !== baseReset && localReset !== remoteReset) return localValue;
           if (remoteReset && remoteReset !== baseReset && remoteReset !== localReset) return remoteValue;
         }
-        const merged = JSON.stringify(base === undefined ? _merge3({}, local, remote, "") : _merge3(base, local, remote, ""));
+        const merged = JSON.stringify(base === undefined ? _merge3({}, local, remote, "", localWins) : _merge3(base, local, remote, "", localWins));
         return _validStorageValue(key, merged) ? merged : null;
       } catch (error) {
         console.warn("Could not merge edits from two devices:", error);
@@ -426,9 +429,11 @@
         return JSON.stringify([...next, ...lost]);
       } catch (e) { return null; }
     }
+    // When a cloud copy's content was last edited (older copies only have their upload time).
+    function _editedAt(doc) { return Number(doc && (doc.editedAt || doc.localTs)) || 0; }
     function _mergingWrite(key, ref) {
       return (payload) => {
-        const { base, removing, ...doc } = payload;
+        const { base, removing, editedAt, ...doc } = payload;
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
           return Promise.reject(new Error("You're offline. Your change is saved on this device and will upload when you reconnect."));
         }
@@ -445,7 +450,7 @@
               return rc !== null && rl !== null && rc <= 2 && rl >= rc + 3;
             })();
             if (!starterOverReal) {
-              const merged = _mergeValues(key, base ? base.value : null, value, server.value);
+              const merged = _mergeValues(key, base ? base.value : null, value, server.value, editedAt || doc.localTs, _editedAt(server));
               if (merged !== null) value = merged;
             }
           }
@@ -453,7 +458,7 @@
             const guarded = _keepUnexpectedRemovals(server.value, value, removing);
             if (guarded !== null) value = guarded;
           }
-          const written = { ...doc, value, rev: ((server && Number(server.rev)) || 0) + 1 };
+          const written = { ...doc, value, rev: ((server && Number(server.rev)) || 0) + 1, editedAt: Math.max(Number(editedAt || doc.localTs) || 0, server ? _editedAt(server) : 0) };
           tx.set(ref, written);
           return { doc: written, sent: doc.value };
         });
@@ -486,6 +491,7 @@
       payload.client = _SYNC_CLIENT;
       payload.base = _getBase(key);
       if (options && options.removing) payload.removing = options.removing;
+      payload.editedAt = (options && options.editedAt) || localTs;
       return _queueCloudWrite(key, ref, payload, _mergingWrite(key, ref)).then((result) => { _afterCommit(key, result); return result; });
     }
     // Uploads that failed (offline, flaky network) retry by themselves when the connection comes back.
@@ -1053,7 +1059,7 @@
       const localValid = local !== null && _validStorageValue(key, local);
       let next = d.value;
       if (localValid && base && local !== base.value) {
-        next = _mergeValues(key, base.value, local, d.value);
+        next = _mergeValues(key, base.value, local, d.value, parseInt(localStorage.getItem(key + "_edited") || "0") || localTs, _editedAt(d));
         if (next === null) next = (Number(d.localTs) || 0) > localTs ? d.value : local;
       } else if (localValid && !base && !((Number(d.localTs) || 0) > localTs)) {
         return; // first run of this version, nothing known about the base: the newer timestamp wins as before
@@ -1199,12 +1205,13 @@
                 const unsynced = localValid && localData.value !== fbValue && (base ? localData.value !== base.value : localTs > fbTs);
                 if (unsynced) {
                   let value = localData.value;
-                  if (base && base.version !== _docVersion(fbData)) value = _mergeValues(key, base.value, localData.value, fbValue) || localData.value;
+                  const editedLocal = parseInt(localStorage.getItem(key + "_edited") || "0") || localTs;
+                  if (base && base.version !== _docVersion(fbData)) value = _mergeValues(key, base.value, localData.value, fbValue, editedLocal, _editedAt(fbData)) || localData.value;
                   const pushTs = Math.max(localTs, fbTs, Date.now()) + 1;
                   _storeLocal(key, value, pushTs);
                   localStorage.setItem("dg-owner", _identity());
                   _unsyncedKeys.add(key);
-                  _upload(key, ref, value, pushTs).then(() => _unsyncedKeys.delete(key), (error) => console.warn("Upload of this device's unsynced changes failed; it will retry:", error));
+                  _upload(key, ref, value, pushTs, { editedAt: editedLocal }).then(() => _unsyncedKeys.delete(key), (error) => console.warn("Upload of this device's unsynced changes failed; it will retry:", error));
                   return { key, value };
                 }
                 // Otherwise, cloud wins
@@ -1250,9 +1257,17 @@
           _emitStorageStatus("error", key, invalid);
           throw invalid;
         }
+        let editedAt = 0;
+        try {
+          // Uploading again what this device already holds (a retry after being offline) is not a new
+          // edit: it keeps the time it was really made, so newer edits from other devices still win.
+          if (localStorage.getItem(key) === value) editedAt = parseInt(localStorage.getItem(key + "_edited") || localStorage.getItem(key + "_ts") || "0") || 0;
+        } catch (e) {}
         ts = _nextLocalTs(key);
+        if (!editedAt) editedAt = ts;
         try {
           _storeLocal(key, value, ts);
+          localStorage.setItem(key + "_edited", String(editedAt));
           _announceStorageWrite(key, value, ts);
         } catch (e) {
           // This device's storage is full: the change can't be kept here, so the cloud copy is all it
@@ -1270,7 +1285,7 @@
           if (ref) {
             localStorage.setItem("dg-owner", _identity());
             _unsyncedKeys.add(key);
-            await _upload(key, ref, value, ts, options);
+            await _upload(key, ref, value, ts, { ...(options || {}), editedAt });
             _unsyncedKeys.delete(key);
           }
           if (key === "daily-grind-v13") window.dataVault.schedule(value);

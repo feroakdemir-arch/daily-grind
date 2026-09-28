@@ -391,3 +391,57 @@ test("deleting events and restoring a copy still remove events", async () => {
   await settle();
   assert.deepEqual(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => e.id), ["z"]);
 });
+
+// Sep 28, 1:45 PM: a phone reopened with day-old unsynced calendar edits; on every event both devices had
+// changed, the phone's older version won and undid the laptop's newer edits.
+async function calendarPair() {
+  const server = makeServer();
+  const event = (id, start) => ({ id, title: id, date: "2026-09-28", start, end: "23:00" });
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify([event("bus", "08:00"), event("gym", "12:00"), event("nap", "14:00")]), localTs: 1000, rev: 1, writer: "x" });
+  const laptop = device(server), phone = device(server);
+  for (const dev of [laptop, phone]) { await dev.storageApi.get(CAL); dev.storageApi.subscribe(CAL, () => {}); }
+  await settle();
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const cloud = () => Object.fromEntries(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => [e.id, e.start]));
+  return { server, event, laptop, phone, wait, cloud };
+}
+
+test("a phone reopening with old unsynced edits doesn't undo newer edits made on the laptop", async () => {
+  const { server, event, laptop, phone, wait, cloud } = await calendarPair();
+  phone.goOffline();
+  // Yesterday on the phone: bus moved to 08:30, nap moved to 15:00; never uploaded.
+  await phone.storageApi.set(CAL, JSON.stringify([event("bus", "08:30"), event("gym", "12:00"), event("nap", "15:00")])).catch(() => {});
+  await wait();
+  // Today on the laptop: bus moved to 09:00 (a newer edit of the same event).
+  await laptop.storageApi.set(CAL, JSON.stringify([event("bus", "09:00"), event("gym", "12:00"), event("nap", "14:00")]));
+  await settle();
+  // The phone app is closed and opened again (new code, online).
+  const reopened = device(server, { storage: phone.storage });
+  await reopened.storageApi.get(CAL); await settle(60);
+  assert.deepEqual(cloud(), { bus: "09:00", gym: "12:00", nap: "15:00" }, "laptop's newer bus time kept, phone's own nap edit kept");
+});
+
+test("a phone coming back online with old unsynced edits doesn't undo newer edits made on the laptop", async () => {
+  const { event, laptop, phone, wait, cloud } = await calendarPair();
+  phone.goOffline();
+  await phone.storageApi.set(CAL, JSON.stringify([event("bus", "08:30"), event("gym", "12:00"), event("nap", "15:00")])).catch(() => {});
+  await wait();
+  await laptop.storageApi.set(CAL, JSON.stringify([event("bus", "09:00"), event("gym", "12:30"), event("nap", "14:00")]));
+  await settle();
+  phone.goOnline();
+  await settle(80);
+  assert.deepEqual(cloud(), { bus: "09:00", gym: "12:30", nap: "15:00" });
+  assert.deepEqual(Object.fromEntries(phone.local(CAL).map((e) => [e.id, e.start])), { bus: "09:00", gym: "12:30", nap: "15:00" });
+});
+
+test("when the phone's edit of an event is the newer one, the phone's version wins", async () => {
+  const { event, laptop, phone, wait, cloud } = await calendarPair();
+  laptop.goOffline();
+  await laptop.storageApi.set(CAL, JSON.stringify([event("bus", "09:00"), event("gym", "12:00"), event("nap", "14:00")])).catch(() => {});
+  await wait();
+  await phone.storageApi.set(CAL, JSON.stringify([event("bus", "08:30"), event("gym", "12:00"), event("nap", "14:00")]));
+  await settle();
+  laptop.goOnline();
+  await settle(80);
+  assert.deepEqual(cloud(), { bus: "08:30", gym: "12:00", nap: "14:00" });
+});
