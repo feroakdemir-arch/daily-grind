@@ -13,10 +13,11 @@ service cloud.firestore {
     // app (a tab or home-screen app left open since before Sep 24) that would overwrite the other
     // devices' edits and deletes; they are refused, and that copy shows "sync failed" until reloaded.
     // `client` is the version of the app's sync code (_SYNC_CLIENT in index.html). Raising it here locks out
-    // every copy of the app older than that; 5 = Sep 28 (a phone copy saved a day-old calendar over the new one).
+    // every copy of the app older than that; 5 = Sep 28 (a phone copy saved a day-old calendar over the new one),
+    // 6 = Sep 29 (the calendar merges one event at a time, with edit times and delete markers).
     function mergedSave() {
       return request.resource.data.writer is string && request.resource.data.rev is number
-        && request.resource.data.client is number && request.resource.data.client >= 5;
+        && request.resource.data.client is number && request.resource.data.client >= 6;
     }
 
     // The app never deletes a cloud document (deleting a habit, task or note rewrites the account

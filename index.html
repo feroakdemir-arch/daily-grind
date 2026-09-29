@@ -269,7 +269,8 @@
     const _MERGE_KEYS = new Set(["daily-grind-v13", "dg-cal-events"]);
     // Raise this (and the number in firestore.rules) whenever a sync fix must reach every device: the
     // cloud then refuses saves from app copies still running older code, so they can't overwrite anything.
-    const _SYNC_CLIENT = 5;
+    // 6 = Sep 29: the calendar merges one event at a time (see _mergeCalendar).
+    const _SYNC_CLIENT = 6;
     const _writerId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     const _memoryBase = {};
     function _docVersion(doc) {
@@ -410,30 +411,120 @@
         return null;
       }
     }
+    // ---- The calendar merges one event at a time ----
+    // Sep 29: an app copy holding a day-old calendar (a second tab, or the phone app waking up) saved it
+    // whole. It had seen the cloud's newest version number, so the save replaced the cloud copy: every
+    // edit since was undone and deleted events came back. Now each event carries the time it was last
+    // edited (`edited`), stamped only when a save really changes that event compared with what this tab
+    // had, and a delete leaves a marker (`removed`: id → time, in the cloud doc and on the device). For
+    // every event the cloud keeps the most recently edited version (a tie keeps the cloud's), and a delete
+    // marker beats any older version. A stale copy can only change the events someone edits in it.
+    const _CAL_KEY = "dg-cal-events";
+    const _REMOVED_KEY = _CAL_KEY + "_removed";
+    const _REMOVED_KEEP_MS = 400 * 86400000;
+    // The text of the calendar (and account) this tab's app last received or saved. Per tab, unlike
+    // localStorage, which every tab of the app shares.
+    const _tabCopy = {};
+    // A save that leaves out several events without naming them as deletes comes from a stale copy, not
+    // from an edit: no delete markers for those. Deletes and restores say what they remove (true = restore).
+    const _BULK_REMOVAL = 3;
+    let _lastStamp = 0;
+    function _nextStamp() { _lastStamp = Math.max(Date.now(), _lastStamp + 1); return _lastStamp; }
+    function _eventStamp(event) { return (event && Number(event.edited)) || 0; }
+    function _eventBody(event) {
+      if (!_isPlainObject(event)) return event;
+      const { edited, ...rest } = event;
+      return rest;
+    }
+    function _cleanRemoved(removed) {
+      const out = {}, now = Date.now();
+      if (_isPlainObject(removed)) Object.entries(removed).forEach(([id, at]) => {
+        at = Number(at);
+        if (id && Number.isFinite(at) && at > 0 && now - at < _REMOVED_KEEP_MS) out[id] = at;
+      });
+      return out;
+    }
+    function _unionRemoved(a, b) {
+      const out = _cleanRemoved(a);
+      Object.entries(_cleanRemoved(b)).forEach(([id, at]) => { if (!(out[id] >= at)) out[id] = at; });
+      return out;
+    }
+    function _readRemoved() {
+      try { return _cleanRemoved(JSON.parse(localStorage.getItem(_REMOVED_KEY) || "{}")); } catch (e) { return {}; }
+    }
+    function _keepRemoved(removed) {
+      if (!_isPlainObject(removed) || !Object.keys(removed).length) return;
+      try { localStorage.setItem(_REMOVED_KEY, JSON.stringify(_unionRemoved(_readRemoved(), removed))); } catch (e) {}
+    }
+    // Stamps the events this save changed (compared with this tab's copy) and marks the ones it deleted.
+    function _stampCalendarSave(value, removing) {
+      let next, prev = [];
+      try { next = JSON.parse(value); } catch (e) { return value; }
+      if (!Array.isArray(next)) return value;
+      let prevText = _tabCopy[_CAL_KEY];
+      if (typeof prevText !== "string") { try { prevText = localStorage.getItem(_CAL_KEY); } catch (e) { prevText = null; } }
+      try { prev = prevText ? JSON.parse(prevText) : []; } catch (e) { prev = []; }
+      if (!Array.isArray(prev)) prev = [];
+      // The app tidies every event it loads (default colour, empty description, "09:00" times), so compare
+      // the tidied form: an event only counts as edited when the user changed it.
+      if (typeof window.parseCalendarData === "function") {
+        try { prev = window.parseCalendarData(prev); } catch (e) {}
+      }
+      const now = _nextStamp(), restore = removing === true;
+      const before = new Map();
+      prev.forEach((event) => { if (_isPlainObject(event) && event.id && !before.has(event.id)) before.set(event.id, event); });
+      const stamped = next.map((event) => {
+        if (!_isPlainObject(event)) return event;
+        const old = before.get(event.id);
+        if (restore || !old || !_sameJson(_eventBody(old), _eventBody(event))) return { ...event, edited: now };
+        const stamp = Math.max(_eventStamp(old), _eventStamp(event));
+        return stamp ? { ...event, edited: stamp } : _eventBody(event);
+      });
+      const kept = new Set(stamped.map((event) => event && event.id));
+      const named = new Set(Array.isArray(removing) ? removing : []);
+      const gone = [...before.keys()].filter((id) => !kept.has(id));
+      const unnamed = gone.filter((id) => !restore && !named.has(id));
+      const deleted = gone.filter((id) => restore || named.has(id) || unnamed.length < _BULK_REMOVAL);
+      if (unnamed.length >= _BULK_REMOVAL) console.warn(`A calendar save left out ${unnamed.length} events nobody deleted; they were kept.`);
+      if (deleted.length) _keepRemoved(Object.fromEntries(deleted.map((id) => [id, now])));
+      return JSON.stringify(stamped);
+    }
+    // local: this device's calendar (or the one being saved); remote: the cloud's. dropUnstamped: the cloud
+    // already stamps its events, so an unstamped event only the local side has is one the cloud deleted
+    // before delete markers existed (a device still holding an old copy), never a new one.
+    function _mergeCalendar(localValue, localRemoved, remoteValue, remoteRemoved, dropUnstamped) {
+      let local, remote;
+      try { local = JSON.parse(localValue); remote = JSON.parse(remoteValue); } catch (e) { return null; }
+      if (!Array.isArray(local) || !Array.isArray(remote)) return null;
+      const removed = _unionRemoved(localRemoved, remoteRemoved);
+      const byId = (list) => {
+        const map = new Map();
+        list.forEach((event) => { if (_isPlainObject(event) && event.id && !map.has(event.id)) map.set(event.id, event); });
+        return map;
+      };
+      const L = byId(local), R = byId(remote);
+      const pick = (id) => {
+        const l = L.get(id), r = R.get(id);
+        if (!r && dropUnstamped && !_eventStamp(l)) return null;
+        const event = l && r ? (_eventStamp(l) > _eventStamp(r) ? l : r) : (l || r);
+        if (removed[id] && removed[id] >= _eventStamp(event)) return null;
+        return event;
+      };
+      const out = [];
+      R.forEach((_, id) => { const event = pick(id); if (event) out.push(event); });
+      L.forEach((_, id) => { if (!R.has(id)) { const event = pick(id); if (event) out.push(event); } });
+      return { value: JSON.stringify(out), removed };
+    }
+    function _sameCalendar(a, b) {
+      try { return _sameJson(JSON.parse(a), JSON.parse(b)); } catch (e) { return false; }
+    }
     // Compare-and-merge upload: read the cloud copy and write in one transaction, so another device's save
     // can never be overwritten unseen.
-    // A save that drops several of the cloud's events the user never deleted comes from a stale copy of
-    // the calendar (an old app copy, a device that missed the latest version), not from an edit: those
-    // events are kept. Deletes and restores say which events they remove (or `true` for a restore).
-    const _BULK_REMOVAL = 3;
-    function _keepUnexpectedRemovals(serverValue, value, removing) {
-      if (removing === true) return null;
-      try {
-        const server = JSON.parse(serverValue), next = JSON.parse(value);
-        if (!Array.isArray(server) || !Array.isArray(next)) return null;
-        const allowed = new Set(Array.isArray(removing) ? removing : []);
-        const kept = new Set(next.map((event) => event && event.id));
-        const lost = server.filter((event) => event && event.id && !kept.has(event.id) && !allowed.has(event.id));
-        if (lost.length < _BULK_REMOVAL) return null;
-        console.warn(`A calendar save would have removed ${lost.length} events nobody deleted; they were kept.`);
-        return JSON.stringify([...next, ...lost]);
-      } catch (e) { return null; }
-    }
     // When a cloud copy's content was last edited (older copies only have their upload time).
     function _editedAt(doc) { return Number(doc && (doc.editedAt || doc.localTs)) || 0; }
     function _mergingWrite(key, ref) {
       return (payload) => {
-        const { base, removing, editedAt, ...doc } = payload;
+        const { base, removing, editedAt, removed: sentRemoved, ...doc } = payload;
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
           return Promise.reject(new Error("You're offline. Your change is saved on this device and will upload when you reconnect."));
         }
@@ -442,8 +533,18 @@
           const server = snap.exists ? snap.data() : null;
           let value = doc.value;
           const serverValid = server && typeof server.value === "string" && _validStorageValue(key, server.value);
+          const extra = {};
+          if (key === _CAL_KEY) {
+            // Always merged event by event, whatever version this save was built on.
+            extra.removed = _unionRemoved(sentRemoved, serverValid ? server.removed : null);
+            extra.stampedSince = (server && Number(server.stampedSince)) || Date.now();
+            if (serverValid && server.value !== value) {
+              const merged = _mergeCalendar(value, sentRemoved, server.value, server.removed, !!server.stampedSince);
+              if (merged) { value = merged.value; extra.removed = merged.removed; }
+            }
+          }
           // Replace the cloud copy only when it is exactly the version this change was built on.
-          if (serverValid && server.value !== value && (!base || base.version !== _docVersion(server))) {
+          else if (serverValid && server.value !== value && (!base || base.version !== _docVersion(server))) {
             // Never merge with an empty starter that replaced real data; that is what healing is for.
             const starterOverReal = key === "daily-grind-v13" && (() => {
               const rc = _mainRichness(server.value), rl = _mainRichness(value);
@@ -454,11 +555,7 @@
               if (merged !== null) value = merged;
             }
           }
-          if (key === "dg-cal-events" && serverValid) {
-            const guarded = _keepUnexpectedRemovals(server.value, value, removing);
-            if (guarded !== null) value = guarded;
-          }
-          const written = { ...doc, value, rev: ((server && Number(server.rev)) || 0) + 1, editedAt: Math.max(Number(editedAt || doc.localTs) || 0, server ? _editedAt(server) : 0) };
+          const written = { ...doc, ...extra, value, rev: ((server && Number(server.rev)) || 0) + 1, editedAt: Math.max(Number(editedAt || doc.localTs) || 0, server ? _editedAt(server) : 0) };
           tx.set(ref, written);
           return { doc: written, sent: doc.value };
         });
@@ -473,6 +570,7 @@
     function _afterCommit(key, result) {
       if (!result || !result.doc || typeof result.doc.value !== "string") return;
       const { doc, sent } = result;
+      if (key === _CAL_KEY) _keepRemoved(doc.removed);
       const version = _docVersion(doc);
       if (doc.value === sent) { _setBase(key, doc.value, version); return; }
       let local = null;
@@ -491,6 +589,7 @@
       payload.client = _SYNC_CLIENT;
       payload.base = _getBase(key);
       if (options && options.removing) payload.removing = options.removing;
+      if (key === _CAL_KEY) payload.removed = _readRemoved();
       payload.editedAt = (options && options.editedAt) || localTs;
       return _queueCloudWrite(key, ref, payload, _mergingWrite(key, ref)).then((result) => { _afterCommit(key, result); return result; });
     }
@@ -1044,12 +1143,21 @@
       if (d.writer && d.writer === _writerId) return; // this tab's own upload; handled when it was confirmed
       const version = _docVersion(d);
       const base = _getBase(key);
-      if (base && base.version === version) return;
-      // An older version arriving late must not replace a newer one this device already has.
-      if (base && Number(d.rev) > 0 && _versionRev(base.version) > Number(d.rev)) return;
       let local = null;
       try { local = localStorage.getItem(key); } catch (e) {}
-      if (local === d.value) { _setBase(key, d.value, version); return; }
+      if (key === _CAL_KEY) _keepRemoved(d.removed);
+      // Another tab of the app in this browser already took this version (tabs share device storage),
+      // but this tab may not have: a tab that was asleep missed its message. Show it here too, or this
+      // tab's next save would start from the calendar it had before it slept (Sep 29).
+      const catchUp = () => {
+        if (local === d.value && typeof _tabCopy[key] === "string" && _tabCopy[key] !== d.value) {
+          try { callback(d.value); } catch (error) { console.warn(error); }
+        }
+      };
+      if (base && base.version === version) { catchUp(); return; }
+      // An older version arriving late must not replace a newer one this device already has.
+      if (base && Number(d.rev) > 0 && _versionRev(base.version) > Number(d.rev)) return;
+      if (local === d.value) { _setBase(key, d.value, version); catchUp(); return; }
       const localTs = parseInt(localStorage.getItem(key + "_ts") || "0");
       if (key === "daily-grind-v13" && local !== null) {
         // Same safety as get(): a live-sync update carrying the empty starter never clobbers real data.
@@ -1058,7 +1166,13 @@
       }
       const localValid = local !== null && _validStorageValue(key, local);
       let next = d.value;
-      if (localValid && base && local !== base.value) {
+      if (key === _CAL_KEY) {
+        // Event by event: this device's newer edits (and deletes) stay, everything else follows the cloud.
+        if (localValid) {
+          const merged = _mergeCalendar(local, _readRemoved(), d.value, d.removed, !!d.stampedSince);
+          if (merged && !_sameCalendar(merged.value, d.value)) next = merged.value;
+        }
+      } else if (localValid && base && local !== base.value) {
         next = _mergeValues(key, base.value, local, d.value, parseInt(localStorage.getItem(key + "_edited") || "0") || localTs, _editedAt(d));
         if (next === null) next = (Number(d.localTs) || 0) > localTs ? d.value : local;
       } else if (localValid && !base && !((Number(d.localTs) || 0) > localTs)) {
@@ -1072,8 +1186,9 @@
         localStorage.setItem("dg-owner", _identity());
         _announceStorageWrite(key, next, ts);
       } else {
-        // set() stores it here at once (before its first await) and uploads the merged result.
-        window.storage.set(key, next).catch((error) => console.warn("Merged edits are waiting to upload:", error));
+        // set() stores it here at once (before its first await) and uploads the merged result. It is a
+        // merge, not an edit made in this tab: nothing gets a new edit time.
+        window.storage.set(key, next, { merged: true }).catch((error) => console.warn("Merged edits are waiting to upload:", error));
       }
       try { callback(next); } catch (error) { console.warn(error); }
     }
@@ -1202,11 +1317,22 @@
                 const base = _MERGE_KEYS.has(key) ? _getBase(key) : null;
                 const localValid = !!localData && _validStorageValue(key, localData.value);
                 if (localData && !localValid) console.warn("Invalid local data was ignored for", key);
-                const unsynced = localValid && localData.value !== fbValue && (base ? localData.value !== base.value : localTs > fbTs);
+                // The calendar merges event by event instead: only events this device edited later than
+                // the cloud (or deleted) differ from the cloud's copy; anything else is just an older copy.
+                let calendarMerge = null;
+                if (key === _CAL_KEY) {
+                  _keepRemoved(fbData.removed);
+                  if (localValid && localData.value !== fbValue) {
+                    const merged = _mergeCalendar(localData.value, _readRemoved(), fbValue, fbData.removed, !!fbData.stampedSince);
+                    if (merged && !_sameCalendar(merged.value, fbValue)) calendarMerge = merged.value;
+                  }
+                }
+                const unsynced = key === _CAL_KEY ? calendarMerge !== null
+                  : localValid && localData.value !== fbValue && (base ? localData.value !== base.value : localTs > fbTs);
                 if (unsynced) {
-                  let value = localData.value;
+                  let value = calendarMerge !== null ? calendarMerge : localData.value;
                   const editedLocal = parseInt(localStorage.getItem(key + "_edited") || "0") || localTs;
-                  if (base && base.version !== _docVersion(fbData)) value = _mergeValues(key, base.value, localData.value, fbValue, editedLocal, _editedAt(fbData)) || localData.value;
+                  if (calendarMerge === null && base && base.version !== _docVersion(fbData)) value = _mergeValues(key, base.value, localData.value, fbValue, editedLocal, _editedAt(fbData)) || localData.value;
                   const pushTs = Math.max(localTs, fbTs, Date.now()) + 1;
                   _storeLocal(key, value, pushTs);
                   localStorage.setItem("dg-owner", _identity());
@@ -1257,12 +1383,22 @@
           _emitStorageStatus("error", key, invalid);
           throw invalid;
         }
-        let editedAt = 0;
+        let editedAt = 0, resend = false;
         try {
           // Uploading again what this device already holds (a retry after being offline) is not a new
           // edit: it keeps the time it was really made, so newer edits from other devices still win.
-          if (localStorage.getItem(key) === value) editedAt = parseInt(localStorage.getItem(key + "_edited") || localStorage.getItem(key + "_ts") || "0") || 0;
+          if (localStorage.getItem(key) === value) {
+            resend = true;
+            editedAt = parseInt(localStorage.getItem(key + "_edited") || localStorage.getItem(key + "_ts") || "0") || 0;
+          }
         } catch (e) {}
+        // A save from this tab's app: the calendar events it changed get this moment as their edit time.
+        // Re-sends and merges are not edits (and may hold another tab's changes), so they keep their times
+        // and leave this tab's copy alone.
+        if (!resend && !(options && options.merged)) {
+          if (key === _CAL_KEY) value = _stampCalendarSave(value, options && options.removing);
+          _tabCopy[key] = value;
+        }
         ts = _nextLocalTs(key);
         if (!editedAt) editedAt = ts;
         try {
@@ -1329,9 +1465,11 @@
         return !window.storage.hasUnsyncedChanges();
       },
       // Subscribe to real-time cloud updates for a key
-      subscribe(key, callback) {
+      subscribe(key, onValue) {
         let unsub = () => {};
         let cancelled = false;
+        // Everything handed to this tab's app is what its next save is compared against.
+        const callback = (value) => { if (typeof value === "string") _tabCopy[key] = value; return onValue(value); };
         const applyExternalWrite = (value, localTs, identity) => {
           if (cancelled || (identity && identity !== _identity()) || !_validStorageValue(key, value)) return;
           const knownTs = (window._lastLocalTs && window._lastLocalTs[key]) || 0;
@@ -1350,6 +1488,15 @@
           const value = localStorage.getItem(key);
           if (value !== null) applyExternalWrite(value, Number(event.newValue), localStorage.getItem("dg-owner"));
         };
+        // A tab that slept (phone app in the background, hidden tab) can miss the other tabs' messages:
+        // when it comes back, take anything newer that they stored meanwhile.
+        const onVisible = () => {
+          if (document.visibilityState !== "visible" || (_pendingStorageWrites[key] || 0) > 0) return;
+          let value = null;
+          try { value = localStorage.getItem(key); } catch (e) {}
+          if (value !== null && value !== _tabCopy[key]) applyExternalWrite(value, Number(localStorage.getItem(key + "_ts")), localStorage.getItem("dg-owner"));
+        };
+        document.addEventListener("visibilitychange", onVisible);
         if (_storageBroadcast) _storageBroadcast.addEventListener("message", onBroadcast);
         window.addEventListener("storage", onStorage);
         const onLocalMerge = (value) => { if (!cancelled) callback(value); };
@@ -1392,10 +1539,20 @@
           if (_localSubscribers[key]) _localSubscribers[key].delete(onLocalMerge);
           if (_storageBroadcast) _storageBroadcast.removeEventListener("message", onBroadcast);
           window.removeEventListener("storage", onStorage);
+          if (document.removeEventListener) document.removeEventListener("visibilitychange", onVisible);
           try { unsub(); } catch(e) {}
         };
       }
     };
+    // What a load hands to this tab's app is what its next save is compared against (see _tabCopy).
+    (function rememberLoads() {
+      const load = window.storage.get;
+      window.storage.get = async (key) => {
+        const result = await load(key);
+        if (result && typeof result.value === "string") _tabCopy[key] = result.value;
+        return result;
+      };
+    })();
   </script>
   <script src="calendar-reminders.js"></script>
   <script src="note-images.js"></script>
@@ -5352,7 +5509,7 @@ function DailyGrind() {
   }
 
   // Calendar helpers
-  // options.removing: the ids of events the user deleted (or true for a restore); see _keepUnexpectedRemovals.
+  // options.removing: the ids of events the user deleted (or true for a restore); see _stampCalendarSave.
   function saveCalEvents(nextOrUpdater, options) {
     if (calLoadError) return Promise.resolve(null);
     if (!calEventsLoaded) {

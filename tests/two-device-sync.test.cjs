@@ -365,7 +365,7 @@ test("a stale calendar copy saved over a newer one can't drop events nobody dele
   await settle();
   const cloud = JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value);
   assert.deepEqual(cloud.map((e) => e.id).sort(), ["e1", "e2", "p1", "r1", "r2", "r3", "r4"]);
-  assert.equal(server.docs.get(`users/u1/data/${CAL}`).client, 5, "saves say which sync code made them (the rules require it)");
+  assert.equal(server.docs.get(`users/u1/data/${CAL}`).client, 6, "saves say which sync code made them (the rules require it)");
   // The phone shows the kept events too.
   assert.deepEqual(phone.local(CAL).map((e) => e.id).sort(), ["e1", "e2", "p1", "r1", "r2", "r3", "r4"]);
 });
@@ -444,4 +444,99 @@ test("when the phone's edit of an event is the newer one, the phone's version wi
   laptop.goOnline();
   await settle(80);
   assert.deepEqual(cloud(), { bus: "08:30", gym: "12:00", nap: "14:00" });
+});
+
+// Sep 29: an app copy holding an old calendar (a second tab of the app, or the phone app waking up) saved
+// it whole; it had seen the cloud's newest version, so the save replaced the cloud copy: every edit made
+// since was undone and deleted events came back. The calendar now merges one event at a time.
+async function calOpen(dev) {
+  const loaded = await dev.storageApi.get(CAL);
+  dev.cal = loaded && loaded.value;
+  dev.storageApi.subscribe(CAL, (value) => { dev.cal = value; });
+}
+// What the app does: change its in-memory calendar, then save it whole.
+const calEdit = (dev, change, options) => {
+  dev.cal = JSON.stringify(change(JSON.parse(dev.cal)));
+  return dev.storageApi.set(CAL, dev.cal, options);
+};
+const ev = (id, start, extra) => ({ id, title: id, date: "2026-09-29", start, end: "23:00", ...extra });
+const cloudCal = (server) => Object.fromEntries(JSON.parse(server.docs.get(`users/u1/data/${CAL}`).value).map((e) => [e.id, e.start]));
+function seededCalendar() {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${CAL}`, { value: JSON.stringify([ev("bus", "08:00"), ev("gym", "12:00"), ev("nap", "14:00"), ev("cad", "16:30")]), localTs: 1000, rev: 1, writer: "x" });
+  return server;
+}
+
+test("a second tab that slept through the other tab's edits can't undo them (Sep 29)", async () => {
+  const server = seededCalendar();
+  const tabA = device(server);
+  const shared = device(server, { storage: tabA.storage }); // same browser: one device storage, two copies of the app
+  await calOpen(tabA); await calOpen(shared); await settle();
+  shared.goOffline(); // asleep in the background
+  await calEdit(tabA, (list) => list.map((e) => e.id === "gym" ? { ...e, start: "12:45" } : e).filter((e) => e.id !== "cad").concat([ev("fest", "07:30")]), { removing: ["cad"] });
+  await settle();
+  shared.goOnline(); await settle(60); // wakes up
+  await calEdit(shared, (list) => list.map((e) => e.id === "nap" ? { ...e, start: "15:00" } : e));
+  await settle(60);
+  assert.deepEqual(cloudCal(server), { bus: "08:00", gym: "12:45", nap: "15:00", fest: "07:30" });
+});
+
+test("even an app copy that missed every update only changes the events edited in it", async () => {
+  const server = seededCalendar();
+  const laptop = device(server), phone = device(server);
+  await calOpen(laptop); await settle();
+  // The phone app loaded the calendar, then heard nothing more (asleep, or its updates never arrived).
+  const loaded = await phone.storageApi.get(CAL);
+  phone.cal = loaded.value;
+  await calEdit(laptop, (list) => list.map((e) => e.id === "gym" ? { ...e, start: "12:45" } : e).filter((e) => e.id !== "cad").concat([ev("fest", "07:30")]), { removing: ["cad"] });
+  await settle();
+  await calEdit(phone, (list) => list.map((e) => e.id === "nap" ? { ...e, start: "15:00" } : e));
+  await settle(60);
+  assert.deepEqual(cloudCal(server), { bus: "08:00", gym: "12:45", nap: "15:00", fest: "07:30" });
+  // Retry (the "sync failed → retry" button re-sends the app's whole calendar): still nothing undone.
+  await phone.storageApi.set(CAL, phone.cal);
+  await settle(60);
+  assert.deepEqual(cloudCal(server), { bus: "08:00", gym: "12:45", nap: "15:00", fest: "07:30" });
+});
+
+test("a device holding a days-old copy doesn't bring back events deleted before delete markers existed", async () => {
+  const server = seededCalendar();
+  const laptop = device(server);
+  await calOpen(laptop); await settle();
+  // Last week's copy on the phone, with events the laptop (old app) has deleted since.
+  const phoneStorage = new Map([[CAL, JSON.stringify([ev("bus", "07:00"), ev("gym", "12:00"), ev("nap", "14:00"), ev("cad", "16:30"), ev("old1", "10:00"), ev("old2", "11:00")])], [CAL + "_ts", String(Date.now() + 60000)]]);
+  await calEdit(laptop, (list) => list.map((e) => e.id === "bus" ? { ...e, start: "08:15" } : e));
+  await settle();
+  const phone = device(server, { storage: phoneStorage });
+  await calOpen(phone); await settle(60);
+  assert.deepEqual(cloudCal(server), { bus: "08:15", gym: "12:00", nap: "14:00", cad: "16:30" });
+  assert.deepEqual(Object.keys(Object.fromEntries(JSON.parse(phone.cal).map((e) => [e.id, 1]))).sort(), ["bus", "cad", "gym", "nap"]);
+});
+
+test("a delete made offline stays deleted, and a later edit on the other device survives it", async () => {
+  const server = seededCalendar();
+  const laptop = device(server), phone = device(server);
+  await calOpen(laptop); await calOpen(phone); await settle();
+  phone.goOffline();
+  await calEdit(phone, (list) => list.filter((e) => e.id !== "nap"), { removing: ["nap"] }).catch(() => {});
+  await calEdit(laptop, (list) => list.map((e) => e.id === "bus" ? { ...e, start: "09:00" } : e));
+  await settle();
+  phone.goOnline(); await settle(80);
+  assert.deepEqual(cloudCal(server), { bus: "09:00", gym: "12:00", cad: "16:30" });
+  // The laptop, still holding nap, edits something else: nap stays deleted.
+  await calEdit(laptop, (list) => list.map((e) => e.id === "gym" ? { ...e, start: "13:00" } : e));
+  await settle(60);
+  assert.deepEqual(cloudCal(server), { bus: "09:00", gym: "13:00", cad: "16:30" });
+});
+
+test("an event deleted on one device but edited later on the other comes back with the edit", async () => {
+  const server = seededCalendar();
+  const laptop = device(server), phone = device(server);
+  await calOpen(laptop); await calOpen(phone); await settle();
+  phone.goOffline();
+  await calEdit(laptop, (list) => list.filter((e) => e.id !== "cad"), { removing: ["cad"] });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await calEdit(phone, (list) => list.map((e) => e.id === "cad" ? { ...e, start: "17:00" } : e)).catch(() => {});
+  phone.goOnline(); await settle(80);
+  assert.equal(cloudCal(server).cad, "17:00");
 });
