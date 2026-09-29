@@ -1555,6 +1555,7 @@
     })();
   </script>
   <script src="calendar-reminders.js"></script>
+  <script src="timer-notify.js"></script>
   <script src="note-images.js"></script>
   <script src="note-pdf.js"></script>
   <script src="note-markdown.js"></script>
@@ -1637,8 +1638,23 @@ function parseMainData(raw) {
       name: typeof item.name === "string" ? item.name : "Untitled habit",
       points: Math.max(1, finiteNumber(item.points, 10)),
       desc: typeof item.desc === "string" ? item.desc : "",
-    })),
+    })).map((habit) => {
+      // A running habit timer needs both its start time and the day it counts toward.
+      if (finiteNumber(habit.timerStartedAt, 0) > 0 && optionalDate(habit.timerDate)) return habit;
+      const { timerStartedAt, timerDate, ...stopped } = habit;
+      return stopped;
+    }),
   }));
+  const habitTime = objectOnly(parsed.habitTime) ? Object.entries(parsed.habitTime).reduce((days, [date, values]) => {
+    if (!optionalDate(date) || !objectOnly(values)) return days;
+    const seconds = Object.entries(values).reduce((entries, [habitId, value]) => {
+      const amount = finiteNumber(value, 0);
+      if (amount > 0) entries[habitId] = Math.floor(amount);
+      return entries;
+    }, {});
+    if (Object.keys(seconds).length) days[date] = seconds;
+    return days;
+  }, {}) : {};
   const taskLists = parsed.taskLists.filter(objectOnly).map((list, listIndex) => ({
     ...list,
     id: typeof list.id === "string" && list.id ? list.id : `tasklist_legacy_${listIndex}`,
@@ -1724,6 +1740,7 @@ function parseMainData(raw) {
     lastCompletedDate: optionalDate(parsed.lastCompletedDate) || null,
     lastTaskResetDate: optionalDate(parsed.lastTaskResetDate),
     log,
+    habitTime,
     history,
     storeItems,
     storePurchases,
@@ -2401,6 +2418,72 @@ function stopTaskTimer(task, now = Date.now()) {
   return stopped;
 }
 
+// Habit timers work like task timers, but the time belongs to a day: data.habitTime[date][habitId] holds
+// the seconds tracked that day, and a running timer sits on the habit (timerStartedAt, plus timerDate =
+// the day it counts toward, so a timer running past midnight still counts for the day it started).
+function habitElapsedSeconds(data, habit, date, now = Date.now()) {
+  const saved = Math.max(0, Number(data?.habitTime?.[date]?.[habit.id]) || 0);
+  const startedAt = Number(habit.timerStartedAt);
+  if (!Number.isFinite(startedAt) || startedAt <= 0 || habit.timerDate !== date) return saved;
+  return saved + Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
+// Stops the running timers (tasks and habits) that shouldStop(kind, item) picks, saving their time.
+function stopTimers(data, now = Date.now(), shouldStop = () => true) {
+  let habitTime = data.habitTime || {}, habitsChanged = false, tasksChanged = false;
+  const habitSections = data.habitSections.map((section) => {
+    let changed = false;
+    const items = section.items.map((habit) => {
+      if (!habit.timerStartedAt || !shouldStop("habit", habit)) return habit;
+      const { timerStartedAt, timerDate, ...stopped } = habit;
+      const seconds = Math.max(0, Math.floor((now - Number(timerStartedAt)) / 1000));
+      if (timerDate && seconds > 0) {
+        const day = habitTime[timerDate] || {};
+        habitTime = { ...habitTime, [timerDate]: { ...day, [habit.id]: (Math.max(0, Number(day[habit.id]) || 0)) + seconds } };
+      }
+      changed = true;
+      return stopped;
+    });
+    if (!changed) return section;
+    habitsChanged = true;
+    return { ...section, items };
+  });
+  const taskLists = data.taskLists.map((list) => {
+    let changed = false;
+    const items = list.items.map((task) => {
+      if (!task.timerStartedAt || !shouldStop("task", task)) return task;
+      changed = true;
+      return stopTaskTimer(task, now);
+    });
+    if (!changed) return list;
+    tasksChanged = true;
+    return { ...list, items };
+  });
+  if (!habitsChanged && !tasksChanged) return data;
+  return { ...data, ...(habitsChanged ? { habitSections, habitTime } : {}), ...(tasksChanged ? { taskLists } : {}) };
+}
+
+// The account as this device last stored it (only its habits and tasks are read), for choosing the first
+// page when the app is opened from the timer notification.
+function readStartupMainData() {
+  try { const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); return parsed && typeof parsed === "object" ? parsed : null; }
+  catch (e) { return null; }
+}
+
+// The timer that is running (the most recently started one, if two devices each started one).
+function findRunningTimer(data) {
+  let running = null;
+  const consider = (kind, item) => {
+    const startedAt = Number(item.timerStartedAt);
+    if (!Number.isFinite(startedAt) || startedAt <= 0 || (running && running.startedAt >= startedAt)) return;
+    running = { kind, id: item.id, name: item.name || (kind === "habit" ? "Habit" : "Task"), startedAt };
+  };
+  const each = (list, fn) => (Array.isArray(list) ? list : []).forEach((entry) => { if (entry && typeof entry === "object") fn(entry); });
+  each(data?.taskLists, (list) => each(list.items, (task) => { if (!task.done) consider("task", task); }));
+  each(data?.habitSections, (section) => each(section.items, (habit) => consider("habit", habit)));
+  return running;
+}
+
 function fmtTaskDuration(seconds) {
   const total = Math.max(0, Math.floor(Number(seconds) || 0));
   const hours = Math.floor(total / 3600);
@@ -2508,7 +2591,17 @@ function TodaysFinishedTasks({ taskLists, resetHour }) {
 }
 
 function TaskWorkTimer({ task, onToggle }) {
-  const startedAt = Number(task.timerStartedAt);
+  return <WorkTimerPill name={task.name} startedAt={task.timerStartedAt} elapsedAt={(now) => taskElapsedSeconds(task, now)} onToggle={onToggle} />;
+}
+
+// A habit's timer shows the time tracked today (or, while running, for the day it counts toward).
+function HabitWorkTimer({ habit, data, today, onToggle }) {
+  const date = habit.timerStartedAt ? habit.timerDate || today : today;
+  return <WorkTimerPill name={habit.name} startedAt={habit.timerStartedAt} elapsedAt={(now) => habitElapsedSeconds(data, habit, date, now)} onToggle={onToggle} />;
+}
+
+function WorkTimerPill({ name, startedAt: startedAtValue, elapsedAt, onToggle }) {
+  const startedAt = Number(startedAtValue);
   const running = Number.isFinite(startedAt) && startedAt > 0;
   const [now, setNow] = useState(Date.now());
 
@@ -2519,13 +2612,13 @@ function TaskWorkTimer({ task, onToggle }) {
     return () => clearInterval(interval);
   }, [running, startedAt]);
 
-  const elapsed = taskElapsedSeconds(task, now);
+  const elapsed = elapsedAt(now);
   return (
     <div style={{ display: "flex", alignItems: "center", marginTop: 5, minHeight: 22 }}>
       {/* One quiet control: play/stop plus the tracked time; it only lights up while running. */}
       <button
         onClick={onToggle}
-        aria-label={`${running ? "Stop" : "Start"} timer for ${task.name}`}
+        aria-label={`${running ? "Stop" : "Start"} timer for ${name}`}
         aria-pressed={running}
         title={running ? "Stop tracking time" : "Start tracking time"}
         style={{
@@ -3579,7 +3672,7 @@ function startHabitPointerDrag(event, options) {
   return session.cancel;
 }
 
-function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, habitDragSessionRef, setHabitDrag, reorderHabit, openEditHabit }) {
+function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, habitDragSessionRef, setHabitDrag, reorderHabit, openEditHabit, toggleHabitTimer }) {
   const streak = getStreak(item.id, data.log, today);
   const overall = getOverall(item.id, data.log);
   const todayNote = tl[item.id + "_note"] || "";
@@ -3601,7 +3694,9 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
 
   function pickStatus(st, dateOverride) {
     const targetDate = dateOverride || pickerDate;
-    save((current) => {
+    save((before) => {
+      // Checking a habit off stops its timer, like finishing a task.
+      const current = st === "done" ? stopTimers(before, Date.now(), (kind, habit) => kind === "habit" && habit.id === item.id) : before;
       const dtl = current.log[targetDate] || {};
       const ntl = { ...dtl };
       if (st === undefined) { delete ntl[item.id]; }
@@ -3670,6 +3765,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
               {showMonthly ? "Hide month \u25B4" : "Month \u25BE"}
             </button>
           </div>
+          {toggleHabitTimer && <HabitWorkTimer habit={item} data={data} today={today} onToggle={() => toggleHabitTimer(item.id)} />}
         </div>
         {item.desc && <button onClick={() => setShowDesc(!showDesc)} style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 18, cursor: "pointer", padding: "4px 2px 4px 8px", marginTop: 2, transition: "transform 0.2s", transform: showDesc ? "rotate(180deg)" : "rotate(0deg)" }}>{"▾"}</button>}
       </div>
@@ -3847,7 +3943,8 @@ function DailyGrind() {
   const taskLedgerRef = useRef([]);
   const backupFileRef = useRef(null);
   const initialVaultRef = useRef(false);
-  const [page, setPage] = useState(() => new URLSearchParams(location.search).has("calendar") ? "calendar" : "habits");
+  const [page, setPage] = useState(() => new URLSearchParams(location.search).has("calendar") ? "calendar"
+    : new URLSearchParams(location.search).has("timer") ? (findRunningTimer(readStartupMainData())?.kind === "task" ? "tasks" : "habits") : "habits");
   const [view, setView] = useState("main");
   const [editItem, setEditItem] = useState(null);
   const [editSection, setEditSection] = useState(null);
@@ -4083,6 +4180,12 @@ function DailyGrind() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const openCalendar = event => {
+      if (event.data?.type === "OPEN_TIMER") {
+        // The running-timer notification: open the page that has the timer.
+        const running = findRunningTimer(dataRef.current);
+        setPage(running && running.kind === "task" ? "tasks" : "habits");
+        return;
+      }
       if (event.data?.type !== "OPEN_CALENDAR") return;
       setPage("calendar");
       setCalWeekOffset(reminderWeekOffset(event.data.date));
@@ -4090,6 +4193,11 @@ function DailyGrind() {
     navigator.serviceWorker.addEventListener("message", openCalendar);
     return () => navigator.serviceWorker.removeEventListener("message", openCalendar);
   }, []);
+  // The running timer as a lock-screen notification (timer-notify.js): posted when a timer starts, removed
+  // when it stops, on this device or another.
+  const runningTimer = data ? findRunningTimer(data) : null;
+  const runningTimerKey = runningTimer ? `${runningTimer.kind}:${runningTimer.id}:${runningTimer.startedAt}:${runningTimer.name}` : "";
+  useEffect(() => { if (data) window.timerNotify?.sync(runningTimer); }, [runningTimerKey, !!data]);
   useEffect(() => window.storage.onStatus ? window.storage.onStatus(setSaveInfo) : undefined, []);
   useEffect(() => window.dataVault?.onStatus ? window.dataVault.onStatus(setVaultInfo) : undefined, []);
 
@@ -4547,17 +4655,21 @@ function DailyGrind() {
   }
   function saveHabitEdit() {
     if (!editItem || !formName.trim()) return;
-    const u = { ...editItem, name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    const u = { name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
     save((current) => ({
       ...current,
-      habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? u : i) })),
+      // Only the edited fields: a timer started or stopped while the editor was open stays as it is.
+      habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? { ...i, ...u } : i) })),
       log: { ...current.log, [today]: { ...(current.log[today] || {}), [editItem.id + "_note"]: formComment.trim() } },
     }));
     setView("main"); setEditItem(null); setFormDesc(""); setFormComment("");
   }
   function moveHabitTo(tgt) {
     if (!editItem) return;
-    save((current) => ({ ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), editItem] : s.items.filter((i) => i.id !== editItem.id) })) }));
+    save((current) => {
+      const moving = current.habitSections.flatMap((s) => s.items).find((i) => i.id === editItem.id) || editItem;
+      return { ...current, habitSections: current.habitSections.map((s) => ({ ...s, items: s.id === tgt ? [...s.items.filter((i) => i.id !== editItem.id), moving] : s.items.filter((i) => i.id !== editItem.id) })) };
+    });
     setEditSection(tgt);
   }
   function reorderHabit(secId, habitId, targetId, after) {
@@ -4587,21 +4699,33 @@ function DailyGrind() {
       }) } : l) };
     });
   }, [save]);
+  // One timer runs at a time: starting a task or habit timer stops whichever one was running.
   const toggleTaskTimer = useCallback((listId, taskId) => {
+    window.timerNotify?.askPermission();
     save((prev) => {
       const now = Date.now();
       const target = prev.taskLists.find((l) => l.id === listId)?.items.find((t) => t.id === taskId);
       if (!target || target.done) return prev;
-      const targetIsRunning = !!target.timerStartedAt;
-      return { ...prev, taskLists: prev.taskLists.map((l) => ({
+      if (target.timerStartedAt) return stopTimers(prev, now, (kind, item) => kind === "task" && item.id === taskId);
+      const cleared = stopTimers(prev, now);
+      return { ...cleared, taskLists: cleared.taskLists.map((l) => l.id !== listId ? l : {
         ...l,
-        items: l.items.map((t) => {
-          if (t.id === taskId && l.id === listId) {
-            if (targetIsRunning) return stopTaskTimer(t, now);
-            return { ...t, timerStartedAt: now, trackedSeconds: Math.max(0, Number(t.trackedSeconds) || 0) };
-          }
-          return targetIsRunning ? t : stopTaskTimer(t, now);
-        }),
+        items: l.items.map((t) => t.id === taskId ? { ...t, timerStartedAt: now, trackedSeconds: Math.max(0, Number(t.trackedSeconds) || 0) } : t),
+      }) };
+    });
+  }, [save]);
+  const toggleHabitTimer = useCallback((habitId) => {
+    window.timerNotify?.askPermission();
+    save((prev) => {
+      const now = Date.now();
+      const target = prev.habitSections.flatMap((section) => section.items).find((habit) => habit.id === habitId);
+      if (!target) return prev;
+      if (target.timerStartedAt) return stopTimers(prev, now, (kind, item) => kind === "habit" && item.id === habitId);
+      const cleared = stopTimers(prev, now);
+      const timerDate = getToday(prev.dayResetHour || 0);
+      return { ...cleared, habitSections: cleared.habitSections.map((section) => ({
+        ...section,
+        items: section.items.map((habit) => habit.id === habitId ? { ...habit, timerStartedAt: now, timerDate } : habit),
       })) };
     });
   }, [save]);
@@ -5794,7 +5918,7 @@ function DailyGrind() {
               {optional && !sec.items.length && <div style={{ fontSize: 11, color: "#8b8b9e", lineHeight: 1.5, margin: "2px 2px 8px" }}>
                 Extras that add points when you do them. Skipping one never costs points. Required habits above lose their points when marked {"\u2717"}.
               </div>}
-              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} habitDragSessionRef={habitDragSessionRef} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} />)}
+              {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} habitDragSessionRef={habitDragSessionRef} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} toggleHabitTimer={toggleHabitTimer} />)}
               <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
           );

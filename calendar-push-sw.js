@@ -37,7 +37,8 @@ self.addEventListener("notificationclick", event => {
     const existing = windows.find(client => client.url.startsWith(self.registration.scope));
     if (existing) {
       // Use a message instead of navigating an open app and discarding drafts.
-      existing.postMessage({ type: "OPEN_CALENDAR", date: url.searchParams.get("date") });
+      if (url.searchParams.has("timer")) existing.postMessage({ type: "OPEN_TIMER" });
+      else existing.postMessage({ type: "OPEN_CALENDAR", date: url.searchParams.get("date") });
       await existing.focus();
     } else await self.clients.openWindow(url.href);
   })());
