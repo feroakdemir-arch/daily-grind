@@ -1041,16 +1041,36 @@
     }
     // One shared live connection to the task records: the app's first load and its live updates both
     // use it, so opening the app reads every record once instead of twice.
+    //
+    // Sep 30: overnight a copy of the app in the background read ~100,000 task records (the query re-ran
+    // about 100 times an hour) and used up the free daily read limit, so nothing could sync the next
+    // morning. The live connection now pauses while the app has been hidden for 30 s and resumes when it
+    // is shown again, and a failed connection is retried on a slow timer instead of on every use.
     let _ledgerFeed = null;
+    const _LEDGER_PAUSE_MS = 30000;
     function _ledgerConnection() {
-      if (_ledgerFeed && !_ledgerFeed.failed) return _ledgerFeed;
-      const feed = { entries: null, fromServer: false, failed: null, callbacks: new Set(), waiters: [], unsubscribe: () => {} };
+      if (_ledgerFeed) {
+        if (_ledgerFeed.failed) _ledgerFeed.scheduleRetry();
+        return _ledgerFeed;
+      }
+      const feed = { entries: null, fromServer: false, failed: null, callbacks: new Set(), waiters: [], unsubscribe: () => {}, listening: false, retryTimer: null, retryDelay: 60000 };
       const settle = () => { feed.waiters.splice(0).forEach((waiter) => waiter()); };
       _ledgerFeed = feed;
-      _fbReady.then(() => {
+      const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
+      const stop = () => {
+        if (!feed.listening) return;
+        feed.listening = false;
+        try { feed.unsubscribe(); } catch (e) {}
+        feed.unsubscribe = () => {};
+      };
+      const start = () => {
+        if (feed.listening) return;
         const collection = _taskLedgerCollection();
         if (!collection) { feed.entries = []; feed.fromServer = true; settle(); return; }
+        feed.listening = true;
         feed.unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
+          feed.failed = null;
+          feed.retryDelay = 60000;
           feed.entries = _parseTaskLedgerSnapshot(snapshot);
           if (!(snapshot.metadata && snapshot.metadata.fromCache)) feed.fromServer = true;
           settle();
@@ -1058,9 +1078,33 @@
         }, (error) => {
           console.warn("Task recovery sync failed:", error);
           feed.failed = error;
+          feed.listening = false;
+          feed.unsubscribe = () => {};
           settle();
+          feed.scheduleRetry();
         });
-      });
+      };
+      feed.scheduleRetry = () => {
+        if (feed.retryTimer || feed.listening) return;
+        feed.retryTimer = setTimeout(() => {
+          feed.retryTimer = null;
+          feed.retryDelay = Math.min(feed.retryDelay * 2, 10 * 60000);
+          if (!hidden()) start();
+        }, feed.retryDelay);
+      };
+      let pauseTimer = null;
+      const pauseSoonIfHidden = () => {
+        clearTimeout(pauseTimer);
+        if (hidden()) pauseTimer = setTimeout(() => { if (hidden()) stop(); }, _LEDGER_PAUSE_MS);
+      };
+      if (typeof document !== "undefined" && document.addEventListener) {
+        document.addEventListener("visibilitychange", () => {
+          pauseSoonIfHidden();
+          if (!hidden()) _fbReady.then(start);
+        });
+      }
+      // Opening the app loads the records once even in the background; a hidden app then pauses.
+      _fbReady.then(() => { start(); pauseSoonIfHidden(); });
       return feed;
     }
     window.taskLedger = {
@@ -3271,12 +3315,17 @@ function SaveIndicator({ info, onRetry, onUpdate }) {
   const isError = info.state === "error" && !offline;
   // The cloud refuses saves from copies of the app older than it accepts: retrying can't help, updating does.
   const outdated = isError && !!onUpdate && /permission|insufficient/i.test(info.error || "");
-  const color = isError ? "#ff6b78" : offline || info.state === "saving" ? "#ffd43b" : "#00b86b";
-  const label = offline ? "● SAVED ON DEVICE · OFFLINE, WILL SYNC" : outdated ? "⚠ APP OUT OF DATE · TAP TO UPDATE" : isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
+  // The free plan's daily cloud limit (reads/writes) ran out: nothing is wrong on this device, and it
+  // uploads by itself once the limit resets (midnight Pacific).
+  const overLimit = isError && !outdated && /quota|resource-exhausted|daily limit/i.test(info.error || "");
+  const color = overLimit ? "#ffd43b" : isError ? "#ff6b78" : offline || info.state === "saving" ? "#ffd43b" : "#00b86b";
+  const label = offline ? "● SAVED ON DEVICE · OFFLINE, WILL SYNC" : outdated ? "⚠ APP OUT OF DATE · TAP TO UPDATE" : overLimit ? "● SAVED ON DEVICE · CLOUD DAILY LIMIT REACHED" : isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
   return (
     <button
       onClick={outdated ? onUpdate : isError ? onRetry : undefined}
-      title={outdated ? "This copy of the app is older than the cloud accepts. Your changes are safe on this device; updating uploads them." : isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
+      title={outdated ? "This copy of the app is older than the cloud accepts. Your changes are safe on this device; updating uploads them."
+        : overLimit ? "The cloud's free daily limit is used up. Your changes are safe on this device and upload by themselves after it resets (3 AM Eastern)."
+        : isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
       style={{ background: "none", border: "none", color, cursor: isError ? "pointer" : "default", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, marginTop: 5, padding: 0 }}
     >
       {label}
@@ -4351,7 +4400,8 @@ function DailyGrind() {
         // A refusal from the cloud's rules (this copy of the app is older than it accepts) keeps its reason,
         // so the banner can offer the update instead of a retry that can't work.
         const reason = String((error && (error.code || error.message)) || "");
-        const refused = /permission|insufficient/i.test(reason) ? ` The cloud refused it (${reason}): this copy of the app may be out of date.` : "";
+        const refused = /permission|insufficient/i.test(reason) ? ` The cloud refused it (${reason}): this copy of the app may be out of date.`
+          : /quota|resource-exhausted/i.test(reason) ? ` The cloud's free daily limit is used up (${reason}).` : "";
         setSaveInfo({ state: "error", key: STORAGE_KEY, error: "Your change is safe on this device, but cloud confirmation is still needed." + refused });
         return null;
       });

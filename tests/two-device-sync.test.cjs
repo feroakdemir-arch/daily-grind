@@ -14,7 +14,7 @@ const MAIN = "daily-grind-v13", CAL = "dg-cal-events";
 const settle = async (rounds = 30) => { for (let i = 0; i < rounds; i++) await new Promise((resolve) => setTimeout(resolve, 1)); };
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
-function makeServer() { return { docs: new Map(), listeners: new Set(), writes: [] }; }
+function makeServer() { return { docs: new Map(), listeners: new Set(), writes: [], queryListens: 0, openQueries: 0, failQueries: false }; }
 // Firestore hands a document's map fields back in alphabetical order, whatever order they were written in.
 const sortKeys = (value) => Array.isArray(value) ? value.map(sortKeys)
   : value && typeof value === "object" ? Object.keys(value).sort().reduce((out, key) => { out[key] = sortKeys(value[key]); return out; }, {}) : value;
@@ -65,7 +65,15 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
         where: (field, op, value) => query([field, value]),
         orderBy: () => query(filter), startAt: () => query(filter), endAt: () => query(filter),
         get: () => dev.online ? Promise.resolve(list()) : Promise.reject(new Error("client is offline")),
-        onSnapshot: (cb) => { setTimeout(() => cb(list()), 2); return () => {}; },
+        // Counts live queries (each one re-reads every matching record), and can fail them like the cloud does.
+        onSnapshot: (cb, onError) => {
+          server.queryListens++;
+          if (server.failQueries) { setTimeout(() => onError && onError(new Error("Quota exceeded.")), 2); return () => {}; }
+          server.openQueries++;
+          let open = true;
+          setTimeout(() => open && cb(list()), 2);
+          return () => { if (open) { open = false; server.openQueries--; } };
+        },
       };
     };
     return { ...query(null), doc: (id) => docRef(path + "/" + id) };
@@ -113,7 +121,7 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
     setInterval: () => 0, clearInterval() {},
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
-    document: { addEventListener() {}, visibilityState: "visible" },
+    document: { addEventListener: (type, fn) => { (listeners["doc:" + type] = listeners["doc:" + type] || []).push(fn); }, visibilityState: "visible" },
     location: { pathname: "/" },
     fetch: () => Promise.reject(new Error("no network in tests")),
   };
@@ -126,6 +134,7 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
   dev.storageApi = sandbox.storage;
   dev.local = (key = MAIN) => JSON.parse(storage.get(key));
   dev.goOffline = () => { dev.online = false; };
+  dev.setVisibility = (state) => { sandbox.document.visibilityState = state; (listeners["doc:visibilitychange"] || []).forEach((fn) => fn()); };
   dev.goOnline = () => {
     dev.online = true;
     dev.held.splice(0).forEach((run) => run());
@@ -563,4 +572,41 @@ test("only a change the device couldn't store counts as one a reload would lose"
   await calEdit(phone, (list) => list.concat([ev("yoga", "20:00")]));
   await settle(60);
   assert.ok(["gym2", "swim", "yoga"].every((id) => id in cloudCal(server)));
+});
+
+// Sep 30: overnight a copy of the app in the background re-read every task record about 100 times an
+// hour and used up the free daily read limit. The live task-record query now pauses while hidden.
+const pause = () => new Promise((resolve) => setTimeout(resolve, 150)); // longer than the 30 s pause (60 ms here)
+test("a copy of the app in the background stops reading task records and picks up again when shown", async () => {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  const laptop = device(server);
+  await laptop.open(); await laptop.window.taskLedger.list(); await settle();
+  assert.equal(server.queryListens, 1);
+  assert.equal(server.openQueries, 1);
+  laptop.setVisibility("hidden"); await pause();
+  assert.equal(server.openQueries, 0, "paused while hidden");
+  for (let i = 0; i < 5; i++) await laptop.window.taskLedger.list();
+  assert.equal(server.queryListens, 1, "using the records while hidden doesn't reopen the query");
+  laptop.setVisibility("visible"); await settle();
+  assert.equal(server.openQueries, 1, "live again when shown");
+  assert.equal(server.queryListens, 2);
+  laptop.setVisibility("hidden"); laptop.setVisibility("visible"); await pause();
+  assert.equal(server.queryListens, 2, "hidden for a moment: nothing restarts");
+  assert.equal(server.openQueries, 1);
+});
+
+test("a failing task-record query is retried on a slow timer, not every time the records are used", async () => {
+  const server = makeServer();
+  server.failQueries = true;
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  const laptop = device(server);
+  await laptop.open(); await settle();
+  for (let i = 0; i < 10; i++) await laptop.window.taskLedger.list().catch(() => {});
+  assert.equal(server.queryListens, 1);
+  server.failQueries = false;
+  await pause();
+  assert.equal(server.queryListens, 2, "one retry after the wait");
+  assert.equal(server.openQueries, 1);
+  assert.ok(Array.isArray(await laptop.window.taskLedger.list()));
 });
