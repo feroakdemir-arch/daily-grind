@@ -2463,6 +2463,34 @@ function stopTimers(data, now = Date.now(), shouldStop = () => true) {
   return { ...data, ...(habitsChanged ? { habitSections, habitTime } : {}), ...(tasksChanged ? { taskLists } : {}) };
 }
 
+// The pomodoro's "working on" text and the task it was sent from, kept on this device.
+const POMO_FOCUS_KEY = "dg-pomo-focus-v1";
+function readPomoFocus() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(POMO_FOCUS_KEY) || "null");
+    return { name: saved && typeof saved.name === "string" ? saved.name : "", taskId: saved && typeof saved.taskId === "string" && saved.taskId ? saved.taskId : null };
+  } catch (e) { return { name: "", taskId: null }; }
+}
+// The task list item the pomodoro is working on: the one it was sent from (wherever it has moved), or else
+// the one task whose name is exactly what was typed (an unfinished one first). Returns { list, task } or null.
+function findPomoTask(taskLists, link, name) {
+  const lists = Array.isArray(taskLists) ? taskLists : [];
+  if (link && link.taskId) {
+    for (const list of lists) {
+      const task = (list.items || []).find((item) => item.id === link.taskId);
+      if (task) return { list, task };
+    }
+  }
+  const wanted = String(name || "").trim().toLowerCase();
+  if (!wanted) return null;
+  const matches = [];
+  lists.forEach((list) => (list.items || []).forEach((task) => { if (String(task.name || "").trim().toLowerCase() === wanted) matches.push({ list, task }); }));
+  const pending = matches.filter((match) => !match.task.done);
+  if (pending.length === 1) return pending[0];
+  if (!pending.length && matches.length === 1) return matches[0];
+  return null;
+}
+
 // The account as this device last stored it (only its habits and tasks are read), for choosing the first
 // page when the app is opened from the timer notification.
 function readStartupMainData() {
@@ -4037,7 +4065,19 @@ function DailyGrind() {
   const [customTimerRunning, setCustomTimerRunning] = useState(false);
   const [stopwatchSec, setStopwatchSec] = useState(0);
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
-  const [pomoTask, setPomoTask] = useState("");
+  // What the pomodoro is working on. pomoLink = the task it was sent from ({ taskId }), so checking it off
+  // here checks it off in the task list too. Kept on this device across reloads.
+  const [pomoTask, setPomoTaskText] = useState(() => readPomoFocus().name);
+  const [pomoLink, setPomoLink] = useState(() => readPomoFocus().taskId ? { taskId: readPomoFocus().taskId } : null);
+  const [pomoDoneLocal, setPomoDoneLocal] = useState(false);
+  const setPomoTask = useCallback((name, taskId) => {
+    setPomoTaskText(name);
+    setPomoLink(taskId ? { taskId } : null);
+    setPomoDoneLocal(false);
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(POMO_FOCUS_KEY, JSON.stringify({ name: pomoTask, taskId: pomoLink ? pomoLink.taskId : null })); } catch (e) {}
+  }, [pomoTask, pomoLink]);
   const [showScoreDetail, setShowScoreDetail] = useState(false);
   // One-day view: the date (YYYY-MM-DD) shown on its own, or null for the week.
   const [calDayView, setCalDayView] = useState(null);
@@ -6232,7 +6272,30 @@ function DailyGrind() {
                   <input value={pomoTask} onChange={(e) => setPomoTask(e.target.value)}
                     placeholder="What are you working on?"
                     style={{ width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 10, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", padding: "10px 14px", outline: "none", boxSizing: "border-box", textAlign: "center" }} />
-                  {pomoTask && <div style={{ fontSize: 10, color: "#f0f0f4", marginTop: 6, fontWeight: 700, letterSpacing: 1 }}>WORKING ON: {pomoTask}</div>}
+                  {pomoTask && (() => {
+                    // Checking it off here checks the task off in its list too (points included); a typed
+                    // task that isn't in any list is just ticked here.
+                    const match = findPomoTask(data.taskLists, pomoLink, pomoTask);
+                    const done = match ? !!match.task.done : pomoDoneLocal;
+                    const toggleDone = () => { if (match) toggleTask(match.list.id, match.task.id); else setPomoDoneLocal((was) => !was); };
+                    return (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+                          <button className="hit-expand check-hit" onClick={toggleDone} aria-pressed={done}
+                            aria-label={done ? `Mark ${pomoTask} not done` : `Complete ${pomoTask}`} title={done ? "Tap to un-complete" : "Complete"}
+                            style={{ ...S.tCircle, borderColor: done ? "#4cd137" : "#8b8b9e", background: done ? "#4cd137" : "transparent", color: "#fff", fontSize: 11, fontWeight: 900 }}>
+                            {done ? "✓" : ""}
+                          </button>
+                          <div style={{ fontSize: 10, color: done ? "#8b8b9e" : "#f0f0f4", fontWeight: 700, letterSpacing: 1, textDecoration: done ? "line-through" : "none", textAlign: "left", overflowWrap: "anywhere" }}>
+                            {done ? "DONE" : "WORKING ON"}: {pomoTask}
+                          </div>
+                        </div>
+                        {match && <div style={{ fontSize: 10, color: "#77778a", marginTop: 6 }}>
+                          From {match.list.title} {"·"} +{match.task.points} pts{done ? " · checked off in your tasks" : ""}
+                        </div>}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div style={{ position: "relative", width: 180, height: 180, margin: "0 auto 20px" }}>
                   <svg width="180" height="180" style={{ transform: "rotate(-90deg)" }}>
@@ -7032,7 +7095,7 @@ function DailyGrind() {
         })}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 10, marginTop: 18 }}>
-        <button onClick={() => { setPomoTask(formTaskName.trim() || "Task"); setEditTaskCtx(null); setView("main"); setPage("timer"); }}
+        <button onClick={() => { setPomoTask(formTaskName.trim() || "Task", editTaskCtx?.itemId); setEditTaskCtx(null); setView("main"); setPage("timer"); }}
           style={{ width: "100%", padding: "12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: 10, color: "#c4b5fd", fontSize: 11, fontWeight: 800, letterSpacing: 1.2, cursor: "pointer", fontFamily: "inherit" }}>
           {"↑ SEND TO POMODORO"}
         </button>
