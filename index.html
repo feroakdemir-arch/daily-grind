@@ -595,15 +595,18 @@
     }
     // Uploads that failed (offline, flaky network) retry by themselves when the connection comes back.
     const _unsyncedKeys = new Set();
+    // Changes this device couldn't keep a copy of (its storage is full): the only ones a reload would lose.
+    const _unstoredKeys = new Map(); // key → the value that couldn't be stored
     function _retryUnsynced() {
       if (!window._user || !_unsyncedKeys.size) return;
       if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       Array.from(_unsyncedKeys).forEach((key) => {
         if ((_pendingStorageWrites[key] || 0) > 0) return;
-        let value = null;
-        try { value = localStorage.getItem(key); } catch (e) {}
+        // The newest change: the one the device couldn't store (storage full), else the device's copy.
+        let value = _unstoredKeys.has(key) ? _unstoredKeys.get(key) : null;
+        if (value === null) { try { value = localStorage.getItem(key); } catch (e) {} }
         if (value === null || !_validStorageValue(key, value)) { _unsyncedKeys.delete(key); return; }
-        window.storage.set(key, value).catch(() => {});
+        window.storage.set(key, value, _unstoredKeys.get(key) === value ? { merged: true } : undefined).catch(() => {});
       });
     }
     window.addEventListener("online", () => setTimeout(_retryUnsynced, 1500));
@@ -1143,8 +1146,9 @@
       if (d.writer && d.writer === _writerId) return; // this tab's own upload; handled when it was confirmed
       const version = _docVersion(d);
       const base = _getBase(key);
-      let local = null;
-      try { local = localStorage.getItem(key); } catch (e) {}
+      // This device's newest version: a change it couldn't store (storage full) is newer than its copy.
+      let local = _unstoredKeys.has(key) ? _unstoredKeys.get(key) : null;
+      if (local === null) { try { local = localStorage.getItem(key); } catch (e) {} }
       if (key === _CAL_KEY) _keepRemoved(d.removed);
       // Another tab of the app in this browser already took this version (tabs share device storage),
       // but this tab may not have: a tab that was asleep missed its message. Show it here too, or this
@@ -1403,11 +1407,13 @@
         if (!editedAt) editedAt = ts;
         try {
           _storeLocal(key, value, ts);
+          _unstoredKeys.delete(key);
           localStorage.setItem(key + "_edited", String(editedAt));
           _announceStorageWrite(key, value, ts);
         } catch (e) {
           // This device's storage is full: the change can't be kept here, so the cloud copy is all it
           // has. Keep going and upload it rather than dropping it.
+          if (localStorage.getItem(key) !== value) _unstoredKeys.set(key, value);
           console.warn("Device storage is full; uploading without a device copy:", e);
           window._lastLocalTs = window._lastLocalTs || {};
           window._lastLocalTs[key] = ts;
@@ -1423,6 +1429,7 @@
             _unsyncedKeys.add(key);
             await _upload(key, ref, value, ts, { ...(options || {}), editedAt });
             _unsyncedKeys.delete(key);
+            if (_unstoredKeys.get(key) === value) _unstoredKeys.delete(key); // the cloud has it now
           }
           if (key === "daily-grind-v13") window.dataVault.schedule(value);
           if (key === "dg-cal-events") {
@@ -1456,6 +1463,11 @@
       // True while some change on this device hasn't been confirmed by the cloud yet.
       hasUnsyncedChanges() {
         return _unsyncedKeys.size > 0 || Object.values(_pendingStorageWrites).some((count) => count > 0);
+      },
+      // True while some change exists only in this page (not on the device, not in the cloud): reloading
+      // now would lose it. Unsynced changes that are on the device upload again after a reload.
+      hasUnstoredChanges() {
+        return _unstoredKeys.size > 0;
       },
       // Waits (up to timeoutMs) for every pending upload; resolves true when nothing is left unsynced.
       async flush(timeoutMs) {
@@ -3253,16 +3265,18 @@ function reminderWeekOffset(date) {
   return Math.round((monday(target) - monday(new Date())) / 604800000);
 }
 
-function SaveIndicator({ info, onRetry }) {
+function SaveIndicator({ info, onRetry, onUpdate }) {
   if (!info || info.state === "idle") return null;
   const offline = info.state === "error" && typeof navigator !== "undefined" && navigator.onLine === false;
   const isError = info.state === "error" && !offline;
+  // The cloud refuses saves from copies of the app older than it accepts: retrying can't help, updating does.
+  const outdated = isError && !!onUpdate && /permission|insufficient/i.test(info.error || "");
   const color = isError ? "#ff6b78" : offline || info.state === "saving" ? "#ffd43b" : "#00b86b";
-  const label = offline ? "● SAVED ON DEVICE · OFFLINE, WILL SYNC" : isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
+  const label = offline ? "● SAVED ON DEVICE · OFFLINE, WILL SYNC" : outdated ? "⚠ APP OUT OF DATE · TAP TO UPDATE" : isError ? "⚠ CLOUD SYNC FAILED · TAP TO RETRY" : info.state === "saving" ? "● SAVED ON DEVICE · SYNCING..." : "✓ SAVED";
   return (
     <button
-      onClick={isError ? onRetry : undefined}
-      title={isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
+      onClick={outdated ? onUpdate : isError ? onRetry : undefined}
+      title={outdated ? "This copy of the app is older than the cloud accepts. Your changes are safe on this device; updating uploads them." : isError ? (info.error || "Your change is safe on this device. Tap to retry cloud sync.") : label}
       style={{ background: "none", border: "none", color, cursor: isError ? "pointer" : "default", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, marginTop: 5, padding: 0 }}
     >
       {label}
@@ -4194,17 +4208,33 @@ function DailyGrind() {
   const [updateReady, setUpdateReady] = useState(() => !!window.__dgUpdateReady);
   const viewRef = useRef(view);
   viewRef.current = view;
+  // Nothing open or being typed, and nothing that exists only in this page. Unsynced changes don't block
+  // it: they are on the device and upload again after the reload. (Sep 30: an old copy the cloud refused
+  // always had unsynced changes, so it never reloaded and showed "cloud sync failed" for good.)
+  const safeToReload = () => {
+    const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    return !typing && !noteDraftRef.current && viewRef.current === "main" && !(window.storage.hasUnstoredChanges && window.storage.hasUnstoredChanges());
+  };
   useEffect(() => {
     const onReady = (event) => {
       setUpdateReady(true);
-      // Just brought back to the screen, nothing open, nothing typed, nothing unsynced: switch now.
-      const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-      if (event.detail && event.detail.resumed && !typing && !noteDraftRef.current && viewRef.current === "main"
-        && !(window.storage.hasUnsyncedChanges && window.storage.hasUnsyncedChanges())) location.reload();
+      // Just brought back to the screen and nothing would be lost: switch now.
+      if (event.detail && event.detail.resumed && safeToReload()) location.reload();
     };
     window.addEventListener("dg-update-ready", onReady);
     return () => window.removeEventListener("dg-update-ready", onReady);
   }, []);
+  // The cloud refused a save because this copy of the app is older than it accepts (firestore.rules
+  // `client`): take the new version as soon as that's safe.
+  const saveRefusedAsOutdated = !!saveInfo && saveInfo.state === "error" && /permission|insufficient/i.test(saveInfo.error || "");
+  useEffect(() => {
+    if (saveRefusedAsOutdated && updateReady && safeToReload()) location.reload();
+  }, [saveRefusedAsOutdated, updateReady]);
+  async function updateToNewVersion() {
+    try { await flushCurrentNote(); } catch (error) { console.warn(error); }
+    await window.storage.flush(saveRefusedAsOutdated ? 1500 : 8000);
+    location.reload();
+  }
   // How full the one cloud document is (it has a hard cap). Measured shortly after changes settle.
   const [accountBytes, setAccountBytes] = useState(0);
   useEffect(() => {
@@ -4318,7 +4348,11 @@ function DailyGrind() {
       .then(([result]) => result)
       .catch((error) => {
         console.error(error);
-        setSaveInfo({ state: "error", key: STORAGE_KEY, error: "Your change is safe on this device, but cloud confirmation is still needed." });
+        // A refusal from the cloud's rules (this copy of the app is older than it accepts) keeps its reason,
+        // so the banner can offer the update instead of a retry that can't work.
+        const reason = String((error && (error.code || error.message)) || "");
+        const refused = /permission|insufficient/i.test(reason) ? ` The cloud refused it (${reason}): this copy of the app may be out of date.` : "";
+        setSaveInfo({ state: "error", key: STORAGE_KEY, error: "Your change is safe on this device, but cloud confirmation is still needed." + refused });
         return null;
       });
   }, []);
@@ -5832,11 +5866,7 @@ function DailyGrind() {
   // MAIN
   if (view === "main") return (
     <div style={page === "calendar" ? { ...S.shell, background: "#1a1a2e" } : S.shell}>
-      {updateReady && <button onClick={async () => {
-        try { await flushCurrentNote(); } catch (error) { console.warn(error); }
-        await window.storage.flush(8000);
-        location.reload();
-      }} style={{ position: "fixed", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 320, padding: "8px 14px", borderRadius: 999, border: "1px solid #a78bfa", background: "#2a2a44", color: "#e9e3ff", fontSize: 11, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 8px 24px #000a" }}>
+      {updateReady && <button onClick={updateToNewVersion} style={{ position: "fixed", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 320, padding: "8px 14px", borderRadius: 999, border: "1px solid #a78bfa", background: "#2a2a44", color: "#e9e3ff", fontSize: 11, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 8px 24px #000a" }}>
         {"\u25CF"} NEW VERSION READY {"\u00B7"} TAP TO UPDATE
       </button>}
       {page !== "calendar" && page !== "notes" && view === "main" && <>
@@ -5854,7 +5884,7 @@ function DailyGrind() {
             {page === "habits" && <div className="inline-quote" style={{ fontSize: 11, color: "#9a9ab0", fontStyle: "italic", lineHeight: 1.45, marginTop: 4, maxWidth: 520 }}>
               {"\u201C"}{todaysQuotes[0][0]}{"\u201D"} <span style={{ fontStyle: "normal", color: "#a78bfa", fontWeight: 700 }}>{"\u2014"} {todaysQuotes[0][1]}</span>
             </div>}
-            <SaveIndicator info={saveInfo} onRetry={retrySaves} />
+            <SaveIndicator info={saveInfo} onRetry={retrySaves} onUpdate={updateToNewVersion} />
             {accountFull >= 0.7 && <button onClick={() => setView("settings")} style={{ display: "block", background: "none", border: "none", padding: 0, marginTop: 4, cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: accountFull >= 0.9 ? "#ff6b78" : "#ffd43b" }}>
               {`● ACCOUNT ${Math.round(accountFull * 100)}% FULL · SEE SETTINGS`}
             </button>}
@@ -6465,7 +6495,7 @@ function DailyGrind() {
                    <div className="display" style={{ fontSize: 15, color: "#f4f4f8", whiteSpace: "nowrap" }}>{monthLabel}</div>
                    {calDayView && <button type="button" onClick={() => setCalDayView(null)} aria-label="Back to week view" style={{ background: "#ffffff0d", border: "1px solid #3b3b4e", borderRadius: 999, color: "#d0d0dc", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 3 }}><Icon name="left" size={12} stroke={2.6} />Week</button>}
                    <button onClick={() => { if (calDayView) showCalDay(todayStr); else setCalWeekOffset(0); }} style={{ background: "#7c3aed22", border: "1px solid #7c3aed55", borderRadius: 999, color: "#c4b5fd", fontSize: 11, cursor: "pointer", fontWeight: 700, padding: "2px 10px", fontFamily: "inherit" }}>Today</button>
-                   <SaveIndicator info={saveInfo} onRetry={retrySaves} />
+                   <SaveIndicator info={saveInfo} onRetry={retrySaves} onUpdate={updateToNewVersion} />
                  </div>
                 <div style={{ display: "flex", alignItems: "center" }}>
                   <button onClick={() => stepCal(1)} aria-label={calDayView ? "Next day" : "Next week"} className="icon-btn" style={{ background: "none", border: "none", color: "#a0a0b4", cursor: "pointer", padding: 0 }}><Icon name="right" size={20} /></button>

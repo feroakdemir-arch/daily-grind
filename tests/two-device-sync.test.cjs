@@ -540,3 +540,27 @@ test("an event deleted on one device but edited later on the other comes back wi
   phone.goOnline(); await settle(80);
   assert.equal(cloudCal(server).cad, "17:00");
 });
+
+// Sep 30: a copy of the app the cloud refused never reloaded into the new version, because a refused save
+// always leaves "unsynced" changes. Only a change the device couldn't store may block a reload.
+test("only a change the device couldn't store counts as one a reload would lose", async () => {
+  const server = seededCalendar();
+  const phone = device(server);
+  await calOpen(phone); await settle();
+  phone.goOffline();
+  await calEdit(phone, (list) => list.concat([ev("gym2", "18:00")])).catch(() => {});
+  assert.equal(phone.storageApi.hasUnsyncedChanges(), true);
+  assert.equal(phone.storageApi.hasUnstoredChanges(), false, "stored on the device: a reload uploads it later");
+  const store = phone.window.localStorage.setItem;
+  phone.window.localStorage.setItem = (key, value) => { if (key === CAL) throw new Error("QuotaExceededError"); store(key, value); };
+  await calEdit(phone, (list) => list.concat([ev("swim", "19:00")])).catch(() => {});
+  assert.equal(phone.storageApi.hasUnstoredChanges(), true, "device storage full: only this page has it");
+  phone.goOnline(); await settle(80);
+  // Back online, the retry sends the change the device couldn't store, not its older copy.
+  assert.equal(phone.storageApi.hasUnstoredChanges(), false, "the cloud has it now");
+  assert.ok(["gym2", "swim"].every((id) => id in cloudCal(server)));
+  assert.ok(JSON.parse(phone.cal).some((e) => e.id === "swim"), "an update from the cloud didn't take it out of the app");
+  await calEdit(phone, (list) => list.concat([ev("yoga", "20:00")]));
+  await settle(60);
+  assert.ok(["gym2", "swim", "yoga"].every((id) => id in cloudCal(server)));
+});
