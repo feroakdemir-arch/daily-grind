@@ -186,7 +186,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-vault-local-safety-previous", "dg-task-drafts-v1"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-vault-local-safety-previous", "dg-task-drafts-v1", "dg-cal-events_removed", "dg-task-ledger-copy-v1", "dg-pomo-focus-v1"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -988,25 +988,22 @@
       });
       return entries;
     }
+    function _parseTaskLedgerDoc(value) {
+      if (!value || value.kind !== "daily-grind-task-v1" || typeof value.taskId !== "string" || !value.taskId) return null;
+      if (value.deleted === true) return { taskId: value.taskId, deleted: true };
+      if (!value.task || typeof value.task !== "object" || Array.isArray(value.task) || value.task.id !== value.taskId) return null;
+      return {
+        taskId: value.taskId,
+        deleted: false,
+        listId: typeof value.listId === "string" && value.listId ? value.listId : "recovered_tasks",
+        listTitle: typeof value.listTitle === "string" && value.listTitle ? value.listTitle : "Recovered Tasks",
+        resetsDaily: value.resetsDaily === true,
+        task: value.task,
+      };
+    }
     function _parseTaskLedgerSnapshot(snapshot) {
       const entries = [];
-      snapshot.forEach((doc) => {
-        const value = doc.data() || {};
-        if (value.kind !== "daily-grind-task-v1" || typeof value.taskId !== "string" || !value.taskId) return;
-        if (value.deleted === true) {
-          entries.push({ taskId: value.taskId, deleted: true });
-          return;
-        }
-        if (!value.task || typeof value.task !== "object" || Array.isArray(value.task) || value.task.id !== value.taskId) return;
-        entries.push({
-          taskId: value.taskId,
-          deleted: false,
-          listId: typeof value.listId === "string" && value.listId ? value.listId : "recovered_tasks",
-          listTitle: typeof value.listTitle === "string" && value.listTitle ? value.listTitle : "Recovered Tasks",
-          resetsDaily: value.resetsDaily === true,
-          task: value.task,
-        });
-      });
+      snapshot.forEach((doc) => { const entry = _parseTaskLedgerDoc(doc.data() || {}); if (entry) entries.push(entry); });
       return entries;
     }
     async function _writeTaskLedger(entry, deleted) {
@@ -1048,6 +1045,64 @@
     // is shown again, and a failed connection is retried on a slow timer instead of on every use.
     let _ledgerFeed = null;
     const _LEDGER_PAUSE_MS = 30000;
+    // The free plan allows 50,000 reads a day for all devices together (reset at midnight Pacific). The
+    // task records are the one thing that can read in bulk, so each device gets a ceiling for them: past
+    // it, their live sync stops until the next hour or day (the app works without it; they're a safety net).
+    const _LEDGER_HOUR_CAP = 1200, _LEDGER_DAY_CAP = 5000;
+    const _READS_KEY = "dg-cloud-reads-v1";
+    // The quota's day, near enough (UTC−8; an hour off in summer is fine for a ceiling). Plain arithmetic:
+    // time-zone formatting is slow the first time and this runs on every task-record update.
+    const _pacificDay = (ms) => new Date(ms - 8 * 3600000).toISOString().slice(0, 10);
+    const _ledgerBudget = {
+      read() {
+        const now = Date.now(), day = _pacificDay(now), hour = Math.floor(now / 3600000);
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem(_READS_KEY) || "null"); } catch (e) {}
+        const state = saved && typeof saved === "object" ? saved : {};
+        if (state.day !== day) { state.day = day; state.ledger = 0; state.other = 0; }
+        if (state.hour !== hour) { state.hour = hour; state.ledgerHour = 0; }
+        return state;
+      },
+      write(state) { try { localStorage.setItem(_READS_KEY, JSON.stringify(state)); } catch (e) {} },
+      count(n, kind = "ledger") {
+        if (!(n > 0)) return;
+        const state = this.read();
+        if (kind === "ledger") { state.ledger = (state.ledger || 0) + n; state.ledgerHour = (state.ledgerHour || 0) + n; }
+        else state.other = (state.other || 0) + n;
+        this.write(state);
+      },
+      tripped() {
+        const state = this.read();
+        return (state.ledger || 0) >= _LEDGER_DAY_CAP || (state.ledgerHour || 0) >= _LEDGER_HOUR_CAP;
+      },
+      today() { const state = this.read(); return { ledger: state.ledger || 0, other: state.other || 0, day: state.day }; },
+    };
+    window.cloudReads = { today: () => _ledgerBudget.today(), count: (n) => _ledgerBudget.count(n, "other") };
+    const _LEDGER_COPY_KEY = "dg-task-ledger-copy-v1";
+    function _ledgerMillis(value) {
+      if (value && typeof value.toMillis === "function") return value.toMillis();
+      return Number(value) || 0;
+    }
+    function _ledgerTime(ms) {
+      const Timestamp = firebase.firestore && firebase.firestore.Timestamp;
+      return Timestamp && typeof Timestamp.fromMillis === "function" ? Timestamp.fromMillis(Math.max(0, ms)) : Math.max(0, ms);
+    }
+    function _readLedgerCopy() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(_LEDGER_COPY_KEY) || "null");
+        if (!saved || saved.owner !== _identity() || !saved.records || typeof saved.records !== "object") return null;
+        const records = new Map(Object.entries(saved.records).filter(([, record]) => record && record.entry && record.entry.taskId));
+        return { records, syncedTo: Number(saved.syncedTo) || 0 };
+      } catch (e) { return null; }
+    }
+    function _saveLedgerCopy(feed) {
+      try {
+        localStorage.setItem(_LEDGER_COPY_KEY, JSON.stringify({ owner: _identity(), syncedTo: feed.syncedTo, records: Object.fromEntries(feed.records) }));
+      } catch (e) {
+        // Out of device storage: without a copy the next open reads every record again, which still works.
+        try { localStorage.removeItem(_LEDGER_COPY_KEY); } catch (e2) {}
+      }
+    }
     function _ledgerConnection() {
       if (_ledgerFeed) {
         if (_ledgerFeed.failed) _ledgerFeed.scheduleRetry();
@@ -1063,23 +1118,53 @@
         try { feed.unsubscribe(); } catch (e) {}
         feed.unsubscribe = () => {};
       };
+      // This device keeps its own copy of the records (per account) and asks the cloud only for the ones
+      // changed since then: opening the app reads a handful of records instead of all of them.
+      const copy = _readLedgerCopy();
+      feed.records = copy ? copy.records : new Map();
+      feed.syncedTo = copy ? copy.syncedTo : 0;
+      feed.noDelta = false;
+      if (copy) feed.entries = [...feed.records.values()].map((record) => record.entry);
+      const deliver = () => {
+        feed.entries = [...feed.records.values()].map((record) => record.entry);
+        settle();
+        feed.callbacks.forEach((callback) => { try { callback(_applyLocalDeletes(feed.entries)); } catch (error) { console.warn(error); } });
+      };
       const start = () => {
-        if (feed.listening) return;
+        if (feed.listening || _ledgerBudget.tripped()) return;
         const collection = _taskLedgerCollection();
         if (!collection) { feed.entries = []; feed.fromServer = true; settle(); return; }
+        const delta = feed.syncedTo > 0 && !feed.noDelta;
+        let query = collection.where("kind", "==", "daily-grind-task-v1");
+        if (delta) query = query.where("updatedAt", ">", _ledgerTime(feed.syncedTo - 2 * 60000));
         feed.listening = true;
-        feed.unsubscribe = collection.where("kind", "==", "daily-grind-task-v1").onSnapshot((snapshot) => {
+        feed.unsubscribe = query.onSnapshot((snapshot) => {
           feed.failed = null;
           feed.retryDelay = 60000;
-          feed.entries = _parseTaskLedgerSnapshot(snapshot);
-          if (!(snapshot.metadata && snapshot.metadata.fromCache)) feed.fromServer = true;
-          settle();
-          feed.callbacks.forEach((callback) => { try { callback(_applyLocalDeletes(feed.entries)); } catch (error) { console.warn(error); } });
+          const fromCache = !!(snapshot.metadata && snapshot.metadata.fromCache);
+          if (!fromCache) _ledgerBudget.count(snapshot.docChanges ? snapshot.docChanges().length : snapshot.size);
+          // A full read replaces the device copy; a delta only brings the changed records.
+          if (!delta && !fromCache) feed.records = new Map();
+          snapshot.forEach((doc) => {
+            const value = doc.data() || {};
+            const entry = _parseTaskLedgerDoc(value);
+            if (!entry) return;
+            feed.records.set(doc.id, { entry, at: _ledgerMillis(value.updatedAt) });
+            feed.syncedTo = Math.max(feed.syncedTo, _ledgerMillis(value.updatedAt));
+          });
+          if (!fromCache) { feed.fromServer = true; _saveLedgerCopy(feed); }
+          deliver();
+          if (_ledgerBudget.tripped()) {
+            console.warn("Task recovery sync read a lot of records; it pauses until the budget resets.");
+            stop();
+          }
         }, (error) => {
-          console.warn("Task recovery sync failed:", error);
-          feed.failed = error;
           feed.listening = false;
           feed.unsubscribe = () => {};
+          // No index for the changed-records query yet: read them all, as before.
+          if (delta && error && /failed-precondition|index/i.test(String(error.code || error.message))) { feed.noDelta = true; start(); return; }
+          console.warn("Task recovery sync failed:", error);
+          feed.failed = error;
           settle();
           feed.scheduleRetry();
         });
@@ -4487,7 +4572,9 @@ function DailyGrind() {
         console.warn("Drawing sync is waiting to reconnect", error);
         if (noteDraftRef.current?.id === snapshot.id) setNoteDraftState("error");
       } finally { noteLiveSavePendingRef.current = false; }
-    }, 1000);
+    // Every 4 s while drawing (each save costs a cloud read and write; the free plan has 50k/20k a day).
+    // Leaving the page or hiding the app still saves the last strokes at once.
+    }, 4000);
     return () => clearInterval(interval);
   }, [persistNoteDraft]);
 
@@ -7346,6 +7433,13 @@ function DailyGrind() {
           {accountFull >= 0.7 && <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 6, lineHeight: 1.5 }}>
             Pages with lots of handwriting take the most space. Download a full backup, then delete pages you no longer need. At 100% new changes can't be saved.
           </div>}
+          {window.cloudReads && (() => {
+            // The free plan's shared daily read limit; the task records are the part that can read in bulk.
+            const reads = window.cloudReads.today();
+            return <div style={{ fontSize: 10, color: "#8b8b9e", marginTop: 8, lineHeight: 1.5 }}>
+              Task-record reads today on this device: <span className="num" style={{ color: reads.ledger >= 4000 ? "#ffd43b" : "#aaaabb" }}>{reads.ledger.toLocaleString()}</span> of 5,000 (live task sync pauses there; the whole account's free limit is 50,000 reads a day, reset at 3 AM Eastern).
+            </div>;
+          })()}
         </div>
         <div style={{ fontSize: 10, color: "#8b8b9e", marginBottom: 10, lineHeight: 1.55 }}>
           Downloaded backups are your independent copy if the entire site, account, or Firebase project is ever removed.

@@ -14,7 +14,7 @@ const MAIN = "daily-grind-v13", CAL = "dg-cal-events";
 const settle = async (rounds = 30) => { for (let i = 0; i < rounds; i++) await new Promise((resolve) => setTimeout(resolve, 1)); };
 const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
-function makeServer() { return { docs: new Map(), listeners: new Set(), writes: [], queryListens: 0, openQueries: 0, failQueries: false }; }
+function makeServer() { return { docs: new Map(), listeners: new Set(), writes: [], queryListens: 0, openQueries: 0, queryReads: 0, failQueries: false, noIndex: false }; }
 // Firestore hands a document's map fields back in alphabetical order, whatever order they were written in.
 const sortKeys = (value) => Array.isArray(value) ? value.map(sortKeys)
   : value && typeof value === "object" ? Object.keys(value).sort().reduce((out, key) => { out[key] = sortKeys(value[key]); return out; }, {}) : value;
@@ -55,28 +55,34 @@ function device(server, { uid = "u1", storage = new Map() } = {}) {
     };
   }
   function collectionRef(path) {
-    const query = (filter) => {
+    // filters: [field, op, value] with op "==" or ">" (what the app uses).
+    const query = (filters) => {
+      const matches = (d) => filters.every(([field, op, value]) => op === ">" ? Number(d[field]) > Number(value) : d[field] === value);
       const list = () => {
-        const docs = [...server.docs.entries()].filter(([p, d]) => p.startsWith(path + "/") && !p.slice(path.length + 1).includes("/") && (!filter || d[filter[0]] === filter[1]))
+        const docs = [...server.docs.entries()].filter(([p, d]) => p.startsWith(path + "/") && !p.slice(path.length + 1).includes("/") && matches(d))
           .map(([p]) => snap(p));
-        return { docs, forEach: (fn) => docs.forEach(fn), size: docs.length };
+        return { docs, forEach: (fn) => docs.forEach(fn), size: docs.length, docChanges: () => docs };
       };
       return {
-        where: (field, op, value) => query([field, value]),
-        orderBy: () => query(filter), startAt: () => query(filter), endAt: () => query(filter),
+        where: (field, op, value) => query([...filters, [field, op, value]]),
+        orderBy: () => query(filters), startAt: () => query(filters), endAt: () => query(filters),
         get: () => dev.online ? Promise.resolve(list()) : Promise.reject(new Error("client is offline")),
-        // Counts live queries (each one re-reads every matching record), and can fail them like the cloud does.
+        // Counts live queries and the records they read, and can fail them like the cloud does.
         onSnapshot: (cb, onError) => {
           server.queryListens++;
           if (server.failQueries) { setTimeout(() => onError && onError(new Error("Quota exceeded.")), 2); return () => {}; }
+          if (server.noIndex && filters.some(([, op]) => op === ">")) {
+            setTimeout(() => onError && onError(Object.assign(new Error("The query requires an index."), { code: "failed-precondition" })), 2);
+            return () => {};
+          }
           server.openQueries++;
           let open = true;
-          setTimeout(() => open && cb(list()), 2);
+          setTimeout(() => { if (!open) return; const result = list(); server.queryReads += result.size; cb(result); }, 2);
           return () => { if (open) { open = false; server.openQueries--; } };
         },
       };
     };
-    return { ...query(null), doc: (id) => docRef(path + "/" + id) };
+    return { ...query([]), doc: (id) => docRef(path + "/" + id) };
   }
   const firestore = () => ({
     enablePersistence: () => Promise.resolve(),
@@ -609,4 +615,57 @@ test("a failing task-record query is retried on a slow timer, not every time the
   assert.equal(server.queryListens, 2, "one retry after the wait");
   assert.equal(server.openQueries, 1);
   assert.ok(Array.isArray(await laptop.window.taskLedger.list()));
+});
+
+// Sep 30: a normal day should fit the free plan's 50,000 reads. The device keeps its own copy of the task
+// records and asks the cloud only for the ones changed since, so reopening the app doesn't re-read them all.
+function seedRecords(server, count, updatedAt) {
+  for (let i = 0; i < count; i++) {
+    const taskId = `task_${updatedAt}_${i}`;
+    server.docs.set(`users/u1/data/dg-task-item-${taskId}`, { kind: "daily-grind-task-v1", taskId, deleted: false, listId: "tl_main", listTitle: "Main", task: { id: taskId, name: `Task ${i}`, points: 5, done: false }, updatedAt });
+  }
+}
+test("reopening the app reads only the task records changed since this device last looked", async () => {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  const hourAgo = Date.now() - 3600000;
+  seedRecords(server, 145, hourAgo - 3600000);
+  seedRecords(server, 1, hourAgo);
+  const laptop = device(server);
+  await laptop.window.taskLedger.list(); await settle();
+  assert.equal(server.queryReads, 146, "the very first time: every record");
+  // Reopened (same device storage): only the records changed since, plus a 2-minute margin.
+  const reopened = device(server, { storage: laptop.storage });
+  assert.equal((await reopened.window.taskLedger.list()).length, 146, "the full list comes from the device's copy");
+  assert.equal(server.queryReads, 146 + 1);
+  // Another device changes one record; the next open reads just that one (and the margin one).
+  seedRecords(server, 1, Date.now());
+  const again = device(server, { storage: laptop.storage });
+  assert.equal((await again.window.taskLedger.list()).length, 147);
+  assert.equal(server.queryReads, 146 + 1 + 2);
+});
+
+test("without the index yet, the changed-records query falls back to reading them all", async () => {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  seedRecords(server, 20, Date.now() - 7200000);
+  const laptop = device(server);
+  await laptop.window.taskLedger.list(); await settle();
+  server.noIndex = true;
+  const reopened = device(server, { storage: laptop.storage });
+  assert.equal((await reopened.window.taskLedger.list()).length, 20);
+  assert.equal(server.queryListens, 3, "full, failed delta, full again");
+});
+
+test("past its daily ceiling a device stops reading task records instead of using up everyone's limit", async () => {
+  const server = makeServer();
+  server.docs.set(`users/u1/data/${MAIN}`, { value: JSON.stringify(account()), localTs: 1000 });
+  seedRecords(server, 10, Date.now() - 7200000);
+  const storage = new Map();
+  const day = new Date(Date.now() - 8 * 3600000).toISOString().slice(0, 10); // the app's quota day (UTC-8)
+  storage.set("dg-cloud-reads-v1", JSON.stringify({ day, hour: Math.floor(Date.now() / 3600000), ledger: 5000, ledgerHour: 0, other: 0 }));
+  const phone = device(server, { storage });
+  await assert.rejects(phone.window.taskLedger.list(), /still loading/, "the app carries on without them");
+  assert.equal(server.queryListens, 0);
+  assert.deepEqual({ ...phone.window.cloudReads.today(), day: undefined }, { ledger: 5000, other: 0, day: undefined });
 });
