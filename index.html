@@ -82,6 +82,9 @@
       .notes-section-list > button, .notes-section-row { width: auto !important; flex-shrink: 0; }
       .notes-pages { border-right: 0; border-bottom: 1px solid #2d2d3a; max-height: 260px; padding: 10px; }
       .notes-editor { min-height: 440px; }
+      /* Phone with no page open: the list gets the whole screen, the empty "Select a page" panel hides. */
+      .notes-workspace:not(.has-open-page) .notes-pages { max-height: none; border-bottom: 0; }
+      .notes-workspace:not(.has-open-page) .notes-editor { display: none; }
     }
     @media (prefers-reduced-motion: reduce) { .overlay-pop, .xp-fill { animation: none; } }
     /* Quote of the day: in the empty side margins on wide screens, one line under the date otherwise. */
@@ -6201,7 +6204,7 @@ function DailyGrind() {
         )}
 
         {page === "notes" && (
-          <div data-notes-section className="notes-workspace">
+          <div data-notes-section className={`notes-workspace${noteDraft ? " has-open-page" : ""}`}>
             <aside className="notes-sections" aria-label="Notebook sections">
               <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
                 <img src="icon.svg?v=classic-g" alt="" width="38" height="38" style={{ flexShrink: 0, borderRadius: 8 }} />
