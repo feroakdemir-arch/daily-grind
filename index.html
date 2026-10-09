@@ -1975,6 +1975,29 @@ function calendarSpillCutoffMin(startHour, endHour) {
   return endHour >= 24 ? Math.min(endHour - 24 + 1, startHour) * 60 : 0;
 }
 
+// Saving an edit to a repeating event (Oct 9), like Delete's three choices. scope "day": that date becomes its
+// own one-off event with the edits and the series skips it; "following": the series ends before that date and a
+// new series with the edits starts on it; "all": the whole series takes the edits. updates = the edit form's
+// { title, start, end, color, desc, repeat, repeatDays } (repeat undefined = None). Returns the new event list.
+function calEditScope(events, seriesId, day, updates, scope, newId) {
+  const series = events.find((event) => event.id === seriesId);
+  if (!series) return events;
+  const clean = (event) => { const out = { ...event }; Object.keys(out).forEach((key) => { if (out[key] === undefined) delete out[key]; }); return out; };
+  if (!series.repeat || !day || scope === "all" || (scope === "following" && day <= series.date)) {
+    // The whole event. Turning a series into a one-off keeps it on the day being edited.
+    const becomesOneOff = !!series.repeat && !updates.repeat;
+    return events.map((event) => event.id !== seriesId ? event : clean({ ...event, ...updates,
+      ...(becomesOneOff && day ? { date: day, exceptions: undefined, untilDate: undefined } : {}) }));
+  }
+  if (scope === "day") {
+    const oneOff = clean({ id: newId, date: day, title: updates.title, start: updates.start, end: updates.end, color: updates.color, desc: updates.desc });
+    return [...events.map((event) => event.id !== seriesId ? event : { ...event, exceptions: [...new Set([...(event.exceptions || []), day])] }), oneOff];
+  }
+  const later = (series.exceptions || []).filter((date) => date > day);
+  const next = clean({ ...series, ...updates, id: newId, date: day, exceptions: later.length ? later : undefined });
+  if (!updates.repeat) { delete next.exceptions; delete next.untilDate; }
+  return [...events.map((event) => event.id !== seriesId ? event : { ...event, untilDate: day }), next];
+}
 function parseCalendarData(raw) {
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
   if (!Array.isArray(parsed)) throw new Error("Saved calendar data has an invalid shape");
@@ -4456,6 +4479,8 @@ function DailyGrind() {
   const [calEventDesc, setCalEventDesc] = useState("");
   const [calCreating, setCalCreating] = useState(null); // {date, startMin, endMin}
   const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
+  // Saving an edit to a repeating event first asks which days it applies to (this day / following / all).
+  const [calEditScopeAsk, setCalEditScopeAsk] = useState(false);
   const [calDragging, setCalDragging] = useState(null);
   const [habitDrag, setHabitDrag] = useState(null); // shared {secId, dragIdx, dropIdx, offset} so all cards see the drag
   const habitDragSessionRef = useRef(null);
@@ -7237,7 +7262,7 @@ function DailyGrind() {
                       <div style={{ height: 6, background: evt.color || "#4fc3f7" }} />
                       {/* Action bar */}
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: "10px 14px 0" }}>
-                        <button onClick={() => { setCalEditMode(true); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); }}
+                        <button onClick={() => { setCalEditMode(true); setCalEditScopeAsk(false); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
@@ -7298,10 +7323,12 @@ function DailyGrind() {
               {/* Edit event modal */}
               {calSelectedEvent && calEditMode && (
                 <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "#000000aa", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
-                  onClick={() => { setCalSelectedEvent(null); setCalEditMode(false); }}>
-                  <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%" }}
+                  onClick={() => { setCalSelectedEvent(null); setCalEditMode(false); setCalEditScopeAsk(false); }}>
+                  <div style={{ background: "#1a1a2e", border: "1px solid #2d2d3a", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%", maxHeight: "calc(100vh - 40px)", overflowY: "auto", boxSizing: "border-box" }}
                     onClick={(e) => e.stopPropagation()}>
                     <h3 style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4", letterSpacing: 1.2, marginBottom: 16 }}>EDIT EVENT</h3>
+                    {/* While asking which days to save to, the form steps aside (Back returns to it). */}
+                    {!(calEditScopeAsk && calSelectedEvent.repeat && calSelectedEvent._displayDate) && <>
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>TITLE</label>
                     <input style={S.inp} value={calEventTitle} onChange={(e) => setCalEventTitle(e.target.value)} autoFocus />
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
@@ -7332,19 +7359,46 @@ function DailyGrind() {
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>COLOR</label>
                     <CalColorPicker value={calEventColor} onChange={setCalEventColor} />
                     {calEventFormProblem && <div role="alert" style={{ color: "#ff6b81", fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{calEventFormProblem}</div>}
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={() => { setCalEditMode(false); }} style={S.cBtn}>Cancel</button>
-                      <button disabled={!!calEventFormProblem} onClick={() => {
+                    </>}
+                    {(() => {
+                      const day = calSelectedEvent._displayDate;
+                      const repeating = !!calSelectedEvent.repeat && !!day;
+                      const applyEdit = (scope) => {
                         if (calEventFormProblem) return;
                         const isCustom = calEventRepeat === "custom" && calEventRepeatDays.length > 0;
-                        // Turning a series into a one-off keeps it on the day being edited. It used to fall back to
-                        // the series' first date (out of view, or invisible if that day had been deleted).
-                        const becomesOneOff = !!calSelectedEvent.repeat && calEventRepeat === "none";
-                        editCalEvent(calSelectedEvent.id, { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined,
-                          ...(becomesOneOff && calSelectedEvent._displayDate ? { date: calSelectedEvent._displayDate, exceptions: undefined, untilDate: undefined } : {}) });
-                        setCalSelectedEvent(null); setCalEditMode(false);
-                      }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Save</button>
-                    </div>
+                        const updates = { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined };
+                        const seriesId = calSelectedEvent.id, newId = makeId("ce");
+                        saveCalEvents((events) => calEditScope(events, seriesId, day, updates, scope, newId));
+                        setCalSelectedEvent(null); setCalEditMode(false); setCalEditScopeAsk(false);
+                      };
+                      if (calEditScopeAsk && repeating) {
+                        const dayLabel = new Date(day + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                        const choice = (scope, label, note, color) => (
+                          <button key={scope} onClick={() => applyEdit(scope)}
+                            style={{ padding: "10px 14px", borderRadius: 8, border: `1px solid ${color}55`, background: `${color}14`, cursor: "pointer", fontSize: 13, color, textAlign: "left", fontFamily: "inherit" }}>
+                            <div style={{ fontWeight: 800 }}>{label}</div>
+                            <div style={{ fontSize: 11, color: "#8b8b9e", marginTop: 2 }}>{note}</div>
+                          </button>
+                        );
+                        return (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            <div style={{ fontSize: 15, fontWeight: 800, color: "#f0f0f4", overflowWrap: "anywhere" }}>{calEventTitle.trim() || "(no title)"}</div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: "#c4b5fd", marginBottom: 2 }}>Save changes to</div>
+                            {choice("day", `This day only (${dayLabel})`, "Every other week stays as it is", "#4cd137")}
+                            {choice("following", "This and following events", `From ${dayLabel} on`, "#fbbf24")}
+                            {choice("all", "All events", "Every day this event repeats, past ones too", "#ff6b81")}
+                            <button onClick={() => setCalEditScopeAsk(false)} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "none", cursor: "pointer", fontSize: 12, color: "#8b8b9e", textAlign: "center", fontFamily: "inherit" }}>Back</button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div style={{ display: "flex", gap: 10 }}>
+                          <button onClick={() => { setCalEditMode(false); setCalEditScopeAsk(false); }} style={S.cBtn}>Cancel</button>
+                          <button disabled={!!calEventFormProblem} onClick={() => { if (calEventFormProblem) return; if (repeating) setCalEditScopeAsk(true); else applyEdit("all"); }}
+                            style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Save</button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               )}
