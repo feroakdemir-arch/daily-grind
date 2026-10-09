@@ -2464,6 +2464,29 @@ function habitPoints(status, item, optional, date) {
 }
 function sectionScore(tl, sec, date) { return sec.items.reduce((sc, i) => sc + habitPoints(tl[i.id], i, sec.optional === true, date), 0); }
 function habitScore(tl, secs, date) { return secs.reduce((sc, sec) => sc + sectionScore(tl, sec, date), 0); }
+// "Done unless I slip" habits (Oct 9, item.autoDone): for things being quit, a habit counts as ✓ until it is
+// marked otherwise. Today's unmarked ones read as done (withAutoDone); when a day closes they're stamped done
+// instead of ✗ (stampClosedDay). Marking ✗ is the only way they fail.
+function withAutoDone(dayLog, secs) {
+  const base = dayLog || {};
+  let out = base;
+  (secs || []).forEach((sec) => (sec.items || []).forEach((item) => {
+    if (item.autoDone !== true || out[item.id] !== undefined) return;
+    if (out === base) out = { ...base };
+    out[item.id] = "done";
+  }));
+  return out;
+}
+// A closed day's unmarked habits: "done unless I slip" ones become ✓, other required ones ✗, optional ones stay unmarked.
+function stampClosedDay(dayLog, secs) {
+  const dl = { ...(dayLog || {}) };
+  secs.forEach((sec) => sec.items.forEach((item) => {
+    if (dl[item.id] !== undefined) return;
+    if (item.autoDone === true) dl[item.id] = "done";
+    else if (sec.optional !== true) dl[item.id] = "skip";
+  }));
+  return dl;
+}
 function requiredHabits(secs) { return secs.filter((s) => s.optional !== true).flatMap((s) => s.items); }
 // Optional sections always sit below the required ones.
 function orderedHabitSections(secs) { return [...secs.filter((s) => s.optional !== true), ...secs.filter((s) => s.optional === true)]; }
@@ -3991,8 +4014,10 @@ function startHabitPointerDrag(event, options) {
 }
 
 function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, habitDragSessionRef, setHabitDrag, reorderHabit, openEditHabit, toggleHabitTimer }) {
-  const streak = getStreak(item.id, data.log, today);
-  const overall = getOverall(item.id, data.log);
+  // Today as shown (tl counts an unmarked "done unless I slip" habit as done); past days as saved.
+  const log = tl[item.id] === data.log[today]?.[item.id] ? data.log : { ...data.log, [today]: tl };
+  const streak = getStreak(item.id, log, today);
+  const overall = getOverall(item.id, log);
   const todayNote = tl[item.id + "_note"] || "";
   const [showPicker, setShowPicker] = useState(false);
   const [showComment, setShowComment] = useState(false);
@@ -4078,6 +4103,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
           </div>
           <div style={S.cardMeta}>
             <span>Streak <span className="num" style={{ color: streak > 0 ? "#e6e6ee" : undefined }}>{streak}</span> {"\u00B7"} <span className="num">{overall}%</span> all-time</span>
+            {item.autoDone === true && <span title={"Counts as \u2713 unless you mark \u2717"} style={{ marginLeft: 8, padding: "1px 7px", borderRadius: 999, border: "1px solid #4cd13755", color: "#7ee08a", fontSize: 10, fontWeight: 800, letterSpacing: 0.8 }}>{"AUTO \u2713"}</span>}
             <button onClick={(event) => { event.stopPropagation(); setShowMonthly(!showMonthly); setMonthOffset(0); }} aria-expanded={showMonthly}
               style={{ marginLeft: "auto", background: "none", border: "none", color: showMonthly ? "#a78bfa" : "#77778a", fontSize: 12, cursor: "pointer", padding: "2px 0", fontFamily: "inherit" }}>
               {showMonthly ? "Hide month \u25B4" : "Month \u25BE"}
@@ -4091,7 +4117,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
       <div style={{ position: "relative" }}>
         <div style={S.week}>
           {weekDates.map((date, i) => {
-            const st = data.log[date]?.[item.id];
+            const st = log[date]?.[item.id];
             const nt = data.log[date]?.[item.id + "_note"];
             const isT = date === today, isF = date > today;
             let bg = "#2d2d3a", clr = "#aaaabb", bdr = "2px solid transparent", lbl = "";
@@ -4179,7 +4205,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
           const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
           if (ds > today) break;
           totalDays++;
-          const st = data.log[ds]?.[item.id];
+          const st = log[ds]?.[item.id];
           if (st === "done") doneCount++;
           else if (st === "skip") skipCount++;
         }
@@ -4195,7 +4221,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
               {cells.map((d, i) => {
                 if (d === null) return <div key={"e"+i} />;
                 const ds = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
-                const st = data.log[ds]?.[item.id];
+                const st = log[ds]?.[item.id];
                 const nt = data.log[ds]?.[item.id + "_note"];
                 const isFuture = ds > today;
                 const isToday = ds === today;
@@ -4212,7 +4238,7 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
             </div>
             {selectedMonthDay && (() => {
               const selDate = new Date(selectedMonthDay + "T12:00");
-              const selStatus = data.log[selectedMonthDay]?.[item.id];
+              const selStatus = log[selectedMonthDay]?.[item.id];
               const selNote = data.log[selectedMonthDay]?.[item.id + "_note"];
               return (
                 <div style={{ marginTop: 6, padding: "10px 12px", background: "#12122a", borderRadius: 8, border: "1px solid #2d2d3a", width: "100%" }}>
@@ -4244,6 +4270,22 @@ function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDr
   );
 }
 
+// The habit form's "done unless I slip" switch (item.autoDone).
+function AutoDoneSwitch({ on, onChange }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} onClick={() => onChange(!on)}
+      style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", marginTop: 14, padding: "12px", background: on ? "#4cd13712" : "#12122a", border: `1px solid ${on ? "#4cd13766" : "#2d2d3a"}`, borderRadius: 10, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+      <span aria-hidden="true" style={{ position: "relative", width: 38, height: 22, borderRadius: 11, background: on ? "#4cd137" : "#3a3a4a", flexShrink: 0, transition: "background 0.15s" }}>
+        <span style={{ position: "absolute", top: 3, left: on ? 19 : 3, width: 16, height: 16, borderRadius: 8, background: "#fff", transition: "left 0.15s" }} />
+      </span>
+      <span style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: "#f0f0f4" }}>Auto ✓: done unless I slip</span>
+        <span style={{ fontSize: 11, color: "#8b8b9e", lineHeight: 1.4 }}>For something you're quitting. It counts as ✓ every day on its own; mark ✗ only on a day you slip.</span>
+      </span>
+    </button>
+  );
+}
+
 function DailyGrind() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4268,6 +4310,7 @@ function DailyGrind() {
   const [editSection, setEditSection] = useState(null);
   const [formName, setFormName] = useState("");
   const [formPoints, setFormPoints] = useState("10");
+  const [formAutoDone, setFormAutoDone] = useState(false);
   const [formDesc, setFormDesc] = useState("");
   const [formComment, setFormComment] = useState("");
   const [editTaskCtx, setEditTaskCtx] = useState(null); // { listId, itemId }
@@ -4912,7 +4955,6 @@ function DailyGrind() {
     if (data.lastTaskResetDate && data.lastTaskResetDate < today) startDs = data.lastTaskResetDate;
     if (data.log[yday] && !data.history[yday] && (!startDs || yday < startDs)) startDs = yday;
     if (startDs) {
-      const habits = requiredHabits(data.habitSections);
       const allTasks = data.taskLists.flatMap((l) => l.items);
       const newLog = { ...updated.log };
       const newHistory = { ...updated.history };
@@ -4923,8 +4965,7 @@ function DailyGrind() {
       while (localDateStr(cur) < today && guard++ < 366) {
         const ds = localDateStr(cur);
         if (!newHistory[ds]) {
-          const dl = { ...(newLog[ds] || {}) };
-          habits.forEach((h) => { if (dl[h.id] === undefined) dl[h.id] = "skip"; });
+          const dl = stampClosedDay(newLog[ds], data.habitSections);
           newLog[ds] = dl;
           const hs = habitScore(dl, data.habitSections, ds);
           const ts = allTasks.reduce((sc, t) => sc + ((t.done && (t.doneDate ? t.doneDate === ds : ds === yday)) ? t.points : 0), 0);
@@ -4978,12 +5019,13 @@ function DailyGrind() {
     }
   }, [data, save, hasSavedData, today]);
 
-  const getTL = () => data?.log[today] || {};
+  // Today's statuses as shown and scored: "done unless I slip" habits that aren't marked count as done.
+  const getTL = () => withAutoDone(data?.log[today] || {}, data?.habitSections);
 
   function toggleHabit(itemId) {
     save((current) => {
       const tl = current.log[today] || {};
-      const cur = tl[itemId];
+      const cur = withAutoDone(tl, current.habitSections)[itemId];
       const next = statusCycle[(statusCycle.indexOf(cur) + 1) % statusCycle.length];
       const ntl = { ...tl };
       if (next === undefined) delete ntl[itemId]; else ntl[itemId] = next;
@@ -4996,8 +5038,9 @@ function DailyGrind() {
   function addHabit(secId) {
     if (!formName.trim()) return;
     const item = { id: makeId("h"), name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    if (formAutoDone) item.autoDone = true;
     save((current) => ({ ...current, habitSections: current.habitSections.map((s) => s.id === secId ? { ...s, items: [...s.items, item] } : s) }));
-    setFormName(""); setFormPoints("10"); setFormDesc(""); setView("main");
+    setFormName(""); setFormPoints("10"); setFormDesc(""); setFormAutoDone(false); setView("main");
   }
   async function deleteHabit(id) {
     const habit = allHabits(dataRef.current?.habitSections || []).find((item) => item.id === id);
@@ -5009,10 +5052,11 @@ function DailyGrind() {
   function saveHabitEdit() {
     if (!editItem || !formName.trim()) return;
     const u = { name: formName.trim(), points: Math.max(1, parseInt(formPoints) || 10), desc: formDesc.trim() };
+    const withAuto = (habit) => { const next = { ...habit, ...u }; if (formAutoDone) next.autoDone = true; else delete next.autoDone; return next; };
     save((current) => ({
       ...current,
       // Only the edited fields: a timer started or stopped while the editor was open stays as it is.
-      habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? { ...i, ...u } : i) })),
+      habitSections: current.habitSections.map((s) => ({ ...s, items: s.items.map((i) => i.id === editItem.id ? withAuto(i) : i) })),
       log: { ...current.log, [today]: { ...(current.log[today] || {}), [editItem.id + "_note"]: formComment.trim() } },
     }));
     setView("main"); setEditItem(null); setFormDesc(""); setFormComment("");
@@ -5034,7 +5078,7 @@ function DailyGrind() {
   }
   function openEditHabit(item, secId) {
     setEditItem(item); setEditSection(secId);
-    setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || "");
+    setFormName(item.name); setFormPoints(String(item.points)); setFormDesc(item.desc || ""); setFormAutoDone(item.autoDone === true);
     setFormComment((data.log[today] || {})[item.id + "_note"] || "");
     setView("editHabit");
   }
@@ -6158,7 +6202,7 @@ function DailyGrind() {
       </>}
       <div className={page === "notes" ? "notes-screen" : undefined} style={page === "calendar" ? { ...S.box, maxWidth: "none", padding: "8px 8px 60px", background: "#1a1a2e" } : page === "notes" ? { ...S.box, maxWidth: "none", margin: 0, padding: "14px 0 calc(54px + env(safe-area-inset-bottom, 0px))", display: "flex", flexDirection: "column", overflow: "hidden", boxSizing: "border-box" } : S.box}>
         {page !== "calendar" && winAnim && <div className="overlay-pop" style={S.win}><div style={{ marginBottom: 14, color: "#00ff87", filter: "drop-shadow(0 0 18px #00ff87aa)" }}><Icon name="zap" size={64} stroke={2} /></div><div style={S.winTxt}>MISSION COMPLETE</div><div style={S.winSub}>{score}/{data.dailyGoal} pts</div></div>}
-        {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ marginBottom: 14, color: "#ffd43b", filter: "drop-shadow(0 0 18px #ffd43baa)" }}><Icon name="trophy" size={64} stroke={2} /></div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} \u00B7 {lifePts.toLocaleString()} lifetime XP</div></div>}
+        {page !== "calendar" && levelUpAnim && !winAnim && <div className="overlay-pop" style={{ ...S.win, background: "radial-gradient(circle at center,#ffd43b26 0%,#0b0b14f2 62%)" }}><div style={{ marginBottom: 14, color: "#ffd43b", filter: "drop-shadow(0 0 18px #ffd43baa)" }}><Icon name="trophy" size={64} stroke={2} /></div><div style={{ ...S.winTxt, color: "#ffd43b", textShadow: "0 0 40px #ffd43b66" }}>LEVEL {levelUpAnim}</div><div style={S.winSub}>{rankForLevel(levelUpAnim)} {"\u00B7"} {lifePts.toLocaleString()} lifetime XP</div></div>}
 
         {page !== "calendar" && <div style={{ marginBottom: page === "notes" ? 12 : 20, padding: page === "notes" ? "0 16px" : 0, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
@@ -6272,7 +6316,7 @@ function DailyGrind() {
                 Extras that add points when you do them. Skipping one never costs points. Required habits above lose their points when marked {"\u2717"}.
               </div>}
               {sec.items.map((item, idx) => <HabitCard key={item.id} item={item} secId={sec.id} idx={idx} data={data} save={save} today={today} weekDates={weekDates} tl={tl} habitDrag={habitDrag} habitDragSessionRef={habitDragSessionRef} setHabitDrag={setHabitDrag} reorderHabit={reorderHabit} openEditHabit={openEditHabit} toggleHabitTimer={toggleHabitTimer} />)}
-              <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
+              <button onClick={() => { setEditSection(sec.id); setFormName(""); setFormPoints("10"); setFormAutoDone(false); setView("addHabit"); }} style={S.addR}><span style={S.addI}>+</span> Add habit</button>
             </div>
           );
         })}
@@ -7347,6 +7391,7 @@ function DailyGrind() {
     return FW(<div style={S.fCard}><h2 style={S.fTitle}>ADD TO {sec?.title}</h2>
       <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
       <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
+      <AutoDoneSwitch on={formAutoDone} onChange={setFormAutoDone} />
       <label style={S.lbl}>Description (optional)</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="e.g., Mon-Push, Tue-Rest, Wed-Pull..." rows={3} />
       <div style={S.fAct}><button onClick={() => { setView("main"); setFormDesc(""); }} style={S.cBtn}>Cancel</button><button onClick={() => addHabit(editSection)} style={S.okBtn}>Add</button></div>
     </div>);
@@ -7356,6 +7401,7 @@ function DailyGrind() {
     return FW(<div style={S.fCard}><h2 style={S.fTitle}>EDIT HABIT</h2>
       <label style={S.lbl}>Name</label><input style={S.inp} value={formName} onChange={(e) => setFormName(e.target.value)} autoFocus />
       <label style={S.lbl}>Points</label><input style={S.inp} type="number" value={formPoints} onChange={(e) => setFormPoints(e.target.value)} min="1" />
+      <AutoDoneSwitch on={formAutoDone} onChange={setFormAutoDone} />
       <label style={S.lbl}>Description</label><textarea style={S.textarea} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="Add details, schedule, notes..." rows={4} />
       <label style={S.lbl}>{"\uD83D\uDCDD"} Today's Comment</label><textarea style={{ ...S.textarea, borderColor: "#7c3aed44" }} value={formComment} onChange={(e) => setFormComment(e.target.value)} placeholder="e.g., 82.5kg, skipped because sick, did 30 min instead..." rows={2} />
       <label style={S.lbl}>Move to section</label>
