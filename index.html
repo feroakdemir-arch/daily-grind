@@ -1743,6 +1743,43 @@ function sortNotes(notes, noteOrder) {
   const place = (note) => rank.has(note.id) ? rank.get(note.id) : -1;
   return [...notes].sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true) || place(a) - place(b) || (b.updatedAt || 0) - (a.updatedAt || 0));
 }
+// Subtasks (Oct 9): a task can be broken down into steps, kept on the task as subtasks: [{ id, name, done }].
+// Steps carry no points; the task's points come when the task itself is checked off. Steps have ids, so two
+// devices editing different steps of one task merge step by step like list items.
+function normalizeSubtasks(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const steps = [];
+  value.forEach((step) => {
+    if (!step || typeof step !== "object" || typeof step.id !== "string" || !step.id || seen.has(step.id)) return;
+    seen.add(step.id);
+    steps.push({ id: step.id, name: typeof step.name === "string" ? step.name.slice(0, 500) : "", done: step.done === true });
+  });
+  return steps.slice(0, 100);
+}
+function subtaskProgress(task) {
+  const steps = normalizeSubtasks(task && task.subtasks);
+  return { done: steps.filter((step) => step.done).length, total: steps.length };
+}
+// change(steps) returns the task's new steps; found by task id, so a task that moved lists still updates.
+// A task left with no steps loses the field.
+function editSubtasks(taskLists, taskId, change) {
+  return taskLists.map((list) => {
+    if (!list.items.some((task) => task.id === taskId)) return list;
+    return { ...list, items: list.items.map((task) => {
+      if (task.id !== taskId) return task;
+      const steps = normalizeSubtasks(change(normalizeSubtasks(task.subtasks)));
+      const next = { ...task };
+      if (steps.length) next.subtasks = steps; else delete next.subtasks;
+      return next;
+    }) };
+  });
+}
+// A daily list's new day: the task's steps start unchecked again.
+function resetSubtasks(task) {
+  if (!Array.isArray(task.subtasks)) return task;
+  return { ...task, subtasks: normalizeSubtasks(task.subtasks).map((step) => ({ ...step, done: false })) };
+}
 function parseMainData(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.habitSections) || !Array.isArray(parsed.taskLists)) {
@@ -1767,6 +1804,8 @@ function parseMainData(raw) {
     else delete normalized.deadline;
     if (typeof item.noteId === "string" && item.noteId.length <= 160) normalized.noteId = item.noteId;
     else delete normalized.noteId;
+    const subtasks = normalizeSubtasks(item.subtasks);
+    if (subtasks.length) normalized.subtasks = subtasks; else delete normalized.subtasks;
     const timerStartedAt = finiteNumber(item.timerStartedAt, 0);
     if (timerStartedAt > 0) normalized.timerStartedAt = timerStartedAt; else delete normalized.timerStartedAt;
     return normalized;
@@ -2766,6 +2805,87 @@ function TaskWorkTimer({ task, onToggle }) {
   return <WorkTimerPill name={task.name} startedAt={task.timerStartedAt} elapsedAt={(now) => taskElapsedSeconds(task, now)} onToggle={onToggle} />;
 }
 
+// Beside the timer: "+ Break down" on a task without steps, else its progress ("2/5 steps"), which opens the steps.
+function TaskStepsToggle({ task, open, onToggle }) {
+  const { done, total } = subtaskProgress(task);
+  const complete = total > 0 && done === total;
+  return (
+    <button type="button" onClick={onToggle} aria-expanded={open}
+      aria-label={total ? `${open ? "Close" : "Open"} the steps of ${task.name}: ${done} of ${total} done` : `Break ${task.name} down into steps`}
+      title={total ? (open ? "Close steps" : "Open steps") : "Break this task down into steps"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6, marginTop: 5,
+        background: complete ? "#4cd13714" : "transparent",
+        border: `1px solid ${complete ? "#4cd13755" : open ? "#7c3aed88" : "#2f2f44"}`,
+        borderRadius: 999, color: complete ? "#7ee08a" : "#9a9aae",
+        cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 600,
+        padding: "3px 10px 3px 8px", lineHeight: 1.2, flexShrink: 0,
+      }}>
+      {total
+        ? <><span aria-hidden="true" style={{ fontSize: 9, color: complete ? "#4cd137" : "#a78bfa" }}>{open ? "▾" : "▸"}</span><span><span className="num">{done}/{total}</span> steps</span></>
+        : <><span aria-hidden="true" style={{ color: "#a78bfa", fontWeight: 800 }}>+</span>Break down</>}
+    </button>
+  );
+}
+
+// A task's steps, under the task while it is open: check them off, tap one to rename it, remove it, add more.
+function TaskSteps({ task, onChange }) {
+  const steps = normalizeSubtasks(task.subtasks);
+  const [text, setText] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+  const inputRef = useRef(null);
+  // Opened to break the task down (no steps yet): the cursor goes straight to the first step.
+  useEffect(() => { if (!normalizeSubtasks(task.subtasks).length) inputRef.current?.focus(); }, []);
+  const add = () => {
+    const name = text.trim();
+    if (!name) return;
+    onChange((current) => [...current, { id: makeId("st"), name, done: false }]);
+    setText("");
+  };
+  const finishRename = () => {
+    const id = editingId, name = editText.trim();
+    setEditingId(null);
+    if (id && name) onChange((current) => current.map((step) => step.id === id ? { ...step, name } : step));
+  };
+  return (
+    <div data-task-steps={task.id} style={{ paddingLeft: 10, borderLeft: "2px solid #2d2d3a" }}>
+      {steps.map((step) => (
+        <div key={step.id} data-step-id={step.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0" }}>
+          <button type="button" className="hit-expand check-hit" aria-pressed={step.done}
+            aria-label={`${step.done ? "Uncheck" : "Check off"} ${step.name}`} title={step.done ? "Uncheck" : "Check off"}
+            onClick={() => onChange((current) => current.map((item) => item.id === step.id ? { ...item, done: !item.done } : item))}
+            style={{ ...S.tCircle, width: 16, height: 16, borderRadius: 8, background: step.done ? "#4cd137" : "transparent", borderColor: step.done ? "#4cd137" : "#555566" }}>
+            {step.done && <span style={{ fontSize: 9, color: "#fff", lineHeight: 1 }}>{"✓"}</span>}
+          </button>
+          {editingId === step.id
+            ? <input autoFocus value={editText} aria-label={`Rename ${step.name}`}
+                onChange={(e) => setEditText(e.target.value)} onBlur={finishRename}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); finishRename(); } else if (e.key === "Escape") setEditingId(null); }}
+                style={{ ...S.tAddInp, padding: "2px 0", fontSize: 13 }} />
+            : <span role="button" tabIndex={0} title="Tap to rename"
+                onClick={() => { setEditingId(step.id); setEditText(step.name); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setEditingId(step.id); setEditText(step.name); } }}
+                style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", cursor: "text", color: step.done ? "#8b8b9e" : "#d8d8e2", textDecoration: step.done ? "line-through" : "none" }}>{step.name}</span>}
+          <button type="button" className="icon-btn" aria-label={`Remove step ${step.name}`} title="Remove step"
+            onClick={() => onChange((current) => current.filter((item) => item.id !== step.id))}
+            style={{ ...S.tX, padding: 0 }}><Icon name="x" size={14} /></button>
+        </div>
+      ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 2px" }}>
+        <span aria-hidden="true" style={{ ...S.tAddIcon, fontSize: 14 }}>+</span>
+        <input ref={inputRef} value={text} aria-label={`Add a step to ${task.name}`}
+          placeholder={steps.length ? "Add a step" : "First step, then Enter"}
+          onChange={(e) => setText(e.target.value)} onBlur={add}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+          style={{ ...S.tAddInp, padding: "6px 0", fontSize: 13 }} />
+        {text.trim() && <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={add}
+          style={{ background: "#7c3aed", color: "#fff", border: "none", borderRadius: 7, padding: "6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 10.5, fontWeight: 900, letterSpacing: 1 }}>ADD</button>}
+      </div>
+    </div>
+  );
+}
+
 // A habit's timer shows the time tracked today (or, while running, for the day it counts toward).
 function HabitWorkTimer({ habit, data, today, onToggle }) {
   const date = habit.timerStartedAt ? habit.timerDate || today : today;
@@ -3421,7 +3541,14 @@ function SaveIndicator({ info, onRetry, onUpdate }) {
   );
 }
 
-function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+  // Tasks opened to show their steps (this screen only; every task starts closed).
+  const [openSteps, setOpenSteps] = useState(() => new Set());
+  const toggleSteps = (taskId) => setOpenSteps((prev) => {
+    const next = new Set(prev);
+    if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+    return next;
+  });
   const initialDraftRef = useRef(undefined);
   if (initialDraftRef.current === undefined) initialDraftRef.current = readTaskDraft(list.id);
   const [text, setText] = useState(() => initialDraftRef.current?.name || "");
@@ -3682,9 +3809,13 @@ function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDel
         const isMe = !!taskDrag && taskDrag.sourceListId === list.id && taskDrag.taskId === t.id;
         const isDragging = !!taskDrag;
         const showDropBefore = isTaskDropTarget && taskDrag.targetIndex === pendingDropItems.findIndex((item) => item.id === t.id);
+        const stepsOpen = openSteps.has(t.id);
+        const steps = subtaskProgress(t);
+        const stepsComplete = steps.total > 0 && steps.done === steps.total;
         return (
         <div key={t.id} data-taskrow={i} data-task-id={t.id} style={{
           ...S.tRow,
+          flexWrap: stepsOpen ? "wrap" : "nowrap",
           borderTop: showDropBefore && !isMe ? "2px solid #a78bfa" : "none",
           transform: isMe ? `translateY(${taskDrag.offset}px) scale(1.02)` : "none",
           transition: isMe ? "none" : "transform 0.15s",
@@ -3703,17 +3834,25 @@ function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDel
             style={{ cursor: "grab", color: "#8b8b9e", fontSize: 18, padding: "0 6px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900, background: "none", border: "none", fontFamily: "inherit" }}
             title="Drag to reorder or move to another list"
           >{"\u22ee"}</button>
-          <button className="hit-expand check-hit" onClick={() => onToggle(list.id, t.id)} aria-label={`Complete ${t.name}`} title="Complete" style={S.tCircle} />
+          <button className="hit-expand check-hit" onClick={() => onToggle(list.id, t.id)} aria-label={`Complete ${t.name}`} title={stepsComplete ? "All steps done: complete the task" : "Complete"} style={stepsComplete ? { ...S.tCircle, borderColor: "#4cd137", boxShadow: "0 0 8px #4cd13766" } : S.tCircle} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <span style={{ ...S.tText, flex: "0 1 auto" }}>{t.name}</span>
+              <span role="button" tabIndex={0} onClick={() => toggleSteps(t.id)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSteps(t.id); } }}
+                aria-expanded={stepsOpen} title={stepsOpen ? "Close steps" : "Open steps"} style={{ ...S.tText, flex: "0 1 auto", cursor: "pointer" }}>{t.name}</span>
               {(() => { const chip = deadlineChip(t.deadline); if (!chip) return null; const late = chip.text.startsWith("\u26A0"); return <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "2px 8px", borderRadius: 999, fontSize: 11, fontWeight: 700, color: chip.color, background: chip.bg, border: `1px solid ${chip.border}`, whiteSpace: "nowrap" }}><Icon name={late ? "alert" : "calendar"} size={12} stroke={2.4} />{chip.text.replace(/^(\u{1F4C5}|\u26A0)\s*/u, "")}</span>; })()}
             </div>
-            <TaskWorkTimer task={t} onToggle={() => onToggleTimer(list.id, t.id)} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <TaskWorkTimer task={t} onToggle={() => onToggleTimer(list.id, t.id)} />
+              {onSteps && <TaskStepsToggle task={t} open={stepsOpen} onToggle={() => toggleSteps(t.id)} />}
+            </div>
           </div>
           {t.points > 0 && <span style={S.tPts}>+{t.points}</span>}
           <button className="icon-btn" onClick={() => onEdit && onEdit(list.id, t)} style={{ background: "none", border: "none", cursor: "pointer", color: "#8b8b9e", padding: 0 }} title="Edit task" aria-label={`Edit ${t.name}`}><Icon name="pencil" size={15} /></button>
           <button className="icon-btn" onClick={() => onDelete(list.id, t.id)} style={{ ...S.tX, padding: 0 }} title="Delete task" aria-label={`Delete ${t.name}`}><Icon name="x" size={16} /></button>
+          {/* Steps take a full-width line under the task (the name column is narrow on phones). */}
+          {stepsOpen && onSteps && <div style={{ flexBasis: "100%", minWidth: 0, paddingLeft: 30, boxSizing: "border-box" }}>
+            <TaskSteps task={t} onChange={(change) => onSteps(t.id, change)} />
+          </div>}
         </div>
         );
       })}
@@ -4814,7 +4953,7 @@ function DailyGrind() {
             trackedSeconds: taskElapsedSeconds(t),
           }));
           return { ...l, completedLog: [...archived, ...(l.completedLog || [])], items: l.items.map((t) => {
-            const reset = { ...t, done: false, trackedSeconds: 0 };
+            const reset = { ...resetSubtasks(t), done: false, trackedSeconds: 0 };
             delete reset.doneDate;
             delete reset.timerStartedAt;
             return reset;
@@ -4968,6 +5107,10 @@ function DailyGrind() {
       if (l.id !== listId || l.items.some((item) => item.id === task.id)) return l;
       return { ...l, items: [...l.items, task] };
     }) }));
+  }, [save]);
+  // A task's steps (subtasks): change(steps) returns the new steps.
+  const editTaskSteps = useCallback((taskId, change) => {
+    save((prev) => ({ ...prev, taskLists: editSubtasks(prev.taskLists, taskId, change) }));
   }, [save]);
   const moveTaskBetweenLists = useCallback((sourceListId, taskId, targetListId, targetPendingIndex) => {
     save((prev) => {
@@ -6175,7 +6318,7 @@ function DailyGrind() {
               </div>
             )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
