@@ -32,9 +32,27 @@ test("a typed name links to the one task with exactly that name", () => {
 });
 
 test("the pomodoro's task is remembered on this device", () => {
-  assert.deepEqual({ ...c.readPomoFocus() }, { name: "", taskId: null });
+  assert.deepEqual({ ...c.readPomoFocus() }, { name: "", taskId: null, stepId: null });
   storage.set("dg-pomo-focus-v1", JSON.stringify({ name: "Essay", taskId: "t2" }));
-  assert.deepEqual({ ...c.readPomoFocus() }, { name: "Essay", taskId: "t2" });
+  assert.deepEqual({ ...c.readPomoFocus() }, { name: "Essay", taskId: "t2", stepId: null });
   storage.set("dg-pomo-focus-v1", "not json");
-  assert.deepEqual({ ...c.readPomoFocus() }, { name: "", taskId: null });
+  assert.deepEqual({ ...c.readPomoFocus() }, { name: "", taskId: null, stepId: null });
+});
+
+test("a step sent to the pomodoro is found by task and step id, wherever the task moved", () => {
+  const withSteps = [{ id: "main", title: "Main", items: [{ id: "hw", name: "Problem set 3", points: 10, done: false, subtasks: [{ id: "q1", name: "Q1", done: true }, { id: "q2", name: "Q2", done: false }] }] }];
+  const found = c.findPomoStep(withSteps, { taskId: "hw", stepId: "q2" });
+  assert.equal(found.step.name, "Q2"); assert.equal(found.index, 1); assert.equal(found.steps.length, 2); assert.equal(found.list.id, "main");
+  const moved = [{ id: "main", title: "Main", items: [] }, { id: "other", title: "Other", items: withSteps[0].items }];
+  assert.equal(c.findPomoStep(moved, { taskId: "hw", stepId: "q1" }).list.id, "other");
+  assert.equal(c.findPomoStep(withSteps, { taskId: "hw", stepId: "gone" }), null, "a deleted step is not found");
+  assert.equal(c.findPomoStep(withSteps, { taskId: "hw" }), null, "a plain task link is not a step");
+  assert.equal(c.findPomoStep(withSteps, null), null);
+});
+
+test("the pomodoro remembers a step only together with its task", () => {
+  storage.set("dg-pomo-focus-v1", JSON.stringify({ name: "Q2", taskId: "hw", stepId: "q2" }));
+  assert.deepEqual({ ...c.readPomoFocus() }, { name: "Q2", taskId: "hw", stepId: "q2" });
+  storage.set("dg-pomo-focus-v1", JSON.stringify({ name: "Q2", stepId: "q2" }));
+  assert.deepEqual({ ...c.readPomoFocus() }, { name: "Q2", taskId: null, stepId: null });
 });

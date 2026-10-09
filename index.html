@@ -2674,8 +2674,19 @@ const POMO_FOCUS_KEY = "dg-pomo-focus-v1";
 function readPomoFocus() {
   try {
     const saved = JSON.parse(localStorage.getItem(POMO_FOCUS_KEY) || "null");
-    return { name: saved && typeof saved.name === "string" ? saved.name : "", taskId: saved && typeof saved.taskId === "string" && saved.taskId ? saved.taskId : null };
-  } catch (e) { return { name: "", taskId: null }; }
+    const taskId = saved && typeof saved.taskId === "string" && saved.taskId ? saved.taskId : null;
+    return { name: saved && typeof saved.name === "string" ? saved.name : "", taskId, stepId: taskId && typeof saved.stepId === "string" && saved.stepId ? saved.stepId : null };
+  } catch (e) { return { name: "", taskId: null, stepId: null }; }
+}
+// A task's step sent to the pomodoro (link = { taskId, stepId }): { list, task, steps, index, step } while the
+// step still exists (wherever its task has moved), else null.
+function findPomoStep(taskLists, link) {
+  if (!link || !link.taskId || !link.stepId) return null;
+  const found = findPomoTask(taskLists, { taskId: link.taskId }, "");
+  if (!found || found.task.id !== link.taskId) return null;
+  const steps = (Array.isArray(found.task.subtasks) ? found.task.subtasks : []).filter((step) => step && typeof step.id === "string");
+  const index = steps.findIndex((step) => step.id === link.stepId);
+  return index < 0 ? null : { ...found, steps, index, step: steps[index] };
 }
 // The task list item the pomodoro is working on: the one it was sent from (wherever it has moved), or else
 // the one task whose name is exactly what was typed (an unfinished one first). Returns { list, task } or null.
@@ -2852,7 +2863,7 @@ function TaskStepsToggle({ task, open, onToggle }) {
 }
 
 // A task's steps, under the task while it is open: check them off, tap one to rename it, remove it, add more.
-function TaskSteps({ task, onChange }) {
+function TaskSteps({ task, onChange, onFocus }) {
   const steps = normalizeSubtasks(task.subtasks);
   const [text, setText] = useState("");
   const [editingId, setEditingId] = useState(null);
@@ -2890,6 +2901,10 @@ function TaskSteps({ task, onChange }) {
                 onClick={() => { setEditingId(step.id); setEditText(step.name); }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setEditingId(step.id); setEditText(step.name); } }}
                 style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", cursor: "text", color: step.done ? "#8b8b9e" : "#d8d8e2", textDecoration: step.done ? "line-through" : "none" }}>{step.name}</span>}
+          {onFocus && !step.done && <button type="button" onClick={() => onFocus(step)} aria-label={`Send ${step.name} to the Pomodoro`} title="Work on this step in the Pomodoro"
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: "1px solid #2f2f44", borderRadius: 999, color: "#9a9aae", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600, padding: "2px 8px", flexShrink: 0 }}>
+            <span aria-hidden="true">{"🍅"}</span>Focus
+          </button>}
           <button type="button" className="icon-btn" aria-label={`Remove step ${step.name}`} title="Remove step"
             onClick={() => onChange((current) => current.filter((item) => item.id !== step.id))}
             style={{ ...S.tX, padding: 0 }}><Icon name="x" size={14} /></button>
@@ -3564,7 +3579,7 @@ function SaveIndicator({ info, onRetry, onUpdate }) {
   );
 }
 
-function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onStepToPomo, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
   // Tasks opened to show their steps (this screen only; every task starts closed).
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const toggleSteps = (taskId) => setOpenSteps((prev) => {
@@ -3874,7 +3889,7 @@ function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDel
           <button className="icon-btn" onClick={() => onDelete(list.id, t.id)} style={{ ...S.tX, padding: 0 }} title="Delete task" aria-label={`Delete ${t.name}`}><Icon name="x" size={16} /></button>
           {/* Steps take a full-width line under the task (the name column is narrow on phones). */}
           {stepsOpen && onSteps && <div style={{ flexBasis: "100%", minWidth: 0, paddingLeft: 30, boxSizing: "border-box" }}>
-            <TaskSteps task={t} onChange={(change) => onSteps(t.id, change)} />
+            <TaskSteps task={t} onChange={(change) => onSteps(t.id, change)} onFocus={onStepToPomo ? (step) => onStepToPomo(t, step) : null} />
           </div>}
         </div>
         );
@@ -4398,18 +4413,21 @@ function DailyGrind() {
   const [customTimerRunning, setCustomTimerRunning] = useState(false);
   const [stopwatchSec, setStopwatchSec] = useState(0);
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
-  // What the pomodoro is working on. pomoLink = the task it was sent from ({ taskId }), so checking it off
-  // here checks it off in the task list too. Kept on this device across reloads.
+  // What the pomodoro is working on. pomoLink = the task it was sent from ({ taskId }, plus stepId for one of
+  // its steps), so checking it off here checks it off in the task list too. Kept on this device across reloads.
   const [pomoTask, setPomoTaskText] = useState(() => readPomoFocus().name);
-  const [pomoLink, setPomoLink] = useState(() => readPomoFocus().taskId ? { taskId: readPomoFocus().taskId } : null);
+  const [pomoLink, setPomoLink] = useState(() => {
+    const saved = readPomoFocus();
+    return saved.taskId ? (saved.stepId ? { taskId: saved.taskId, stepId: saved.stepId } : { taskId: saved.taskId }) : null;
+  });
   const [pomoDoneLocal, setPomoDoneLocal] = useState(false);
-  const setPomoTask = useCallback((name, taskId) => {
+  const setPomoTask = useCallback((name, taskId, stepId) => {
     setPomoTaskText(name);
-    setPomoLink(taskId ? { taskId } : null);
+    setPomoLink(taskId ? (stepId ? { taskId, stepId } : { taskId }) : null);
     setPomoDoneLocal(false);
   }, []);
   useEffect(() => {
-    try { localStorage.setItem(POMO_FOCUS_KEY, JSON.stringify({ name: pomoTask, taskId: pomoLink ? pomoLink.taskId : null })); } catch (e) {}
+    try { localStorage.setItem(POMO_FOCUS_KEY, JSON.stringify({ name: pomoTask, taskId: pomoLink ? pomoLink.taskId : null, stepId: pomoLink && pomoLink.stepId ? pomoLink.stepId : null })); } catch (e) {}
   }, [pomoTask, pomoLink]);
   const [showScoreDetail, setShowScoreDetail] = useState(false);
   // One-day view: the date (YYYY-MM-DD) shown on its own, or null for the week.
@@ -6362,7 +6380,9 @@ function DailyGrind() {
               </div>
             )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps} onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps}
+                onStepToPomo={(task, step) => { setPomoTask(step.name, task.id, step.id); setView("main"); setPage("timer"); window.scrollTo({ top: 0 }); }}
+                onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
             {showNewList ? (
               <div style={{ marginTop: 12 }}>
@@ -6630,9 +6650,49 @@ function DailyGrind() {
                     placeholder="What are you working on?"
                     style={{ width: "100%", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 10, color: "#f0f0f4", fontSize: 13, fontFamily: "inherit", padding: "10px 14px", outline: "none", boxSizing: "border-box", textAlign: "center" }} />
                   {pomoTask && (() => {
+                    // A step sent from a task: checking it off here checks the step off in the list, then
+                    // offers the task's next unchecked step (or, once all are done, the task itself).
+                    const stepMatch = findPomoStep(data.taskLists, pomoLink);
+                    if (stepMatch) {
+                      const { task, step, steps, index } = stepMatch;
+                      const stepDone = step.done === true;
+                      const next = steps.slice(index + 1).find((item) => !item.done) || steps.slice(0, index).find((item) => !item.done);
+                      const allDone = steps.every((item) => item.done);
+                      return (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+                            <button className="hit-expand check-hit" aria-pressed={stepDone}
+                              onClick={() => editTaskSteps(task.id, (current) => current.map((item) => item.id === step.id ? { ...item, done: !item.done } : item))}
+                              aria-label={stepDone ? `Uncheck ${step.name}` : `Check off ${step.name}`} title={stepDone ? "Tap to uncheck" : "Check off this step"}
+                              style={{ ...S.tCircle, borderColor: stepDone ? "#4cd137" : "#8b8b9e", background: stepDone ? "#4cd137" : "transparent", color: "#fff", fontSize: 11, fontWeight: 900 }}>
+                              {stepDone ? "✓" : ""}
+                            </button>
+                            <div style={{ fontSize: 10, color: stepDone ? "#8b8b9e" : "#f0f0f4", fontWeight: 700, letterSpacing: 1, textDecoration: stepDone ? "line-through" : "none", textAlign: "left", overflowWrap: "anywhere" }}>
+                              {stepDone ? "DONE" : "WORKING ON"}: {step.name}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 10, color: "#77778a", marginTop: 6 }}>
+                            Step {index + 1} of {steps.length} {"·"} {task.name}
+                          </div>
+                          {stepDone && next && (
+                            <button type="button" onClick={() => setPomoTask(next.name, task.id, next.id)}
+                              style={{ marginTop: 10, padding: "8px 12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: 10, color: "#c4b5fd", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", overflowWrap: "anywhere" }}>
+                              Next step: {next.name} {"→"}
+                            </button>
+                          )}
+                          {allDone && !task.done && (
+                            <button type="button" onClick={() => toggleTask(stepMatch.list.id, task.id)}
+                              style={{ marginTop: 10, padding: "8px 12px", background: "#4cd13718", border: "1px solid #4cd137", borderRadius: 10, color: "#7ee08a", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", overflowWrap: "anywhere" }}>
+                              All steps done: complete {task.name}{task.points > 0 ? ` (+${task.points})` : ""}
+                            </button>
+                          )}
+                          {allDone && task.done && <div style={{ fontSize: 10, color: "#4cd137", marginTop: 8, fontWeight: 700 }}>Task complete {"·"} +{task.points} pts</div>}
+                        </div>
+                      );
+                    }
                     // Checking it off here checks the task off in its list too (points included); a typed
-                    // task that isn't in any list is just ticked here.
-                    const match = findPomoTask(data.taskLists, pomoLink, pomoTask);
+                    // task that isn't in any list is just ticked here (so is a step that was since deleted).
+                    const match = findPomoTask(data.taskLists, pomoLink && !pomoLink.stepId ? pomoLink : null, pomoTask);
                     const done = match ? !!match.task.done : pomoDoneLocal;
                     const toggleDone = () => { if (match) toggleTask(match.list.id, match.task.id); else setPomoDoneLocal((was) => !was); };
                     return (
