@@ -2172,6 +2172,7 @@ function normalizeNoteSections(sections) {
     .filter(name => typeof name === "string").map(name => name.trim()).filter(Boolean))];
 }
 
+const NOTE_DRAWING_MAX_POINTS = 6000;
 function normalizeNoteDrawing(strokes) {
   if (strokes === undefined) return [];
   if (!Array.isArray(strokes) || strokes.length > 300) throw new Error("This drawing has too many strokes. Erase a stroke or use another page.");
@@ -2183,7 +2184,7 @@ function normalizeNoteDrawing(strokes) {
         !Number.isFinite(stroke.width) || stroke.width < (anchored ? 0.5 : 1) || stroke.width > 12 || !Array.isArray(stroke.points) || !stroke.points.length ||
         (stroke.space !== undefined && !anchored) || (anchored && (!Number.isFinite(stroke.pageWidth) || stroke.pageWidth <= 0 || stroke.pageWidth > 10000))) throw new Error("Saved drawing data is invalid");
     ids.add(stroke.id); pointCount += stroke.points.length;
-    if (pointCount > 6000) throw new Error("This drawing is full. Erase a stroke or use another page.");
+    if (pointCount > NOTE_DRAWING_MAX_POINTS) throw new Error("This drawing is full. Erase a stroke or use another page.");
     return { id: stroke.id, color: stroke.color, width: stroke.width, ...(anchored ? { space: "page", pageWidth: stroke.pageWidth } : {}), points: stroke.points.map(point => {
       if (!Array.isArray(point) || point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[0] > (anchored ? 10000 : 1000) || point[1] < 0 || point[1] > (anchored ? 200000 : 700)) throw new Error("Saved drawing points are invalid");
       return point.slice();
@@ -3208,7 +3209,15 @@ function canvasFontOf(node) {
   return style.font || `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
 }
 
-function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish }) {
+// Whether a pen or eraser stroke is in progress on the open page, and a way to wait until it lifts.
+function makeNotePen() {
+  const pen = { down: false, waiters: [] };
+  pen.set = down => { pen.down = down; if (!down) pen.waiters.splice(0).forEach(resolve => resolve()); };
+  pen.lifted = () => pen.down ? new Promise(resolve => pen.waiters.push(resolve)) : Promise.resolve();
+  return pen;
+}
+
+function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish, pen }) {
   const [mode, setMode] = useState("text");
   const [typeMode, setTypeModeState] = useState(() => { try { return localStorage.getItem("dg-note-type-mode") === "normal" ? "normal" : "anywhere"; } catch (e) { return "anywhere"; } });
   const setTypeMode = value => { setTypeModeState(value); try { localStorage.setItem("dg-note-type-mode", value); } catch (e) {} };
@@ -3356,32 +3365,73 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     }
     setPaperHeight(height);
   }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize, typeNormally]);
-  const pointAt = event => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
+  const pointAt = (event, rect = event.currentTarget.getBoundingClientRect()) =>
+    [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
       Math.round(Math.max(0, Math.min(rect.height, event.clientY - rect.top)) * 10) / 10];
+  // The stroke being drawn lives in the gesture and on one <polyline>, and joins the page (and the save)
+  // only when the pen lifts. Publishing every movement re-rendered the whole app per point, and the live
+  // save then ran mid-stroke, so on a big account the ink froze while it saved (Oct 10).
+  const liveRef = useRef(null);
+  const showLive = stroke => {
+    const line = liveRef.current;
+    if (!line) return;
+    if (!stroke) { line.setAttribute("points", ""); return; }
+    const points = stroke.points.length === 1 ? [stroke.points[0], stroke.points[0]] : stroke.points;
+    line.setAttribute("points", points.map(point => point.join(",")).join(" "));
+    line.setAttribute("stroke", stroke.color);
+    line.setAttribute("stroke-width", stroke.width);
   };
+  const setPenDown = down => { if (pen) pen.set(down); };
   const finishGesture = () => {
     const active = gesture.current;
     if (!active) return;
     gesture.current = null;
+    setPenDown(false);
+    if (active.stroke) {
+      publish([...drawingRef.current.filter(stroke => stroke.id !== active.stroke.id), active.stroke]);
+      showLive(null);
+    }
     if (active.before !== drawingRef.current) setHistory(current => ({ undo: [...current.undo.slice(-29), active.before], redo: [] }));
   };
+  const finishGestureRef = useRef(finishGesture);
+  finishGestureRef.current = finishGesture;
+  useEffect(() => {
+    // Hiding the app mid-stroke keeps the stroke: capture listeners run before the app's last-chance save.
+    const flush = event => { if (event.type === "pagehide" || document.visibilityState === "hidden") finishGestureRef.current(); };
+    window.addEventListener("pagehide", flush, true);
+    document.addEventListener("visibilitychange", flush, true);
+    return () => {
+      window.removeEventListener("pagehide", flush, true);
+      document.removeEventListener("visibilitychange", flush, true);
+      setPenDown(false);
+    };
+  }, []);
   const move = event => {
     const active = gesture.current;
     if (!active || active.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const point = pointAt(event);
+    const rect = event.currentTarget.getBoundingClientRect();
     if (mode === "erase") {
+      const point = pointAt(event, rect);
       const next = drawingRef.current.filter(stroke => !drawingStrokeHit(stroke, point));
       if (next.length !== drawingRef.current.length) publish(next);
-    } else {
-      const current = drawingRef.current.find(stroke => stroke.id === active.id);
-      if (!current) return;
-      const last = current.points[current.points.length - 1];
-      if (Math.hypot(last[0] - point[0], last[1] - point[1]) < 2) return;
-      publish(drawingRef.current.map(stroke => stroke.id === active.id ? { ...stroke, points: [...stroke.points, point] } : stroke));
+      return;
     }
+    const stroke = active.stroke;
+    if (!stroke) return;
+    // When the page is busy the browser merges movements into one event; the merged ones keep the line smooth.
+    const merged = event.getCoalescedEvents ? event.getCoalescedEvents() : [];
+    let added = false;
+    for (const sample of merged.length ? merged : [event]) {
+      if (stroke.points.length >= active.room) {
+        if (!active.full) { active.full = true; setMessage("This drawing is full. Erase a stroke or use another page."); }
+        break;
+      }
+      const point = pointAt(sample, rect), last = stroke.points[stroke.points.length - 1];
+      if (Math.hypot(last[0] - point[0], last[1] - point[1]) < 2) continue;
+      stroke.points.push(point); added = true;
+    }
+    if (added) showLive(stroke);
   };
   const travel = direction => {
     const stack = history[direction];
@@ -3506,12 +3556,17 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
           const size = legacySize.current;
           const anchored = anchorNoteDrawing(drawingRef.current, size.width, size.height);
           if (anchored !== drawingRef.current && !publish(anchored)) return;
-          event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
           const point = pointAt(event), id = makeId("stroke");
           const fixedWidth = pageWidth || event.currentTarget.getBoundingClientRect().width;
+          const stroke = mode === "pen" ? { id, color, width, space: "page", pageWidth: fixedWidth, points: [point] } : null;
+          // The page's saving limits, checked now rather than losing the stroke when the pen lifts.
+          if (stroke) { try { normalizeNoteDrawing([...drawingRef.current, stroke]); } catch (error) { setMessage(error.message); return; } }
+          event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
           setPageWidth(fixedWidth);
-          gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current };
-          if (mode === "pen") publish([...drawingRef.current, { id, color, width, space: "page", pageWidth: fixedWidth, points: [point] }]);
+          gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current, stroke,
+            room: NOTE_DRAWING_MAX_POINTS - drawingRef.current.reduce((sum, item) => sum + item.points.length, 0) };
+          setPenDown(true);
+          if (stroke) showLive(stroke);
           else move(event);
         }} onPointerMove={move} onPointerUp={event => { if (gesture.current?.pointerId === event.pointerId) { move(event); finishGesture(); } }} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture}
         onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(event.shiftKey ? "redo" : "undo"); } }}>
@@ -3520,6 +3575,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
             ? <circle data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
             : <polyline data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />}
         </g>)}
+        <polyline ref={liveRef} data-note-live-stroke points="" fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     </div>
   </div>;
@@ -4420,6 +4476,9 @@ function DailyGrind() {
     for (const id of removedNoteItemIds(before, after)) noteRemovedIdsRef.current.ids.add(id);
   };
   const noteLiveSavePendingRef = useRef(false);
+  // The open page's pen. Saves wait for it to lift: a save re-encodes the whole account and froze the ink
+  // mid-stroke (Oct 10).
+  const [notePen] = useState(makeNotePen);
   const noteDraftRef = useRef(null);
   noteDraftRef.current = noteDraft;
   const [newListRepeats, setNewListRepeats] = useState(false);
@@ -4769,7 +4828,8 @@ function DailyGrind() {
     setNoteDraftState("typing");
     clearTimeout(noteSaveTimerRef.current);
     const snapshot = { ...noteDraft };
-    noteSaveTimerRef.current = setTimeout(async () => {
+    noteSaveTimerRef.current = setTimeout(async function saveWhenPenLifts() {
+      if (notePen.down) { noteSaveTimerRef.current = setTimeout(saveWhenPenLifts, 300); return; }
       setNoteDraftState("saving");
       const result = await persistNoteDraft(snapshot);
       if (version === noteSaveVersionRef.current) {
@@ -4782,8 +4842,15 @@ function DailyGrind() {
 
   useEffect(() => {
     const interval = setInterval(async () => {
+      if (noteLiveSavePendingRef.current) return;
+      // A save mid-stroke froze the ink: save the moment the pen lifts instead.
+      if (notePen.down) {
+        noteLiveSavePendingRef.current = true;
+        await notePen.lifted();
+        noteLiveSavePendingRef.current = false;
+      }
       const draft = noteDraftRef.current;
-      if (!draft || noteLiveSavePendingRef.current || !noteCanSave(draft, dataRef.current)) return;
+      if (!draft || !noteCanSave(draft, dataRef.current)) return;
       const baseSignature = noteSavedSignatureRef.current;
       let base;
       try { base = JSON.parse(baseSignature); } catch { return; }
@@ -6608,7 +6675,7 @@ function DailyGrind() {
                       <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
                       {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
                     </section>}
-                    {noteReadMode ? <NoteMarkdownView body={noteDraft.body} hasInk={(noteDraft.drawing || []).length > 0 || (noteDraft.textBoxes || []).length > 0} onEdit={() => setNoteReadMode(false)} /> : <NoteDrawingSurface key={noteDraft.id} toolbarHost={noteToolsHost} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
+                    {noteReadMode ? <NoteMarkdownView body={noteDraft.body} hasInk={(noteDraft.drawing || []).length > 0 || (noteDraft.textBoxes || []).length > 0} onEdit={() => setNoteReadMode(false)} /> : <NoteDrawingSurface key={noteDraft.id} toolbarHost={noteToolsHost} pen={notePen} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
                       onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing} beforeRemoveTextBox={async () => { await flushCurrentNote(); return protectBeforeDestructive("before-text-box-delete"); }}
                       onTextBoxesChange={textBoxes => {
                         const current = noteDraftRef.current;
