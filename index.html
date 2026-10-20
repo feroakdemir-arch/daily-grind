@@ -189,7 +189,7 @@
       // Signing out must also remove this account's device cache. The cloud
       // copy is untouched; this only prevents another person on the same
       // browser from seeing or accidentally merging the previous account.
-      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-vault-local-safety-previous", "dg-task-drafts-v1", "dg-cal-events_removed", "dg-task-ledger-copy-v1", "dg-pomo-focus-v1"]
+      ["daily-grind-v13", "daily-grind-v13_ts", "daily-grind-v13_base", "daily-grind-v13_basever", "dg-cal-events", "dg-cal-events_ts", "dg-cal-events_base", "dg-cal-events_basever", "dg-owner", "daily-grind-sync-code", "dg-vault-local-safety", "dg-vault-local-safety-previous", "dg-task-drafts-v1", "dg-cal-events_removed", "dg-task-ledger-copy-v1", "dg-pomo-focus-v1", "dg-crash-log", "dg-alive"]
         .forEach((key) => localStorage.removeItem(key));
     };
 
@@ -1360,6 +1360,64 @@
       check(false);
       document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") check(true); });
       setInterval(() => check(false), 30 * 60 * 1000);
+    })();
+
+    // Crash log (Oct 20): "it keeps crashing when I get into Notes" could not be reproduced on a computer, so
+    // the app records what happened: script errors, render errors caught by the error screens, and an app
+    // that died with no warning while a screen was open (an iPhone closes a page that runs out of memory and
+    // reloads it; no error event fires, so the next start notices the screen was never left cleanly).
+    // Kept on the device (dg-crash-log) and in the cloud doc users/{uid}/data/dg-crash-log (ordinary
+    // owner-only doc; no `kind` field, so the task-record query and the vault listings never read it).
+    window.crashLog = (() => {
+      const KEY = "dg-crash-log", ALIVE = "dg-alive";
+      const read = () => { try { const list = JSON.parse(localStorage.getItem(KEY) || "[]"); return Array.isArray(list) ? list : []; } catch (e) { return []; } };
+      let uploadTimer = null;
+      const upload = () => {
+        clearTimeout(uploadTimer);
+        uploadTimer = setTimeout(() => {
+          _fbReady.then(() => {
+            const ref = _docRef(KEY);
+            if (ref) return ref.set({ value: JSON.stringify(read()), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+          }).catch((error) => console.warn("Crash log upload failed:", error));
+        }, 1500);
+      };
+      const record = (kind, error, extra) => {
+        try {
+          const message = String((error && error.message) || error || "").slice(0, 500);
+          const entry = { at: Date.now(), kind, message, stack: String((error && error.stack) || "").slice(0, 1500),
+            ...(extra || {}), screen: (window.__dgScreen && window.__dgScreen.screen) || "", ua: navigator.userAgent.slice(0, 200), app: document.lastModified };
+          const list = read();
+          const last = list[list.length - 1];
+          // The same error firing over and over counts once a minute.
+          if (last && last.kind === kind && last.message === message && entry.at - last.at < 60000) return;
+          list.push(entry);
+          try { localStorage.setItem(KEY, JSON.stringify(list.slice(-15))); } catch (e) {}
+          upload();
+        } catch (e) {}
+      };
+      window.addEventListener("error", (event) => {
+        // Image and script loading failures arrive here too; only script errors count.
+        if (event.error || event.message) record("error", event.error || event.message, { source: String(event.filename || "").slice(-80), line: event.lineno || 0 });
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        const reason = event.reason;
+        // Network trouble and refused saves already show as sync status; keep those out of the crash log.
+        if (reason && /network|offline|quota|permission|unavailable|deadline|failed to fetch/i.test(String(reason.message || reason))) return;
+        record("unhandled-promise", reason);
+      });
+      // Which screen is open, and whether the app left it cleanly (hidden or closed) or just died.
+      let previous = null;
+      try { previous = JSON.parse(localStorage.getItem(ALIVE) || "null"); } catch (e) {}
+      const mark = (state) => { try { localStorage.setItem(ALIVE, JSON.stringify(state)); } catch (e) {} };
+      window.__dgScreen = { screen: "", clean: false, at: Date.now() };
+      const setScreen = (screen, detail) => { window.__dgScreen = { screen, detail: detail || "", clean: document.visibilityState === "hidden", at: Date.now() }; mark(window.__dgScreen); };
+      const leave = () => { window.__dgScreen = { ...window.__dgScreen, clean: true }; mark(window.__dgScreen); };
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") leave(); else { window.__dgScreen = { ...window.__dgScreen, clean: false, at: Date.now() }; mark(window.__dgScreen); } });
+      window.addEventListener("pagehide", leave);
+      if (previous && previous.clean === false && previous.screen) {
+        record("closed-unexpectedly", `The app stopped without closing while ${previous.screen} was open`, { lastScreen: previous.screen, lastDetail: previous.detail || "", openedAt: previous.at || 0 });
+      }
+      return { record, setScreen, read };
     })();
 
     // Storage that syncs localStorage + Firestore.
@@ -3024,6 +3082,32 @@ function WorkTimerPill({ name, startedAt: startedAtValue, elapsedAt, onToggle })
   );
 }
 
+// A screen that throws while drawing shows this card instead of blanking the whole app, and the error goes
+// to the crash log (window.crashLog) so it can be fixed (Oct 20, Notes crash).
+class ScreenErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) {
+    if (window.crashLog) window.crashLog.record("render-error", error, { where: this.props.name, componentStack: String((info && info.componentStack) || "").slice(0, 1500) });
+  }
+  render() {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    const button = { padding: "10px 16px", borderRadius: 9, border: "1px solid #7c3aed88", background: "#7c3aed2d", color: "#ddd3ff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" };
+    return (
+      <div role="alert" style={{ margin: "24px auto", maxWidth: 460, padding: 20, borderRadius: 14, background: "#1a1a2e", border: "1px solid #ff475766", color: "#e2e2ea", fontFamily: "inherit" }}>
+        <div style={{ fontSize: 15, fontWeight: 900, marginBottom: 8 }}>{this.props.name} hit an error</div>
+        <div style={{ fontSize: 12, color: "#a0a0b0", lineHeight: 1.6, marginBottom: 10 }}>Your saved data is safe. The error was recorded so it can be fixed.</div>
+        <div style={{ fontSize: 11, color: "#ff8793", fontFamily: "'IBM Plex Mono', monospace", overflowWrap: "anywhere", marginBottom: 14 }}>{String(error.message || error).slice(0, 300)}</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {this.props.canRetry && <button type="button" onClick={() => this.setState({ error: null })} style={button}>Try again</button>}
+          <button type="button" onClick={() => location.reload()} style={button}>Reload app</button>
+        </div>
+      </div>
+    );
+  }
+}
+
 // A page's markdown, formatted. The HTML comes only from note-markdown.js, which escapes all text.
 function NoteMarkdownView({ body, hasInk, onEdit }) {
   const html = React.useMemo(() => (window.noteMarkdown ? window.noteMarkdown.render(body) : ""), [body]);
@@ -4506,6 +4590,10 @@ function DailyGrind() {
   const [notePen] = useState(makeNotePen);
   const noteDraftRef = useRef(null);
   noteDraftRef.current = noteDraft;
+  // The crash log notes which screen is open, so an app that dies without an error still says where.
+  useEffect(() => {
+    if (window.crashLog) window.crashLog.setScreen(page === "notes" ? (noteDraft ? "Notes (page open)" : "Notes") : page, page === "notes" && noteDraft ? noteDraft.id : "");
+  }, [page, noteDraft?.id]);
   const [newListRepeats, setNewListRepeats] = useState(false);
   const [pomoWork, setPomWork] = useState(25);
   const [pomoBreak, setPomBreak] = useState(5);
@@ -6528,6 +6616,7 @@ function DailyGrind() {
         )}
 
         {page === "notes" && (
+          <ScreenErrorBoundary name="Notes" canRetry>
           <div data-notes-section className={`notes-workspace${noteDraft ? " has-open-page" : ""}`}>
             <aside className="notes-sections" aria-label="Notebook sections">
               <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 7px 15px" }}>
@@ -6738,9 +6827,10 @@ function DailyGrind() {
               )}
             </section>
           </div>
+          </ScreenErrorBoundary>
         )}
 
-        {deleteSectionTarget && <div style={{ position: "fixed", inset: 0, background: "#000b", zIndex: 250, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        {deleteSectionTarget &&<div style={{ position: "fixed", inset: 0, background: "#000b", zIndex: 250, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div role="dialog" aria-modal="true" aria-labelledby="delete-section-heading" style={{ width: "100%", maxWidth: 420, background: "#171726", border: "1px solid #39394b", borderRadius: 14, padding: 22 }}>
             <h2 id="delete-section-heading" style={{ fontSize: 17, marginBottom: 12 }}>Delete “{deleteSectionTarget}”?</h2>
             <p style={{ fontSize: 12, color: "#b5b5c9", lineHeight: 1.7, marginBottom: 18 }}>Keep its pages in Quick Notes, or delete the section and its pages. A recovery copy will be saved first.</p>
@@ -7962,7 +8052,7 @@ const S = {
 };
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode><DailyGrind /></React.StrictMode>
+  <React.StrictMode><ScreenErrorBoundary name="Daily Grind"><DailyGrind /></ScreenErrorBoundary></React.StrictMode>
 );
   </script>
 </body>
