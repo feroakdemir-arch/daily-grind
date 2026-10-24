@@ -2198,7 +2198,7 @@ function compactMainData(data) {
     const { drawing, textBoxes, images, ...rest } = note;
     const pick = (map, fallback) => own(map, note.id) ? map[note.id] : fallback;
     const ink = pick(data.noteDrawings, drawing), boxes = pick(data.noteTextBoxes, textBoxes), shots = pick(data.noteImages, images);
-    if (Array.isArray(ink) && ink.length) noteDrawings[note.id] = ink;
+    if (Array.isArray(ink) && ink.length) noteDrawings[note.id] = packNoteDrawing(ink);
     if (Array.isArray(boxes) && boxes.length) noteTextBoxes[note.id] = boxes;
     if (Array.isArray(shots) && shots.length) noteImages[note.id] = shots;
     return rest;
@@ -2216,7 +2216,7 @@ function accountBytesWithNote(source, note) {
     const others = { ...source, notes: (source.notes || []).filter((entry) => entry.id !== note.id) };
     byNote.set(note.id, textByteSize(serializeMainData(others)));
   }
-  return byNote.get(note.id) + textByteSize(JSON.stringify(note)) + 64;
+  return byNote.get(note.id) + textByteSize(JSON.stringify({ ...note, drawing: packNoteDrawing(note.drawing) })) + 64;
 }
 
 async function sha256Text(text) {
@@ -2231,9 +2231,52 @@ function normalizeNoteSections(sections) {
 }
 
 const NOTE_DRAWING_MAX_POINTS = 6000;
+// Saved ink keeps each stroke's points as one short string, "d1:" + the first point and then each step from the
+// previous point, in tenths, base 36 ("d1:4cm,fk,a,-3,..."), about half the size of [x,y] pairs and exactly the
+// same numbers back. A stroke with a coordinate finer than a tenth stays as plain pairs, so nothing is rounded.
+// In the app a stroke's points are always pairs: saving packs them (compactMainData), loading unpacks them
+// (normalizeNoteDrawing), and both forms load, so data saved before this still opens.
+const PACKED_POINTS_PREFIX = "d1:";
+function packStrokePoints(points) {
+  if (!Array.isArray(points) || !points.length) return points;
+  const tenths = [];
+  for (const point of points) {
+    if (!Array.isArray(point) || point.length !== 2) return points;
+    for (const value of point) {
+      const scaled = Math.round(value * 10);
+      if (!Number.isFinite(value) || scaled / 10 !== value) return points;
+      tenths.push(scaled);
+    }
+  }
+  const parts = [];
+  for (let i = 0; i < tenths.length; i++) {
+    const step = i < 2 ? tenths[i] : tenths[i] - tenths[i - 2];
+    parts.push((step < 0 ? "-" : "") + Math.abs(step).toString(36));
+  }
+  return PACKED_POINTS_PREFIX + parts.join(",");
+}
+function unpackStrokePoints(points) {
+  if (typeof points !== "string") return points;
+  const invalid = () => new Error("Saved drawing points are invalid");
+  if (!points.startsWith(PACKED_POINTS_PREFIX)) throw invalid();
+  const parts = points.slice(PACKED_POINTS_PREFIX.length).split(",");
+  if (parts.length < 2 || parts.length % 2 || parts.length > NOTE_DRAWING_MAX_POINTS * 2) throw invalid();
+  const pairs = [], last = [0, 0];
+  for (let i = 0; i < parts.length; i++) {
+    if (!/^-?[0-9a-z]+$/.test(parts[i])) throw invalid();
+    last[i % 2] += parseInt(parts[i], 36);
+    if (i % 2) pairs.push([last[0] / 10, last[1] / 10]);
+  }
+  return pairs;
+}
+function packNoteDrawing(strokes) {
+  return Array.isArray(strokes) ? strokes.map(stroke => stroke && typeof stroke === "object" ? { ...stroke, points: packStrokePoints(stroke.points) } : stroke) : strokes;
+}
+
 function normalizeNoteDrawing(strokes) {
   if (strokes === undefined) return [];
   if (!Array.isArray(strokes) || strokes.length > 300) throw new Error("This drawing has too many strokes. Erase a stroke or use another page.");
+  strokes = strokes.map(stroke => stroke && typeof stroke === "object" && typeof stroke.points === "string" ? { ...stroke, points: unpackStrokePoints(stroke.points) } : stroke);
   let pointCount = 0;
   const ids = new Set();
   return strokes.map(stroke => {

@@ -45,6 +45,44 @@ test("the size estimate for the open page matches the real saved size", () => {
   const note = data.notes[0];
   const exact = context.textByteSize(context.serializeMainData(data));
   const others = { ...data, notes: data.notes.filter((entry) => entry.id !== note.id) };
-  const estimate = context.textByteSize(context.serializeMainData(others)) + context.textByteSize(JSON.stringify(note)) + 64;
+  const estimate = context.textByteSize(context.serializeMainData(others)) + context.textByteSize(JSON.stringify({ ...note, drawing: context.packNoteDrawing(note.drawing) })) + 64;
   assert.ok(estimate >= exact && estimate - exact < 200, `${estimate} vs ${exact}`);
+});
+
+// Packed ink: each stroke's points are saved as one short string and must come back exactly.
+const ink = (points) => [{ id: "s", color: "#ff00aa", width: 2, space: "page", pageWidth: 800, points }];
+const roundTrip = (points) => context.normalizeNoteDrawing(context.packNoteDrawing(ink(points)))[0].points;
+
+test("packed points come back as exactly the same numbers", () => {
+  const points = [[296, 563.8], [296.1, 563.7], [0, 0], [799.9, 1250.3], [300, 0.1], [10.5, 199999.9]];
+  assert.ok(typeof context.packNoteDrawing(ink(points))[0].points === "string");
+  assert.deepEqual(plain(roundTrip(points)), points);
+  assert.deepEqual(plain(roundTrip([[5, 6]])), [[5, 6]]); // a dot
+  const wobble = Array.from({ length: 2000 }, (_, i) => [Math.round(((i * 7919) % 8000)) / 10, Math.round(((i * 104729) % 100000)) / 10]);
+  assert.deepEqual(plain(roundTrip(wobble)), wobble);
+});
+
+test("a stroke finer than a tenth is left as plain pairs, never rounded", () => {
+  const points = [[1.25, 2], [3, 4]];
+  assert.deepEqual(plain(context.packNoteDrawing(ink(points))[0].points), points);
+  assert.deepEqual(plain(roundTrip(points)), points);
+});
+
+test("packed ink is much smaller, and unpacked and packed saves both load", () => {
+  const data = account();
+  const packed = context.serializeMainData(data);
+  // The same save the way it was written before packing: every stroke's points as [x,y] pairs.
+  const saved = JSON.parse(packed);
+  const unpacked = JSON.stringify({ ...saved, noteDrawings: Object.fromEntries(Object.entries(saved.noteDrawings).map(([id, strokes]) => [id, context.normalizeNoteDrawing(strokes)])) });
+  assert.ok(packed.length < unpacked.length * 0.7, `${packed.length} vs ${unpacked.length}`);
+  assert.deepEqual(plain(context.parseMainData(packed).notes), plain(context.parseMainData(unpacked).notes));
+  // Saving what was just loaded changes nothing (same content; compared as data, not as key order).
+  const again = JSON.parse(context.serializeMainData(context.parseMainData(packed)));
+  assert.ok(JSON.stringify(plain(again.noteDrawings)) === JSON.stringify(saved.noteDrawings) && again.notes.length === saved.notes.length, "saving again changed the ink");
+});
+
+test("damaged packed points are refused instead of loading wrong ink", () => {
+  for (const points of ["d1:", "d1:5", "d1:1,2,3", "x1:1,2", "d1:1,zz!,3,4", "d1:1,,3,4"]) {
+    assert.throws(() => context.normalizeNoteDrawing(ink(points)), /invalid/i, points);
+  }
 });
