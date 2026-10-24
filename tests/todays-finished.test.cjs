@@ -4,7 +4,15 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const html = fs.readFileSync(require.resolve('../index.html'), 'utf8');
 const c = {};
-vm.runInNewContext(html.slice(html.indexOf('function finishedTasksForDay('), html.indexOf('function TodaysFinishedTasks(')), c);
+vm.runInNewContext(html.slice(html.indexOf('function splitDoneTasks('), html.indexOf('function TodaysFinishedTasks(')), c);
+test('tasks checked off today stay in the list until the reset; older and undated ones go to Completed', () => {
+  const items = [{id:'open',done:false},{id:'today',done:true,doneDate:'2026-10-24'},{id:'yesterday',done:true,doneDate:'2026-10-23'},{id:'legacy',done:true}];
+  const { doneToday, doneEarlier } = c.splitDoneTasks(items,'2026-10-24');
+  assert.equal(doneToday.map(t=>t.id).join(),'today');
+  assert.equal(doneEarlier.map(t=>t.id).join(),'yesterday,legacy');
+  // After the reset the new day starts, so today's check-off moves to Completed.
+  assert.equal(c.splitDoneTasks(items,'2026-10-25').doneToday.length,0);
+});
 test('today combines completed tasks across lists and excludes pending, older and undated items', () => {
   const lists = [{id:'one',title:'School',items:[{id:'a',name:'Homework',done:true,doneDate:'2026-09-11',points:10},{id:'b',done:false,doneDate:'2026-09-11'},{id:'c',done:true,doneDate:'2026-09-10'},{id:'legacy',done:true}]},{id:'two',title:'Daily',items:[{id:'d',name:'Study',done:true,doneDate:'2026-09-11',points:20,trackedSeconds:120}]}];
   const before = JSON.stringify(lists), result = c.finishedTasksForDay(lists,'2026-09-11');

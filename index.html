@@ -2821,6 +2821,16 @@ function fmtTaskDuration(seconds) {
     : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+// Tasks checked off today stay in their list, crossed out, until the day resets; earlier ones go to Completed.
+function splitDoneTasks(items, today) {
+  const doneToday = [], doneEarlier = [];
+  for (const task of items || []) {
+    if (!task.done) continue;
+    if (today && task.doneDate === today) doneToday.push(task); else doneEarlier.push(task);
+  }
+  return { doneToday, doneEarlier };
+}
+
 function finishedTasksForDay(taskLists, day) {
   const result = new Map();
   for (const list of taskLists || []) {
@@ -3767,7 +3777,7 @@ function SaveIndicator({ info, onRetry, onUpdate }) {
   );
 }
 
-function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onStepToPomo, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onStepToPomo, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
   // Tasks opened to show their steps (this screen only; every task starts closed).
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const toggleSteps = (taskId) => setOpenSteps((prev) => {
@@ -3847,9 +3857,10 @@ function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDel
   }
 
   const pending = list.items.filter((t) => !t.done);
-  // Completed = live done tasks (can be un-checked) + archived history from past
+  const { doneToday, doneEarlier } = splitDoneTasks(list.items, today);
+  // Completed = live done tasks from earlier days (can be un-checked) + archived history from past
   // daily resets (read-only). Merged + sorted newest-first, paginated 10 at a time.
-  const completedLive = list.items.filter((t) => t.done).map((t) => ({ key: t.id, taskId: t.id, name: t.name, points: t.points, date: t.doneDate, trackedSeconds: taskElapsedSeconds(t), live: true }));
+  const completedLive = doneEarlier.map((t) => ({ key: t.id, taskId: t.id, name: t.name, points: t.points, date: t.doneDate, trackedSeconds: taskElapsedSeconds(t), live: true }));
   const completedArchived = (list.completedLog || []).map((e) => ({ key: e.id, name: e.name, points: e.points, date: e.date, trackedSeconds: Math.max(0, Number(e.trackedSeconds) || 0), live: false }));
   const completedAll = [...completedLive, ...completedArchived].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const completedView = completedAll.slice(0, completedShown);
@@ -4089,6 +4100,23 @@ function TaskListCard({ list, listIdx, taskState, onToggle, onToggleTimer, onDel
       {isTaskDropTarget && taskDrag.targetIndex === pendingDropItems.length && pendingDropItems.length > 0 && (
         <div style={{ height: 2, background: "#a78bfa", borderRadius: 2, margin: "2px 0 8px", boxShadow: "0 0 10px #7c3aed" }} />
       )}
+
+      {/* No data-taskrow: drag-and-drop only counts open tasks. */}
+      {doneToday.map((t) => (
+        <div key={t.id} data-done-today={t.id} style={{ ...S.tRow, opacity: 0.6 }}>
+          <span aria-hidden="true" style={{ padding: "0 6px 0 0", fontSize: 18, lineHeight: 1, visibility: "hidden" }}>{"⋮"}</span>
+          <button className="hit-expand check-hit" onClick={() => onToggle(list.id, t.id)} aria-label={`Un-complete ${t.name}`} title="Tap to un-complete"
+            style={{ ...S.tCircle, background: "#4cd137", borderColor: "#4cd137" }}>
+            <span style={{ fontSize: 10, color: "#fff" }}>{"✓"}</span>
+          </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ ...S.tText, textDecoration: "line-through", color: "#8b8b9e", display: "block" }}>{t.name}</span>
+            {taskElapsedSeconds(t) > 0 && <span style={{ fontSize: 10.5, color: "#00b86b", letterSpacing: 0.5 }}>⏱ {fmtTaskDuration(taskElapsedSeconds(t))} worked</span>}
+          </div>
+          {t.points > 0 && <span style={{ ...S.tPts, color: "#b0b0be" }}>+{t.points}</span>}
+          <button className="icon-btn" onClick={() => onDelete(list.id, t.id)} style={{ ...S.tX, padding: 0 }} title="Delete task" aria-label={`Delete ${t.name}`}><Icon name="x" size={16} /></button>
+        </div>
+      ))}
 
       <div style={S.tAddRow} onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) commitDraft();
@@ -6585,7 +6613,7 @@ function DailyGrind() {
               </div>
             )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps}
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} today={today} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps}
                 onStepToPomo={(task, step) => { setPomoTask(step.name, task.id, step.id); setView("main"); setPage("timer"); window.scrollTo({ top: 0 }); }}
                 onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
