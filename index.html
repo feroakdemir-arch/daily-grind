@@ -2874,6 +2874,31 @@ function splitDoneTasks(items, today) {
   return { doneToday, doneEarlier };
 }
 
+// Daily lists un-check every task at the reset. Turning one into a one-time list gives each task that
+// was ever finished there its check back (dated to its latest finish), so it lands in Completed.
+function setListRepeats(list, resetsDaily) {
+  if (resetsDaily || !list.resetsDaily) return { ...list, resetsDaily };
+  // Archive rows from the daily reset are named c_<taskId>_<date>.
+  const archivedTaskId = (entry) => {
+    const cut = typeof entry.id === "string" && entry.id.startsWith("c_") ? entry.id.lastIndexOf("_") : -1;
+    return cut > 1 ? entry.id.slice(2, cut) : null;
+  };
+  const lastDone = new Map();
+  for (const entry of list.completedLog || []) {
+    const taskId = archivedTaskId(entry);
+    if (!taskId || !entry.date) continue;
+    if (!lastDone.has(taskId) || lastDone.get(taskId) < entry.date) lastDone.set(taskId, entry.date);
+  }
+  const restored = new Set();
+  const items = (list.items || []).map((t) => {
+    if (t.done || !lastDone.has(t.id)) return t;
+    restored.add(t.id);
+    return { ...t, done: true, doneDate: lastDone.get(t.id) };
+  });
+  const completedLog = (list.completedLog || []).filter((entry) => !restored.has(archivedTaskId(entry)));
+  return { ...list, resetsDaily: false, items, completedLog };
+}
+
 function finishedTasksForDay(taskLists, day) {
   const result = new Map();
   for (const list of taskLists || []) {
@@ -3820,7 +3845,7 @@ function SaveIndicator({ info, onRetry, onUpdate }) {
   );
 }
 
-function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onAdd, onSteps, onStepToPomo, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
+function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer, onDelete, onDeleteList, onSetRepeats, onAdd, onSteps, onStepToPomo, onSendToPomo, onMoveTask, onEdit, onReorderList, onDeleteCompleted, taskDrag, setTaskDrag }) {
   // Tasks opened to show their steps (this screen only; every task starts closed).
   const [openSteps, setOpenSteps] = useState(() => new Set());
   const toggleSteps = (taskId) => setOpenSteps((prev) => {
@@ -4081,7 +4106,13 @@ function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer
           style={{ cursor: "grab", color: "#8b8b9e", fontSize: 22, padding: "0 10px 0 0", userSelect: "none", touchAction: "none", lineHeight: 1, fontWeight: 900, letterSpacing: -2 }}
           title="Drag to reorder list"
         >{"\u22EE"}</span>
-        <span style={S.tlTitle}>{list.title}{list.resetsDaily && <span style={{ fontSize: 10.5, color: "#7c3aed", marginLeft: 6, fontWeight: 700 }}>{"\u21BB"} Daily</span>}</span>
+        <span style={S.tlTitle}>{list.title}
+          <button onClick={() => onSetRepeats(list.id, !list.resetsDaily)}
+            title={list.resetsDaily ? "Daily: every task comes back unchecked at the reset. Tap to make it one-time." : "One-time: checked tasks stay done. Tap to make every task come back daily."}
+            style={{ fontSize: 10.5, color: list.resetsDaily ? "#7c3aed" : "#6b6b80", marginLeft: 6, fontWeight: 700, background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+            {list.resetsDaily ? "\u21BB Daily" : "One-time"}
+          </button>
+        </span>
         <button onClick={() => onDeleteList(list.id)} style={S.tlDel} title="Delete list">&times;</button>
       </div>
 
@@ -5598,6 +5629,13 @@ function DailyGrind() {
     if (!(await protectBeforeDestructive("before-task-list-delete"))) return;
     await save((prev) => ({ ...prev, taskLists: prev.taskLists.filter((l) => l.id !== listId) }));
   }, [save, protectBeforeDestructive]);
+  const setTaskListRepeats = useCallback(async (listId, resetsDaily) => {
+    const list = dataRef.current?.taskLists.find((entry) => entry.id === listId);
+    if (!list) return;
+    if (!resetsDaily && !confirm(`Make "${list.title}" one-time? Checked tasks will stay done instead of coming back each day, and tasks you already finished here get their check back.`)) return;
+    if (resetsDaily && !confirm(`Make "${list.title}" daily? Every task in it will come back unchecked at each day's reset.`)) return;
+    await save((prev) => ({ ...prev, taskLists: prev.taskLists.map((l) => l.id === listId ? setListRepeats(l, resetsDaily) : l) }));
+  }, [save]);
 
   function addNewList() {
     if (!newListName.trim()) return;
@@ -6656,7 +6694,7 @@ function DailyGrind() {
               </div>
             )}
             {data.taskLists.map((list, listIdx) => (
-              <TaskListCard key={list.id} list={list} listIdx={listIdx} today={today} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onAdd={addTaskItem} onSteps={editTaskSteps}
+              <TaskListCard key={list.id} list={list} listIdx={listIdx} today={today} taskState={taskState} onToggle={toggleTask} onToggleTimer={toggleTaskTimer} onDelete={deleteTaskItem} onDeleteList={deleteTaskList} onSetRepeats={setTaskListRepeats} onAdd={addTaskItem} onSteps={editTaskSteps}
                 onStepToPomo={(task, step) => { setPomoTask(step.name, task.id, step.id); setView("main"); setPage("timer"); window.scrollTo({ top: 0 }); }}
                 onSendToPomo={(name) => setPomoTask(name)} onMoveTask={moveTaskBetweenLists} onEdit={openEditTask} onReorderList={reorderTaskList} onDeleteCompleted={deleteCompletedEntry} taskDrag={taskDrag} setTaskDrag={setTaskDrag} />
             ))}
