@@ -28,6 +28,14 @@ test('archived completions remain available without double-counting their live t
   assert.equal(c.finishedTasksForDay(lists,'2026-09-11').length,2);
   assert.equal(lists[0].completedLog.length,2);
 });
+test('the month grid starts on Monday and holds every day of the month', () => {
+  const cells = c.monthDayCells(2026, 9); // October 2026 starts on a Thursday
+  assert.equal(cells.length % 7, 0);
+  assert.equal(JSON.stringify(cells.slice(0, 4)), JSON.stringify([null, null, null, '2026-10-01']));
+  assert.equal(cells.filter(Boolean).length, 31);
+  assert.equal(cells.filter(Boolean).at(-1), '2026-10-31');
+  assert.equal(c.monthDayCells(2026, 1).filter(Boolean).length, 28);
+});
 test('refresh schedules the next local reset rather than assuming a fixed 24-hour day', () => {
   assert.equal(c.nextFinishedTasksReset(0,new Date(2026,8,11,23,59,59)),1050);
   assert.equal(c.nextFinishedTasksReset(3,new Date(2026,8,12,2,59,59)),1050);

@@ -15,9 +15,19 @@ test('switching a daily list to one-time gives finished tasks their check back a
   const next = c.setListRepeats(list, false);
   assert.equal(next.resetsDaily, false);
   assert.deepEqual(next.items.map((t) => [t.id, t.done, t.doneDate]), [['hw_a', true, '2026-10-27'], ['never', false, undefined], ['now', true, '2026-10-28']]);
-  // The restored task now shows in Completed as a live row, so its archive rows would double it.
-  assert.deepEqual(next.completedLog.map((e) => e.id), ['c_gone_2026-10-27']);
+  // The restored task now stands for its latest finish, so only that archive row would double it; older days stay.
+  assert.deepEqual(next.completedLog.map((e) => e.id), ['c_hw_a_2026-10-26', 'c_gone_2026-10-27']);
   assert.equal(JSON.stringify(list), before);
+});
+test("the built-in Today's Tasks list turns one-time once, and a later choice of Daily sticks", () => {
+  const data = { taskLists: [
+    { id: 'tl_today', resetsDaily: true, items: [{ id: 'a', done: false }], completedLog: [{ id: 'c_a_2026-10-27', date: '2026-10-27' }] },
+    { id: 'videos', resetsDaily: true, items: [{ id: 'v', done: false }], completedLog: [{ id: 'c_v_2026-10-27', date: '2026-10-27' }] }] };
+  const once = c.migrateTodayListOneTime(data);
+  assert.equal(once.todayListOneTime, true);
+  assert.deepEqual(once.taskLists.map((l) => [l.id, l.resetsDaily, l.items[0].done]), [['tl_today', false, true], ['videos', true, false]]);
+  const choseDaily = { ...once, taskLists: once.taskLists.map((l) => ({ ...l, resetsDaily: true })) };
+  assert.equal(c.migrateTodayListOneTime(choseDaily), null);
 });
 test('switching a one-time list to daily only flips the flag', () => {
   const list = { id: 'l', resetsDaily: false, items: [{ id: 'a', done: true, doneDate: '2026-10-20' }], completedLog: [] };

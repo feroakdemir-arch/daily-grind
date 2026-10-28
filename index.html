@@ -1778,7 +1778,7 @@ const DEFAULT_HABIT_SECTIONS = [
 
 const DEFAULT_TASK_LISTS = [
   { id: "tl_main", title: "Main Tasks / Goals", resetsDaily: false, items: [] },
-  { id: "tl_today", title: "Today's Tasks", resetsDaily: true, items: [] },
+  { id: "tl_today", title: "Today's Tasks", resetsDaily: false, items: [] },
 ];
 
 const mkDefault = () => ({
@@ -2895,8 +2895,20 @@ function setListRepeats(list, resetsDaily) {
     restored.add(t.id);
     return { ...t, done: true, doneDate: lastDone.get(t.id) };
   });
-  const completedLog = (list.completedLog || []).filter((entry) => !restored.has(archivedTaskId(entry)));
+  // The restored task now stands for its latest finish; that one archive row would show it twice.
+  const completedLog = (list.completedLog || []).filter((entry) => {
+    const taskId = archivedTaskId(entry);
+    return !(restored.has(taskId) && entry.date === lastDone.get(taskId));
+  });
   return { ...list, resetsDaily: false, items, completedLog };
+}
+
+// "Today's Tasks" started out as a daily list, so one-off tasks kept coming back unchecked.
+// Turn it one-time once per account; tapping its Daily label afterwards still sticks.
+function migrateTodayListOneTime(data) {
+  if (data.todayListOneTime) return null;
+  return { ...data, todayListOneTime: true,
+    taskLists: data.taskLists.map((l) => l.id === "tl_today" ? setListRepeats(l, false) : l) };
 }
 
 function finishedTasksForDay(taskLists, day) {
@@ -2963,8 +2975,19 @@ function nextFinishedTasksReset(resetHour, now = new Date()) {
   return next.getTime() - now.getTime() + 50;
 }
 
+// One month as Monday-first weeks: "YYYY-MM-DD" for each day, null for the blanks around them.
+function monthDayCells(year, month) {
+  const cells = Array((new Date(year, month, 1).getDay() + 6) % 7).fill(null);
+  const days = new Date(year, month + 1, 0).getDate();
+  for (let d = 1; d <= days; d++) cells.push(`${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  while (cells.length % 7) cells.push(null);
+  return cells;
+}
+
 function TodaysFinishedTasks({ taskLists, resetHour }) {
-  const [day, setDay] = useState(() => getToday(resetHour));
+  const [today, setDay] = useState(() => getToday(resetHour));
+  const [picked, setPicked] = useState(null); // a past day tapped in the month grid; null shows today
+  const [monthOffset, setMonthOffset] = useState(0);
   useEffect(() => {
     let timer;
     const refresh = () => {
@@ -2977,21 +3000,50 @@ function TodaysFinishedTasks({ taskLists, resetHour }) {
     document.addEventListener("visibilitychange", refresh);
     return () => { clearTimeout(timer); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [resetHour]);
+  const day = picked && picked < today ? picked : today;
   const finished = finishedTasksForDay(taskLists, day);
   const points = finished.reduce((total, task) => total + task.points, 0);
-  return <section aria-label="Today's finished tasks" data-today-finished style={{ ...S.card, marginTop: 24, borderColor: "#4cd13744" }}>
+  const [ty, tm] = today.split("-").map(Number);
+  const view = new Date(ty, tm - 1 + monthOffset, 1);
+  const cells = monthDayCells(view.getFullYear(), view.getMonth());
+  const dayLabel = new Date(day + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  return <section aria-label="Finished tasks" data-today-finished style={{ ...S.card, marginTop: 24, borderColor: "#4cd13744" }}>
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
-      <h2 style={{ fontSize: 13, color: "#e8f8ed", letterSpacing: 1 }}>✓ Today’s finished tasks</h2>
+      <h2 style={{ fontSize: 13, color: "#e8f8ed", letterSpacing: 1 }}>{day === today ? "✓ Today’s finished tasks" : `✓ Finished on ${dayLabel}`}</h2>
       <span style={{ fontSize: 11, fontWeight: 800, color: "#4cd137" }}>{finished.length} finished · +{points} pts</span>
     </div>
-    <p style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6, marginBottom: 12 }}>Resets at {resetHour ? `${resetHour} AM` : "midnight"}. Past completions stay in your task history.</p>
+    <p style={{ fontSize: 10, color: "#8b8b9e", lineHeight: 1.6, marginBottom: 12 }}>Resets at {resetHour ? `${resetHour} AM` : "midnight"}. Tap a day below to see what you finished then.</p>
+    <div style={{ maxWidth: 420, margin: "0 auto 14px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <button onClick={() => setMonthOffset(monthOffset - 1)} aria-label="Previous month" style={{ background: "none", border: "none", color: "#8b8b9e", fontSize: 16, cursor: "pointer", padding: "4px 10px" }}>{"◀"}</button>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#f0f0f4", letterSpacing: 1 }}>{view.toLocaleString("en-US", { month: "long", year: "numeric" })}</span>
+        <button onClick={() => setMonthOffset(Math.min(monthOffset + 1, 0))} disabled={monthOffset >= 0} aria-label="Next month" style={{ background: "none", border: "none", color: monthOffset >= 0 ? "#333" : "#8b8b9e", fontSize: 16, cursor: monthOffset >= 0 ? "default" : "pointer", padding: "4px 10px" }}>{"▶"}</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5, textAlign: "center" }}>
+        {["Mo","Tu","We","Th","Fr","Sa","Su"].map((dn) => <div key={dn} style={{ fontSize: 9.5, color: "#555566", fontWeight: 700 }}>{dn}</div>)}
+        {cells.map((ds, i) => {
+          if (!ds) return <div key={"e" + i} />;
+          const isFuture = ds > today, isPicked = ds === day;
+          const count = isFuture ? 0 : finishedTasksForDay(taskLists, ds).length;
+          return <button key={ds} disabled={isFuture} onClick={() => setPicked(ds === today ? null : ds)} data-finished-day={ds}
+            aria-label={`${ds}: ${count} finished`} aria-pressed={isPicked}
+            style={{ aspectRatio: "1", borderRadius: "50%", padding: 0, fontFamily: "inherit", lineHeight: 1.1,
+              background: isFuture ? "#1a1a2e" : count ? "#4cd137" : "#2d2d3a", color: isFuture ? "#333" : count ? "#fff" : "#777",
+              border: isPicked ? "2px solid #ffd43b" : ds === today ? "2px solid #c4b5fd" : "2px solid transparent",
+              opacity: isFuture ? 0.35 : 1, cursor: isFuture ? "default" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: 12, fontWeight: ds === today ? 900 : 600 }}>{Number(ds.slice(8))}</span>
+            {count > 0 && <span style={{ fontSize: 8.5, fontWeight: 800 }}>{count}✓</span>}
+          </button>;
+        })}
+      </div>
+    </div>
     {finished.length ? <div style={{ maxHeight: 360, overflowY: "auto" }}>
       {finished.map(task => <div key={task.id} data-finished-task={task.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: "1px solid #2d2d3a" }}>
         <span aria-hidden="true" style={{ color: "#4cd137", fontWeight: 900 }}>✓</span>
         <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 10.5, color: "#8b8b9e", marginTop: 4 }}>{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
         <span style={{ fontSize: 10, color: "#a78bfa", fontWeight: 800 }}>+{task.points}</span>
       </div>)}
-    </div> : <p style={{ fontSize: 12, color: "#8b8b9e", padding: "12px 0" }}>Nothing finished today yet. Completed tasks will appear here.</p>}
+    </div> : <p style={{ fontSize: 12, color: "#8b8b9e", padding: "12px 0" }}>{day === today ? "Nothing finished today yet. Completed tasks will appear here." : `Nothing finished on ${dayLabel}.`}</p>}
   </section>;
 }
 
@@ -5273,6 +5325,9 @@ function DailyGrind() {
     const yday = getYesterday(rh);
     let updated = { ...data };
     let changed = false;
+    // Before the reset below, so it can't un-check the tasks this hands back.
+    const oneTimeToday = migrateTodayListOneTime(updated);
+    if (oneTimeToday) { updated = oneTimeToday; changed = true; }
 
     // Archive every past day missing a history entry (covers multi-day gaps, not just yesterday).
     // Unmarked habits on those days are auto-stamped as "skip" (red ✗).
