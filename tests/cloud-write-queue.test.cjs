@@ -12,7 +12,7 @@ function fakeServer(path = "users/u1/data/daily-grind-v13") {
   return { sent, pending, ref: { path, set: payload => { sent.push(payload); return new Promise((resolve, reject) => pending.push({ resolve, reject })); } } };
 }
 function queue() {
-  const ctx = { _cloudWriteQueues: {} };
+  const ctx = { _cloudWriteQueues: {}, _CLOUD_WRITE_TIMEOUT_MS: 30, setTimeout, clearTimeout };
   vm.runInNewContext(source + "; this.q = _queueCloudWrite;", ctx);
   return ctx;
 }
@@ -45,10 +45,32 @@ test("a failed upload rejects its callers and the queue keeps going", async () =
 
 test("writes for different documents or accounts are never merged", async () => {
   const { q } = queue(), a = fakeServer("users/u1/data/x"), b = fakeServer("users/u2/data/x");
-  q("x", a.ref, { value: "a1" }); q("x", b.ref, { value: "b1" }); q("x", a.ref, { value: "a2" });
+  const all = [q("x", a.ref, { value: "a1" }), q("x", b.ref, { value: "b1" }), q("x", a.ref, { value: "a2" })];
   await tick();
   assert.deepEqual(a.sent.map(p => p.value), ["a1"]);
   assert.deepEqual(b.sent.map(p => p.value), ["b1"]);
   a.pending.shift().resolve(); await tick();
   assert.deepEqual(a.sent.map(p => p.value), ["a1", "a2"]);
+  a.pending.shift().resolve(); b.pending.shift().resolve();
+  await Promise.all(all);
+});
+
+test("an upload the cloud never answers gives up, so later saves still go out", async () => {
+  const { q } = queue(), server = fakeServer();
+  const stuck = q("main", server.ref, { value: 1 });
+  await tick();
+  const next = q("main", server.ref, { value: 2 });
+  await assert.rejects(stuck, /didn't answer/);
+  await tick();
+  assert.deepEqual(server.sent.map(p => p.value), [1, 2]);
+  server.pending[1].resolve();
+  await next;
+  // The stuck upload finishing late must not free the line under the upload that's running now.
+  const third = q("main", server.ref, { value: 3 }); await tick();
+  const fourth = q("main", server.ref, { value: 4 });
+  server.pending[0].resolve(); await tick();
+  assert.deepEqual(server.sent.map(p => p.value), [1, 2, 3]); // 4 still waits its turn
+  server.pending[2].resolve(); await third; await tick();
+  assert.deepEqual(server.sent.map(p => p.value), [1, 2, 3, 4]);
+  server.pending[3].resolve(); await fourth;
 });

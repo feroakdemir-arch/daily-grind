@@ -637,6 +637,7 @@
     // keep at most one write in flight and one waiting per document, always with the newest payload. Callers
     // whose payload was replaced resolve when the newer write (which contains their change) is confirmed.
     // Without this, fast edits on a slow connection queued a full upload per edit and never caught up.
+    const _CLOUD_WRITE_TIMEOUT_MS = 45000;
     function _queueCloudWrite(key, ref, payload, write) {
       const slotKey = `${key}|${ref.path || ""}`; // never merge writes meant for different accounts
       const slot = _cloudWriteQueues[slotKey] || (_cloudWriteQueues[slotKey] = { running: false, waiting: null });
@@ -657,8 +658,21 @@
         const current = slot.waiting;
         slot.waiting = null;
         slot.running = true;
+        // A write the cloud never answers (seen after the computer slept) held the line forever, so no later
+        // change was uploaded. Give up on it after a while: the change stays on the device and retries.
+        let finished = false;
+        const finish = (settle) => (outcome) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          settle(outcome);
+          slot.running = false;
+          pump();
+        };
+        const timer = setTimeout(finish(current.reject), _CLOUD_WRITE_TIMEOUT_MS,
+          new Error("The cloud didn't answer. Your change is saved on this device and will upload on the next try."));
         Promise.resolve().then(() => current.write ? current.write(current.payload) : ref.set(current.payload).then(() => current.payload))
-          .then(current.resolve, current.reject).finally(() => { slot.running = false; pump(); });
+          .then(finish(current.resolve), finish(current.reject));
       };
       pump();
       return entry.promise;
@@ -4074,13 +4088,23 @@ function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer
     let saving = null;
     try { saving = onAdd(list.id, pendingDraft.name, Math.max(0, parseInt(pendingDraft.points) || 0), pendingDraft.id); }
     catch (error) { console.warn("Task save failed:", error); }
+    const release = () => {
+      taskSavingRef.current = false;
+      setTaskSaving(false);
+      if (document.visibilityState === "visible") setTimeout(() => inputRef.current?.focus(), 50);
+    };
     const onDevice = !!taskState && taskState(pendingDraft.id) === "present";
-    if (onDevice) { clearTaskDraft(list.id); draftIdRef.current = makeId("t"); }
+    if (onDevice) {
+      // Saved here, so the box is free for the next task at once; the upload finishes in the background
+      // and any cloud problem shows in the header's sync status with a retry.
+      clearTaskDraft(list.id); draftIdRef.current = makeId("t");
+      Promise.resolve(saving).catch((error) => console.warn("Task cloud save failed:", error));
+      release();
+      return null;
+    }
     try { result = await saving; }
     catch (error) { console.warn("Task cloud save failed:", error); }
-    if (onDevice) {
-      // Saved here; any cloud problem shows in the header's sync status with a retry.
-    } else if (result) {
+    if (result) {
       clearTaskDraft(list.id);
       draftIdRef.current = makeId("t");
     } else {
@@ -4090,9 +4114,7 @@ function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer
       setPts(pendingDraft.points);
       writeTaskDraft(list.id, pendingDraft);
     }
-    taskSavingRef.current = false;
-    setTaskSaving(false);
-    if (document.visibilityState === "visible") setTimeout(() => inputRef.current?.focus(), 50);
+    release();
     return result;
   }, [list.id, onAdd]);
 
