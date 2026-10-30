@@ -680,7 +680,7 @@
 
     // Versioned recovery vault. The live document remains the fast source of
     // truth, while these independent copies make accidental deletion or a bad
-    // overwrite recoverable. Organized Me never deletes vault documents.
+    // overwrite recoverable. Organized Me never deletes vault documents; copies reuse fixed slots instead.
     const VAULT_PREFIX = "dg-vault-main-";
     const VAULT_CAL_PREFIX = "dg-vault-calendar-";
     const VAULT_INDEX_PREFIX = "dg-vault-index-";
@@ -688,6 +688,7 @@
     const _vaultIndexQueues = {};
     let _vaultTimer = null;
     let _vaultPendingValue = null;
+    const _safetySlotsWritten = new Map(); // safety slot id → when this device last filled it
     function _emitVaultStatus(state, detail) {
       const payload = { state, at: Date.now(), ...(detail || {}) };
       _vaultStatusListeners.forEach((listener) => { try { listener(payload); } catch (e) {} });
@@ -711,6 +712,23 @@
       d.setDate(d.getDate() - day);
       const pad = (n) => String(n).padStart(2, "0");
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+    // Where a backup goes. Copies reuse a fixed set of slots (hourly for 2 days, daily for 30 days, weekly for
+    // 26 weeks, safety copies in ten-minute slots for a day), so the vault stays the same size however long
+    // the app is used: a new document per copy filled the free plan's 1 GiB with ~1,000 copies in two months.
+    function _vaultTargets(now, safetyCopy) {
+      const d = new Date(now);
+      const pad = (n) => String(n).padStart(2, "0");
+      const day = Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5);
+      const week = Math.floor((day - (d.getDay() + 6) % 7) / 7);
+      const slot = (kind, name) => ({ id: `${VAULT_PREFIX}${kind}-slot-${name}`, calendarId: `${VAULT_CAL_PREFIX}${kind}-slot-${name}`, kind });
+      if (safetyCopy) return [slot("safety", `${pad(d.getHours())}-${Math.floor(d.getMinutes() / 10)}`)];
+      return [
+        { id: `${VAULT_PREFIX}latest`, calendarId: `${VAULT_CAL_PREFIX}latest`, kind: "latest" },
+        slot("hourly", `${day % 2}-${pad(d.getHours())}`),
+        slot("daily", pad(day % 30)),
+        slot("weekly", pad(week % 26)),
+      ];
     }
     function _byteSize(text) {
       try { return new TextEncoder().encode(text).length; }
@@ -792,21 +810,21 @@
       const now = Date.now();
       const checksum = await _sha256(value);
       const calendarChecksum = await _sha256(calendarValue);
-      const parts = _localDateParts(now);
-      const targets = safetyCopy
-        ? [{ id: `${VAULT_PREFIX}safety-${now}`, calendarId: `${VAULT_CAL_PREFIX}safety-${now}`, kind: "safety" }]
-        : [
-            { id: `${VAULT_PREFIX}latest`, calendarId: `${VAULT_CAL_PREFIX}latest`, kind: "latest" },
-            { id: `${VAULT_PREFIX}hourly-${parts.hour}`, calendarId: `${VAULT_CAL_PREFIX}hourly-${parts.hour}`, kind: "hourly" },
-            { id: `${VAULT_PREFIX}daily-${parts.day}`, calendarId: `${VAULT_CAL_PREFIX}daily-${parts.day}`, kind: "daily" },
-            { id: `${VAULT_PREFIX}weekly-${_weekStart(now)}`, calendarId: `${VAULT_CAL_PREFIX}weekly-${_weekStart(now)}`, kind: "weekly" },
-          ];
+      const targets = _vaultTargets(now, safetyCopy);
       _emitVaultStatus("saving", { reason: reason || "automatic" });
       // A safety copy is also kept on this device at once, so a delete never waits on the network.
       let deviceCopy = false;
       if (safetyCopy) {
         try { _writeLocalSafety({ value, calendarValue, reason, at: now }); deviceCopy = true; }
         catch (e) { console.warn("Device safety copy skipped:", e); }
+        // The first copy in a ten-minute slot holds the oldest state, so later deletes in that slot keep it
+        // instead of overwriting it with a state that already lacks what was deleted first.
+        const kept = _safetySlotsWritten.get(targets[0].id);
+        if (kept && now - kept < 10 * 60e3) {
+          const result = { cloud: true, copies: deviceCopy ? 1 : 0, at: kept };
+          _emitVaultStatus("saved", result);
+          return result;
+        }
       }
       const cloudCopies = Promise.all(targets.flatMap((target) => [
         _queueCloudWrite(`vault:${target.id}`, collection.doc(target.id), {
@@ -830,7 +848,10 @@
           clientCreatedAt: now,
           updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
         }),
-      ])).then(() => _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes));
+      ])).then(() => {
+        if (safetyCopy) _safetySlotsWritten.set(targets[0].id, now);
+        return _updateVaultIndex(collection, targets, now, reason, sizeBytes, calendarSizeBytes);
+      });
       const result = { cloud: true, copies: targets.length * 2, at: now };
       if (deviceCopy) {
         // Offline or slow: the cloud copies stay queued (Firestore keeps them) and upload later.
@@ -954,7 +975,12 @@
           for (let h = 0; h < span * 24; h++) ids.add(`${VAULT_CAL_PREFIX}hourly-${_localDateParts(now - h * 3600e3).hour}`);
           for (let d = 0; d <= span + 3; d++) ids.add(`${VAULT_CAL_PREFIX}daily-${_localDateParts(now - d * 864e5).day}`);
           for (let w = 0; w < 3; w++) ids.add(`${VAULT_CAL_PREFIX}weekly-${_weekStart(now - w * 7 * 864e5)}`);
+          // The same span in the reused slots (copies written since Oct 29, 2026).
+          for (let h = 0; h < Math.min(span, 2) * 24; h++) ids.add(_vaultTargets(now - h * 3600e3, false)[1].calendarId);
+          for (let d = 0; d <= span + 3; d++) ids.add(_vaultTargets(now - d * 864e5, false)[2].calendarId);
+          for (let w = 0; w < 3; w++) ids.add(_vaultTargets(now - w * 7 * 864e5, false)[3].calendarId);
           const docs = await Promise.all([...ids].map((id) => collection.doc(id).get().catch(() => null)));
+          // Also returns the safety-slot-* copies: letters sort after the digits of the older timestamped ids.
           const safety = await collection.orderBy(firebase.firestore.FieldPath.documentId())
             .startAt(`${VAULT_CAL_PREFIX}safety-${now - span * 864e5}`).endAt(`${VAULT_CAL_PREFIX}safety-\uf8ff`).get().catch(() => null);
           [...docs, ...(safety ? safety.docs : [])].forEach((doc) => {
