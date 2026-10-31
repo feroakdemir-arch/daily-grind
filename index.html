@@ -1995,12 +1995,30 @@ function parseMainData(raw) {
   const noteTextBoxes = Object.fromEntries(Object.entries(parsed.noteTextBoxes || {}).map(([id, boxes]) => [id, normalizeNoteTextBoxes(boxes)]));
   if (parsed.noteImages !== undefined && !objectOnly(parsed.noteImages)) throw new Error("Saved note images are invalid");
   const noteImages = Object.fromEntries(Object.entries(parsed.noteImages || {}).map(([id, images]) => [id, normalizeNoteImages(images)]));
+  // Marks on screenshots rejoin their page's ink and text boxes (compactMainData saves them apart). Marks of a
+  // screenshot that is no longer on the page, or of a deleted page, are dropped.
+  if (parsed.noteImageMarks !== undefined && !objectOnly(parsed.noteImageMarks)) throw new Error("Saved screenshot marks are invalid");
+  const { noteImageMarks: savedImageMarks = {}, ...unpacked } = parsed;
+  for (const note of Array.isArray(parsed.notes) ? parsed.notes : []) {
+    if (!objectOnly(note) || typeof note.id !== "string" || !note.id) continue;
+    const id = note.id, own = (map) => Object.prototype.hasOwnProperty.call(map, id);
+    const marks = own(savedImageMarks) ? savedImageMarks[id] : undefined;
+    if (marks !== undefined && !objectOnly(marks)) throw new Error("Saved screenshot marks are invalid");
+    const ink = own(noteDrawings) ? noteDrawings[id] : normalizeNoteDrawing(note.drawing);
+    const boxes = own(noteTextBoxes) ? noteTextBoxes[id] : normalizeNoteTextBoxes(note.textBoxes);
+    if (!marks && ink.every(onNotePaper) && boxes.every(onNotePaper)) continue;
+    const shown = new Set((own(noteImages) ? noteImages[id] : normalizeNoteImages(note.images)).map((image) => image.id));
+    const join = (items, extra) => [...items, ...extra.filter((mark) => !items.some((item) => item.id === mark.id))]
+      .filter((item) => onNotePaper(item) || shown.has(item.imageId));
+    noteDrawings[id] = normalizeNoteDrawing(join(ink, normalizeNoteDrawing(marks?.drawing)));
+    noteTextBoxes[id] = normalizeNoteTextBoxes(join(boxes, normalizeNoteTextBoxes(marks?.textBoxes)));
+  }
   const sections = habitSections.length ? habitSections : JSON.parse(JSON.stringify(DEFAULT_HABIT_SECTIONS));
   if (!sections.some((section) => section.optional === true)) {
     sections.push({ id: OPTIONAL_SECTION_ID, title: "OPTIONAL", icon: "\u2726", optional: true, items: [] });
   }
   return {
-    ...parsed,
+    ...unpacked,
     habitSections: sections,
     taskLists,
     noteSections: normalizeNoteSections(parsed.noteSections),
@@ -2235,21 +2253,27 @@ function textByteSize(text) {
 // Note ink, text boxes and screenshots are stored once, in the noteDrawings / noteTextBoxes / noteImages
 // maps (parseMainData reads those first and rebuilds each note's copy). Keeping them on the notes too
 // doubled every handwritten page inside the one cloud document, which has a hard size cap.
+// Marks on screenshots are saved in their own noteImageMarks map: an older app copy rewrites the maps it knows
+// without them and passes unknown fields through, so it keeps them (parseMainData puts them back on the page).
 function compactMainData(data) {
   if (!data || typeof data !== "object" || !Array.isArray(data.notes)) return data;
   const own = (map, id) => !!map && typeof map === "object" && Object.prototype.hasOwnProperty.call(map, id);
-  const noteDrawings = {}, noteTextBoxes = {}, noteImages = {};
+  const noteDrawings = {}, noteTextBoxes = {}, noteImages = {}, noteImageMarks = {};
   const notes = data.notes.map((note) => {
     if (!note || typeof note !== "object" || typeof note.id !== "string") return note;
     const { drawing, textBoxes, images, ...rest } = note;
     const pick = (map, fallback) => own(map, note.id) ? map[note.id] : fallback;
     const ink = pick(data.noteDrawings, drawing), boxes = pick(data.noteTextBoxes, textBoxes), shots = pick(data.noteImages, images);
-    if (Array.isArray(ink) && ink.length) noteDrawings[note.id] = packNoteDrawing(ink);
-    if (Array.isArray(boxes) && boxes.length) noteTextBoxes[note.id] = boxes;
+    const paperInk = Array.isArray(ink) ? ink.filter(onNotePaper) : ink, paperBoxes = Array.isArray(boxes) ? boxes.filter(onNotePaper) : boxes;
+    const markInk = Array.isArray(ink) ? ink.filter(item => !onNotePaper(item)) : [], markBoxes = Array.isArray(boxes) ? boxes.filter(item => !onNotePaper(item)) : [];
+    if (Array.isArray(paperInk) && paperInk.length) noteDrawings[note.id] = packNoteDrawing(paperInk);
+    if (Array.isArray(paperBoxes) && paperBoxes.length) noteTextBoxes[note.id] = paperBoxes;
     if (Array.isArray(shots) && shots.length) noteImages[note.id] = shots;
+    if (markInk.length || markBoxes.length) noteImageMarks[note.id] = { ...(markInk.length ? { drawing: packNoteDrawing(markInk) } : {}), ...(markBoxes.length ? { textBoxes: markBoxes } : {}) };
     return rest;
   });
-  return { ...data, notes, noteDrawings, noteTextBoxes, noteImages };
+  const { noteImageMarks: _loaded, ...rest } = data;
+  return { ...rest, notes, noteDrawings, noteTextBoxes, noteImages, ...(Object.keys(noteImageMarks).length ? { noteImageMarks } : {}) };
 }
 function serializeMainData(data) { return JSON.stringify(compactMainData(data)); }
 // Size of the saved account if `note` replaced its current version: the rest of the account is measured
@@ -2326,18 +2350,25 @@ function normalizeNoteDrawing(strokes) {
   let pointCount = 0;
   const ids = new Set();
   return strokes.map(stroke => {
-    const anchored = stroke?.space === "page";
+    const anchored = stroke?.space === "page", onImage = stroke?.imageId !== undefined;
     if (!stroke || typeof stroke.id !== "string" || !stroke.id || ids.has(stroke.id) || !/^#[0-9a-f]{6}$/i.test(stroke.color || "") ||
         !Number.isFinite(stroke.width) || stroke.width < (anchored ? 0.5 : 1) || stroke.width > 12 || !Array.isArray(stroke.points) || !stroke.points.length ||
-        (stroke.space !== undefined && !anchored) || (anchored && (!Number.isFinite(stroke.pageWidth) || stroke.pageWidth <= 0 || stroke.pageWidth > 10000))) throw new Error("Saved drawing data is invalid");
+        (stroke.space !== undefined && !anchored) || (anchored && (!Number.isFinite(stroke.pageWidth) || stroke.pageWidth <= 0 || stroke.pageWidth > 10000)) ||
+        (onImage && (!anchored || !validNoteImageId(stroke.imageId)))) throw new Error("Saved drawing data is invalid");
     ids.add(stroke.id); pointCount += stroke.points.length;
     if (pointCount > NOTE_DRAWING_MAX_POINTS) throw new Error("This drawing is full. Erase a stroke or use another page.");
-    return { id: stroke.id, color: stroke.color, width: stroke.width, ...(anchored ? { space: "page", pageWidth: stroke.pageWidth } : {}), points: stroke.points.map(point => {
+    return { id: stroke.id, color: stroke.color, width: stroke.width, ...(anchored ? { space: "page", pageWidth: stroke.pageWidth } : {}), ...(onImage ? { imageId: stroke.imageId } : {}), points: stroke.points.map(point => {
       if (!Array.isArray(point) || point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[0] < 0 || point[0] > (anchored ? 10000 : 1000) || point[1] < 0 || point[1] > (anchored ? 200000 : 700)) throw new Error("Saved drawing points are invalid");
       return point.slice();
     }) };
   });
 }
+
+// Ink and text boxes on a screenshot carry its imageId. Their x/y are pixels from the image's top-left corner
+// while it was shown pageWidth pixels wide, so they scale with the image and can reach the blank space
+// beside it. Everything else is on the paper.
+function validNoteImageId(id) { return typeof id === "string" && id.length > 0 && id.length <= 100; }
+function onNotePaper(item) { return !item || item.imageId === undefined; }
 
 function anchorNoteDrawing(strokes, pageWidth, originalHeight) {
   if (strokes.every(stroke => stroke.space === "page")) return strokes;
@@ -2364,9 +2395,9 @@ function normalizeNoteTextBoxes(boxes) {
         !Number.isFinite(box.x) || box.x < 0 || box.x > 10000 || !Number.isFinite(box.y) || box.y < 0 || box.y > 200000 ||
         !Number.isFinite(box.width) || box.width < 40 || box.width > 10000 || !Number.isFinite(box.pageWidth) || box.pageWidth <= 0 || box.pageWidth > 10000) throw new Error("Saved text box data is invalid");
     ids.add(box.id);
-    if (box.sized !== undefined && typeof box.sized !== "boolean") throw new Error("Saved text box data is invalid");
+    if ((box.sized !== undefined && typeof box.sized !== "boolean") || (box.imageId !== undefined && !validNoteImageId(box.imageId))) throw new Error("Saved text box data is invalid");
     // sized: the width was set by hand, so text wraps at it instead of the box growing to fit.
-    return { id: box.id, text: box.text, x: box.x, y: box.y, width: box.width, pageWidth: box.pageWidth, ...(box.sized ? { sized: true } : {}) };
+    return { id: box.id, text: box.text, x: box.x, y: box.y, width: box.width, pageWidth: box.pageWidth, ...(box.imageId !== undefined ? { imageId: box.imageId } : {}), ...(box.sized ? { sized: true } : {}) };
   });
 }
 
@@ -3325,18 +3356,86 @@ function NoteMarkdownView({ body, hasInk, onEdit }) {
   );
 }
 
-function NoteScreenshot({ image, onRemove }) {
+// Marks on a screenshot sit on bright and dark images alike: ink gets a thin dark halo, text a dark chip.
+const NOTE_MARK_HALO = "drop-shadow(0 0 1px rgba(8,8,16,0.9))";
+const NOTE_MARK_CHIP = "rgba(20,20,35,0.85)";
+// A screenshot mark's scale: its x/y were saved while the image was shown pageWidth pixels wide.
+function noteMarkScale(item, frame) { return frame.width / item.pageWidth; }
+// How far right a screenshot's marks reach, in widths of the image (at least 1). The image is shown narrow
+// enough for its marks beside it to stay in its row when the window narrows. A text box counts by its first
+// 40px, the most it can be pushed past the row's edge, so placing one never shrinks the image.
+function noteMarkReach(drawing, textBoxes, imageId) {
+  let reach = 1;
+  for (const stroke of drawing) if (stroke.imageId === imageId) for (const point of stroke.points) reach = Math.max(reach, point[0] / stroke.pageWidth);
+  for (const box of textBoxes) if (box.imageId === imageId) reach = Math.max(reach, (box.x + 40) / box.pageWidth);
+  return reach;
+}
+function noteStrokeShape(stroke, transform) {
+  return <g key={stroke.id} transform={transform}>
+    {stroke.points.length === 1
+      ? <circle data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
+      : <polyline data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />}
+  </g>;
+}
+
+// Read view: a screenshot's ink and text, shown but not editable.
+function NoteImageMarksView({ frame, drawing, textBoxes }) {
+  return <>
+    <svg aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, width: frame.areaWidth, height: frame.height, overflow: "visible", pointerEvents: "none" }}>
+      <g style={{ filter: NOTE_MARK_HALO }}>{drawing.filter(stroke => stroke.imageId === frame.imageId).map(stroke => noteStrokeShape(stroke, `scale(${noteMarkScale(stroke, frame)})`))}</g>
+    </svg>
+    {textBoxes.filter(box => box.imageId === frame.imageId).map(box => {
+      const scale = noteMarkScale(box, frame);
+      return <div key={box.id} data-note-image-text={box.id} style={{ position: "absolute", left: box.x * scale, top: box.y * scale, width: box.sized ? box.width : "max-content", minWidth: box.width, maxWidth: box.sized ? box.width : frame.areaWidth / scale - box.x, transform: `scale(${scale})`, transformOrigin: "0 0", whiteSpace: "pre-wrap", overflowWrap: "break-word", border: "1px solid transparent", borderRadius: 3, background: NOTE_MARK_CHIP, color: "#d8d8e2", fontFamily: NOTE_FONT_STACK, fontSize: 14, lineHeight: 1.8, pointerEvents: "none" }}>{box.text}</div>;
+    })}
+  </>;
+}
+
+// A page's screenshots with the ink and text boxes drawn on them (items of drawing / textBoxes that carry an
+// imageId). Marks are only shown, unless the editor passes renderMarks(frame) to draw editable ones over the
+// image row (the image plus the blank space beside it), onAreaPointerDown(event, frame) to place text there,
+// and onFrame, called whenever a screenshot's shown size changes. frame = { imageId, width, height } of the
+// image as shown, and areaWidth of its row.
+function NoteScreenshots({ images, drawing, textBoxes, onRemove, renderMarks, onAreaPointerDown, onFrame }) {
+  const marks = renderMarks || (frame => <NoteImageMarksView frame={frame} drawing={drawing} textBoxes={textBoxes} />);
+  return <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 0, marginBottom: 20 }}>
+    <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
+    {images.map(image => <NoteScreenshot key={image.id} image={image} reach={noteMarkReach(drawing, textBoxes, image.id)} onRemove={onRemove} renderMarks={marks} onAreaPointerDown={onAreaPointerDown} onFrame={onFrame} />)}
+  </section>;
+}
+
+function NoteScreenshot({ image, reach = 1, onRemove, renderMarks, onAreaPointerDown, onFrame }) {
   const [src, setSrc] = useState("");
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [frame, setFrame] = useState(null);
+  const areaRef = useRef(null);
+  const frameRef = useRef(null);
   useEffect(() => {
     let canceled = false;
     setSrc(""); setError("");
     window.noteImageStore.load(image.assetId).then(data => { if (!canceled) setSrc(data); }).catch(err => { if (!canceled) setError(err.message); });
     return () => { canceled = true; };
   }, [image.assetId, attempt]);
+  useLayoutEffect(() => {
+    const area = areaRef.current, img = area?.querySelector("img");
+    if (!img) return;
+    const tenth = value => Math.round(value * 10) / 10;
+    const measure = () => {
+      const shown = img.getBoundingClientRect();
+      const next = shown.width > 0 && shown.height > 0 ? { imageId: image.id, width: tenth(shown.width), height: tenth(shown.height), areaWidth: tenth(area.getBoundingClientRect().width) } : null;
+      const previous = frameRef.current;
+      if (previous === next || (previous && next && previous.width === next.width && previous.height === next.height && previous.areaWidth === next.areaWidth)) return;
+      frameRef.current = next; setFrame(next); onFrame?.();
+    };
+    measure();
+    img.addEventListener("load", measure);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    if (observer) { observer.observe(area); observer.observe(img); } else window.addEventListener("resize", measure);
+    return () => { img.removeEventListener("load", measure); if (observer) observer.disconnect(); else window.removeEventListener("resize", measure); };
+  }, [src, image.id]);
   const pngBlob = async () => {
     const img = new Image();
     await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = src; });
@@ -3356,7 +3455,11 @@ function NoteScreenshot({ image, onRemove }) {
       }}>Copy image</button>}
       <button type="button" disabled={busy} style={{ ...S.noteToolBtn, color: "#ff8793" }} onClick={async () => { setBusy(true); try { await onRemove(image.id); } catch (err) { setMessage(err.message); } finally { setBusy(false); } }}>Remove image</button>
     </figcaption>
-    {src ? <img src={src} alt={image.name} width={image.width} height={image.height} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 4 }} /> : <div role="status" style={{ color: "#aaaabb", padding: 20, fontSize: 12 }}>{error || "Loading screenshot…"}{error && <button onClick={() => setAttempt(value => value + 1)} style={{ ...S.noteToolBtn, marginLeft: 8 }}>Retry</button>}</div>}
+    {src ? <div ref={areaRef} data-note-image-area={image.id} onPointerDown={onAreaPointerDown && frame ? event => onAreaPointerDown(event, frame) : undefined}
+      style={{ position: "relative", cursor: onAreaPointerDown ? "text" : undefined }}>
+      <img src={src} alt={image.name} width={image.width} height={image.height} draggable={onAreaPointerDown ? false : undefined} style={{ display: "block", maxWidth: `${100 / reach}%`, height: "auto", borderRadius: 4 }} />
+      {frame && renderMarks(frame)}
+    </div> : <div role="status" style={{ color: "#aaaabb", padding: 20, fontSize: 12 }}>{error || "Loading screenshot…"}{error && <button onClick={() => setAttempt(value => value + 1)} style={{ ...S.noteToolBtn, marginLeft: 8 }}>Retry</button>}</div>}
     {message && <p role="status" style={{ color: "#c4b5fd", fontSize: 11, marginTop: 8 }}>{message}</p>}
   </figure>;
 }
@@ -3529,7 +3632,9 @@ function makeNotePen() {
   return pen;
 }
 
-function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish, pen }) {
+// The page's paper, plus its screenshots: pen, eraser and text boxes work on the paper, on each screenshot and
+// in the blank space beside it. drawing and textBoxes hold both; screenshot marks carry the image's id.
+function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], images = [], onRemoveImage, body, onBodyChange, onDrawingChange, onTextBoxesChange, beforeRemoveTextBox, onFinish, pen }) {
   const [mode, setMode] = useState("text");
   const [typeMode, setTypeModeState] = useState(() => { try { return localStorage.getItem("dg-note-type-mode") === "normal" ? "normal" : "anywhere"; } catch (e) { return "anywhere"; } });
   const setTypeMode = value => { setTypeModeState(value); try { localStorage.setItem("dg-note-type-mode", value); } catch (e) {} };
@@ -3538,14 +3643,16 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   const [width, setWidth] = useState(3);
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState({ undo: [], redo: [] });
-  const [pageWidth, setPageWidth] = useState(() => drawing.find(stroke => stroke.space === "page")?.pageWidth || textBoxes[0]?.pageWidth || null);
+  const [pageWidth, setPageWidth] = useState(() => drawing.find(stroke => stroke.space === "page" && onNotePaper(stroke))?.pageWidth || textBoxes.find(onNotePaper)?.pageWidth || null);
   const [paperHeight, setPaperHeight] = useState(null);
   const [bodySize, setBodySize] = useState({ width: "100%", height: 28 });
   const [pendingBox, setPendingBox] = useState(null);
   const [activeTextId, setActiveTextId] = useState(null);
   const [removingText, setRemovingText] = useState(false);
+  const [frameVersion, setFrameVersion] = useState(0);
   const textBoxesRef = useRef(textBoxes);
   textBoxesRef.current = textBoxes;
+  const rootRef = useRef(null);
   const surfaceRef = useRef(null);
   const extraSpaceRef = useRef(0);
   const svgRef = useRef(null);
@@ -3574,9 +3681,12 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
   const [boxDrag, setBoxDrag] = useState(null);
   // Resizing works the same way: the width follows the pointer and is saved once on release.
   const [boxResize, setBoxResize] = useState(null);
-  const clampBoxPosition = (x, y) => {
-    const paperWidth = surfaceRef.current.getBoundingClientRect().width;
-    return [Math.round(Math.max(0, Math.min(Math.max(0, paperWidth - 40), x))), Math.round(Math.max(0, Math.min(200000, y)))];
+  // Room for a text box, in its own units: the paper's width, or a screenshot's row (image and the space
+  // beside it). `scale` is how much the box is scaled on screen (screenshot marks follow the image's size).
+  const boxRoomWidth = (frame, scale) => frame ? frame.areaWidth / scale : surfaceRef.current.getBoundingClientRect().width;
+  const clampBoxPosition = (x, y, frame = null, scale = 1) => {
+    const bottom = frame ? frame.height / scale : 200000;
+    return [Math.round(Math.max(0, Math.min(Math.max(0, boxRoomWidth(frame, scale) - 40), x))), Math.round(Math.max(0, Math.min(bottom, y)))];
   };
   // Always start from the latest saved box: a render-time copy can be stale between rapid events.
   const latestBox = box => textBoxesRef.current.find(item => item.id === box.id) || box;
@@ -3609,16 +3719,26 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     const box = { id: makeId("textbox"), text: "", x, y, width: Math.max(100, Math.min(280, rect.width - x)), pageWidth: fixedWidth };
     setPageWidth(fixedWidth); setPendingBox(box); setActiveTextId(box.id);
   };
+  // Clicking a screenshot (or the blank space beside it) in Type mode puts a text box there, in either typing
+  // mode: a screenshot has no document text to continue.
+  const startImageTextBox = (event, frame) => {
+    if (mode !== "text" || event.button !== 0 || event.target.closest("textarea,button")) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.round(Math.max(0, Math.min(frame.areaWidth - 40, event.clientX - rect.left))), y = Math.round(Math.max(0, Math.min(frame.height, event.clientY - rect.top)));
+    const box = { id: makeId("textbox"), text: "", x, y, width: Math.max(100, Math.min(280, frame.areaWidth - x)), pageWidth: frame.width, imageId: frame.imageId };
+    setPendingBox(box); setActiveTextId(box.id);
+  };
   useLayoutEffect(() => {
     if (!activeTextId) return;
-    const input = [...surfaceRef.current.querySelectorAll("[data-note-textbox]")].find(node => node.dataset.noteTextbox === activeTextId);
+    const input = [...rootRef.current.querySelectorAll("[data-note-textbox]")].find(node => node.dataset.noteTextbox === activeTextId);
     input?.focus({ preventScroll: true });
   }, [activeTextId]);
   useLayoutEffect(() => {
     const rect = svgRef.current.getBoundingClientRect();
     if (!legacySize.current) {
       legacySize.current = { width: pageWidth || rect.width, height: rect.height };
-      if (drawingRef.current.length) {
+      if (drawingRef.current.some(onNotePaper)) {
         setPageWidth(legacySize.current.width);
         const anchored = anchorNoteDrawing(drawingRef.current, legacySize.current.width, rect.height);
         if (anchored !== drawingRef.current) publish(anchored);
@@ -3626,7 +3746,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     }
   }, []);
   useLayoutEffect(() => {
-    const incomingWidth = drawing.find(stroke => stroke.space === "page")?.pageWidth || textBoxes[0]?.pageWidth;
+    const incomingWidth = drawing.find(stroke => stroke.space === "page" && onNotePaper(stroke))?.pageWidth || textBoxes.find(onNotePaper)?.pageWidth;
     if (pageWidth === null && incomingWidth) setPageWidth(incomingWidth);
     if (drawing !== lastPublishedDrawing.current) {
       // Old undo snapshots must not remove strokes received from another device.
@@ -3657,8 +3777,8 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     // Never shrink it while the page is open: a mobile keyboard halves innerHeight on every keystroke.
     extraSpaceRef.current = Math.max(extraSpaceRef.current, 48, Math.round((window.innerHeight || 0) * 0.85));
     const extraSpace = extraSpaceRef.current;
-    let height = notePaperHeight(textHeight, strokes, extraSpace);
-    for (const input of surfaceRef.current.querySelectorAll("[data-note-textbox]")) {
+    let height = notePaperHeight(textHeight, strokes.filter(onNotePaper), extraSpace);
+    for (const input of rootRef.current.querySelectorAll("[data-note-textbox]")) {
       const box = [...textBoxes, ...(pendingBox ? [pendingBox] : [])].find(item => item.id === input.dataset.noteTextbox);
       const frame = input.closest("[data-note-textbox-frame]");
       if (box && frame && boxResize?.id === box.id) frame.style.width = `${boxResize.width}px`;
@@ -3666,26 +3786,25 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       else if (box && frame) {
         measure.font = canvasFontOf(input);
         const longestLine = input.value.split("\n").reduce((longest, line) => Math.max(longest, measure.measureText(line.replace(/\t/g, "        ")).width), 0);
-        const maxWidth = Math.max(box.width, paperWidth - box.x);
+        const maxWidth = Math.max(box.width, (frame.dataset.roomWidth ? Number(frame.dataset.roomWidth) : paperWidth) - box.x);
         frame.style.width = `${Math.ceil(Math.min(maxWidth, Math.max(box.width, longestLine + 12)))}px`;
       }
       input.style.height = "0px";
       const boxHeight = Math.max(28, input.scrollHeight + 2);
       input.style.height = `${boxHeight}px`;
       input.scrollTop = 0;
-      height = Math.max(height, Number(input.dataset.boxY) + boxHeight + extraSpace);
+      if (onNotePaper(box)) height = Math.max(height, Number(input.dataset.boxY) + boxHeight + extraSpace);
     }
     setPaperHeight(height);
-  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize, typeNormally]);
+  }, [body, drawing, textBoxes, pendingBox, pageWidth, bodySize.width, boxResize, typeNormally, frameVersion]);
   const pointAt = (event, rect = event.currentTarget.getBoundingClientRect()) =>
     [Math.round(Math.max(0, Math.min(rect.width, event.clientX - rect.left)) * 10) / 10,
       Math.round(Math.max(0, Math.min(rect.height, event.clientY - rect.top)) * 10) / 10];
   // The stroke being drawn lives in the gesture and on one <polyline>, and joins the page (and the save)
   // only when the pen lifts. Publishing every movement re-rendered the whole app per point, and the live
   // save then ran mid-stroke, so on a big account the ink froze while it saved (Oct 10).
-  const liveRef = useRef(null);
-  const showLive = stroke => {
-    const line = liveRef.current;
+  // `line` is the live <polyline> of the paper or screenshot being drawn on.
+  const showLive = (stroke, line) => {
     if (!line) return;
     if (!stroke) { line.setAttribute("points", ""); return; }
     const points = stroke.points.length === 1 ? [stroke.points[0], stroke.points[0]] : stroke.points;
@@ -3701,7 +3820,7 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     setPenDown(false);
     if (active.stroke) {
       publish([...drawingRef.current.filter(stroke => stroke.id !== active.stroke.id), active.stroke]);
-      showLive(null);
+      showLive(null, active.live);
     }
     if (active.before !== drawingRef.current) setHistory(current => ({ undo: [...current.undo.slice(-29), active.before], redo: [] }));
   };
@@ -3724,8 +3843,13 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
     event.preventDefault();
     const rect = event.currentTarget.getBoundingClientRect();
     if (mode === "erase") {
-      const point = pointAt(event, rect);
-      const next = drawingRef.current.filter(stroke => !drawingStrokeHit(stroke, point));
+      // The eraser only touches ink of the paper or screenshot it is on, measured in that ink's own units.
+      const [x, y] = pointAt(event, rect), frame = active.frame;
+      const next = drawingRef.current.filter(stroke => {
+        if (frame ? stroke.imageId !== frame.imageId : !onNotePaper(stroke)) return true;
+        const scale = frame ? noteMarkScale(stroke, frame) : 1;
+        return !drawingStrokeHit(stroke, [x / scale, y / scale], 12 / scale);
+      });
       if (next.length !== drawingRef.current.length) publish(next);
       return;
     }
@@ -3743,8 +3867,32 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       if (Math.hypot(last[0] - point[0], last[1] - point[1]) < 2) continue;
       stroke.points.push(point); added = true;
     }
-    if (added) showLive(stroke);
+    if (added) showLive(stroke, active.live);
   };
+  // frame: the screenshot being drawn on (see NoteScreenshots), or null for the paper. A stroke on a
+  // screenshot is saved in pixels of the image as shown now (pageWidth), so it scales with the image later.
+  const beginGesture = (event, frame = null) => {
+    if (event.button !== 0 || gesture.current) return;
+    if (!frame) {
+      const size = legacySize.current;
+      const anchored = anchorNoteDrawing(drawingRef.current, size.width, size.height);
+      if (anchored !== drawingRef.current && !publish(anchored)) return;
+    }
+    const point = pointAt(event), id = makeId("stroke");
+    const fixedWidth = frame ? frame.width : pageWidth || event.currentTarget.getBoundingClientRect().width;
+    const stroke = mode === "pen" ? { id, color, width, space: "page", pageWidth: fixedWidth, ...(frame ? { imageId: frame.imageId } : {}), points: [point] } : null;
+    // The page's saving limits, checked now rather than losing the stroke when the pen lifts.
+    if (stroke) { try { normalizeNoteDrawing([...drawingRef.current, stroke]); } catch (error) { setMessage(error.message); return; } }
+    event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
+    if (!frame) setPageWidth(fixedWidth);
+    gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current, stroke, frame, live: event.currentTarget.querySelector("[data-note-live-stroke]"),
+      room: NOTE_DRAWING_MAX_POINTS - drawingRef.current.reduce((sum, item) => sum + item.points.length, 0) };
+    setPenDown(true);
+    if (stroke) showLive(stroke, gesture.current.live);
+    else move(event);
+  };
+  const endGesture = event => { if (gesture.current?.pointerId === event.pointerId) { move(event); finishGesture(); } };
+  const undoKeys = event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(event.shiftKey ? "redo" : "undo"); } };
   const travel = direction => {
     const stack = history[direction];
     if (!stack.length) return;
@@ -3754,7 +3902,113 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
       ? { undo: current.undo.slice(0, -1), redo: [...current.redo, previous] }
       : { undo: [...current.undo, previous], redo: current.redo.slice(0, -1) });
   };
-  return <div style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0, fontFamily: NOTE_FONT_STACK }}>
+  // One text box, on the paper (frame null) or on a screenshot, where it is scaled with the image's shown size.
+  const renderTextBox = (box, frame = null) => {
+    const scale = frame ? noteMarkScale(box, frame) : 1, dragging = boxDrag?.id === box.id;
+    return <div key={box.id} data-note-textbox-frame={box.id} data-room-width={frame ? boxRoomWidth(frame, scale) : undefined} style={{ position: "absolute", left: (dragging ? boxDrag.x : box.x) * scale, top: (dragging ? boxDrag.y : box.y) * scale, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none", opacity: dragging ? 0.85 : 1, ...(scale !== 1 ? { transform: `scale(${scale})`, transformOrigin: "0 0" } : {}) }}>
+      <textarea data-note-textbox={box.id} data-box-y={box.y} aria-label={frame ? "Text on screenshot" : "Positioned note text"} placeholder="Type here…" value={box.text} readOnly={mode !== "text"} maxLength={20000}
+        onFocus={() => setActiveTextId(box.id)}
+        onChange={event => {
+          const updated = { ...box, text: event.target.value };
+          const exists = textBoxesRef.current.some(item => item.id === box.id);
+          if (publishText(exists ? textBoxesRef.current.map(item => item.id === box.id ? updated : item) : [...textBoxesRef.current, updated])) setPendingBox(current => current?.id === box.id ? null : current);
+        }}
+        onBlur={() => {
+          if (!box.text.trim()) {
+            setPendingBox(current => current?.id === box.id ? null : current);
+            if (textBoxesRef.current.some(item => item.id === box.id)) publishText(textBoxesRef.current.filter(item => item.id !== box.id));
+          }
+        }}
+        onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.blur(); setActiveTextId(null); } }}
+        style={{ display: "block", width: "100%", height: 28, overflow: "hidden", resize: "none", background: frame ? NOTE_MARK_CHIP : "transparent", border: activeTextId === box.id && mode === "text" ? "1px dashed #a78bfa" : "1px solid transparent", borderRadius: 3, padding: 0, color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      {activeTextId === box.id && mode === "text" && <button type="button" data-note-textbox-move={box.id} aria-label="Move text box" title="Drag to move (arrow keys nudge)"
+        onMouseDown={event => event.preventDefault()}
+        onPointerDown={event => {
+          if (event.button !== 0 || boxDrag) return;
+          event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
+          setBoxDrag({ id: box.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: box.x, originY: box.y, x: box.x, y: box.y });
+        }}
+        onPointerMove={event => {
+          if (!boxDrag || boxDrag.pointerId !== event.pointerId) return;
+          const [x, y] = clampBoxPosition(boxDrag.originX + (event.clientX - boxDrag.startX) / scale, boxDrag.originY + (event.clientY - boxDrag.startY) / scale, frame, scale);
+          if (x !== boxDrag.x || y !== boxDrag.y) setBoxDrag({ ...boxDrag, x, y });
+        }}
+        onPointerUp={event => {
+          if (!boxDrag || boxDrag.pointerId !== event.pointerId) return;
+          const drag = boxDrag; setBoxDrag(null);
+          if (drag.x !== drag.originX || drag.y !== drag.originY) moveBoxTo(box, drag.x, drag.y);
+        }}
+        onPointerCancel={() => setBoxDrag(null)}
+        onKeyDown={event => {
+          const step = event.shiftKey ? 20 : 4;
+          const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+          if (!delta) return;
+          event.preventDefault();
+          const current = latestBox(box);
+          const [x, y] = clampBoxPosition(current.x + delta[0], current.y + delta[1], frame, scale);
+          if (x !== current.x || y !== current.y) moveBoxTo(box, x, y);
+        }}
+        style={{ position: "absolute", left: -10, top: -16, width: 20, height: 20, padding: 0, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#c4b5fd", cursor: boxDrag ? "grabbing" : "grab", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v20M2 12h20M9 5l3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3M19 9l3 3-3 3" /></svg>
+      </button>}
+      {activeTextId === box.id && mode === "text" && <button type="button" data-note-textbox-resize={box.id} aria-label="Resize text box" title="Drag to resize (double-click to fit text; arrow keys adjust)"
+        onMouseDown={event => event.preventDefault()}
+        onPointerDown={event => {
+          if (event.button !== 0 || boxResize || boxDrag) return;
+          event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
+          const startWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width / scale);
+          setBoxResize({ id: box.id, pointerId: event.pointerId, startX: event.clientX, originWidth: startWidth, width: startWidth });
+        }}
+        onPointerMove={event => {
+          if (!boxResize || boxResize.pointerId !== event.pointerId) return;
+          const maxWidth = Math.max(60, boxRoomWidth(frame, scale) - latestBox(box).x);
+          const width = Math.round(Math.max(60, Math.min(maxWidth, boxResize.originWidth + (event.clientX - boxResize.startX) / scale)));
+          if (width !== boxResize.width) setBoxResize({ ...boxResize, width });
+        }}
+        onPointerUp={event => {
+          if (!boxResize || boxResize.pointerId !== event.pointerId) return;
+          const resize = boxResize; setBoxResize(null);
+          if (resize.width !== resize.originWidth) resizeBoxTo(box, resize.width);
+        }}
+        onPointerCancel={() => setBoxResize(null)}
+        onDoubleClick={() => resizeBoxTo(box, Math.max(100, Math.min(280, boxRoomWidth(frame, scale) - latestBox(box).x)), false)}
+        onKeyDown={event => {
+          const step = event.shiftKey ? 40 : 8;
+          const delta = { ArrowLeft: -step, ArrowRight: step }[event.key];
+          if (!delta) return;
+          event.preventDefault();
+          const frameWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width / scale);
+          const maxWidth = Math.max(60, boxRoomWidth(frame, scale) - latestBox(box).x);
+          resizeBoxTo(box, Math.max(60, Math.min(maxWidth, frameWidth + delta)));
+        }}
+        style={{ position: "absolute", right: -7, top: "max(50%, 24px)", transform: "translateY(-50%)", width: 12, height: 22, padding: 0, border: "1px solid #6d5bb0", borderRadius: 4, background: "#202033", cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+        <span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} /><span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} />
+      </button>}
+      {activeTextId === box.id && mode === "text" && <button type="button" disabled={removingText} aria-label="Remove text box" title="Remove text box" onMouseDown={event => event.preventDefault()} onClick={async () => {
+        if (removingText) return;
+        if (box.text.trim() && !confirm("Remove this text box?")) return;
+        setRemovingText(true);
+        try {
+          if (box.text.trim() && !(await beforeRemoveTextBox())) return;
+          if (!textBoxesRef.current.some(item => item.id === box.id) || publishText(textBoxesRef.current.filter(item => item.id !== box.id))) { setPendingBox(null); setActiveTextId(null); }
+        } catch (error) { setMessage(error.message || "Could not save the recovery copy."); }
+        finally { setRemovingText(false); }
+      }} style={{ position: "absolute", right: -10, top: -16, width: 20, height: 20, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#ff8793", cursor: removingText ? "wait" : "pointer" }}>{removingText ? "…" : "×"}</button>}
+    </div>;
+  };
+  // A screenshot's ink and text boxes, over the image and the blank space beside it.
+  const renderImageMarks = frame => <>
+    {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].filter(box => box.imageId === frame.imageId).map(box => renderTextBox(box, frame))}
+    <svg data-note-image-drawing={frame.imageId} aria-label="Drawing on screenshot" role="img" tabIndex={-1}
+      style={{ position: "absolute", left: 0, top: 0, width: frame.areaWidth, height: frame.height, overflow: "visible", zIndex: 2, pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none", outline: mode === "text" ? "none" : "1px dashed #7c3aed88", outlineOffset: 3, borderRadius: 4 }}
+      onPointerDown={event => beginGesture(event, frame)} onPointerMove={move} onPointerUp={endGesture} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture} onKeyDown={undoKeys}>
+      <g style={{ filter: NOTE_MARK_HALO }}>
+        {drawing.filter(stroke => stroke.imageId === frame.imageId).map(stroke => { const scale = noteMarkScale(stroke, frame); return noteStrokeShape(stroke, scale === 1 ? undefined : `scale(${scale})`); })}
+        <polyline data-note-live-stroke points="" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+    </svg>
+  </>;
+  return <div ref={rootRef} style={{ display: "flex", flexDirection: "column", flex: paperHeight === null ? "1 0 420px" : "0 0 auto", minHeight: 420, width: "100%", minWidth: pageWidth ? pageWidth + 2 : 0, fontFamily: NOTE_FONT_STACK }}>
     {toolbarHost && ReactDOM.createPortal(<div role="toolbar" aria-label="Drawing tools" style={{ position: "relative", zIndex: 2, background: "transparent", flexShrink: 0, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", padding: 0 }}>
       {[["text", "Type"], ["pen", "Pen"], ["erase", "Eraser"]].map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => { finishGesture(); setMode(value); }} style={{ ...S.noteToolBtn, color: mode === value ? "#f0e9ff" : "#a0a0b0", borderColor: mode === value ? "#a78bfa" : "#353548", background: mode === value ? "#7c3aed33" : "#202033" }}>{label}</button>)}
       {mode === "text" && <div role="group" aria-label="Where typing goes" style={{ display: "flex", border: "1px solid #353548", borderRadius: 7, overflow: "hidden" }}>
@@ -3766,128 +4020,18 @@ function NoteDrawingSurface({ toolbarHost, drawing = [], textBoxes = [], body, o
         <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: "#b5b5c9" }}>Ink <input aria-label="Pen color" type="color" value={color} onChange={event => setColor(event.target.value)} style={{ width: 30, height: 28, border: 0, padding: 0, background: "transparent" }} /></label>
         <select aria-label="Pen thickness" value={width} onChange={event => setWidth(Number(event.target.value))} style={{ ...S.noteToolBtn, padding: 6 }}><option value="2">Thin</option><option value="3">Medium</option><option value="6">Thick</option></select>
       </>}
-      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag \u2725 to move, the right edge to resize" : typeNormally ? "Type like a document" : "Click any blank spot to type"}</span>
+      <span style={{ fontSize: 10, color: "#8b8b9e" }}>{mode === "pen" ? "Drag to draw" : mode === "erase" ? "Touch a stroke to erase it" : activeTextId ? "Drag ✥ to move, the right edge to resize" : typeNormally ? "Type like a document" : "Click any blank spot to type"}</span>
     </div>, toolbarHost)}
     {message && <div role="alert" style={{ color: "#fca5a5", fontSize: 11, marginBottom: 8 }}>{message}</div>}
+    {images.length > 0 && <NoteScreenshots images={images} drawing={drawing} textBoxes={textBoxes} onRemove={onRemoveImage} renderMarks={renderImageMarks} onAreaPointerDown={startImageTextBox} onFrame={() => setFrameVersion(version => version + 1)} />}
     <div ref={surfaceRef} data-note-paper onPointerDown={startTextBox} style={{ position: "relative", cursor: mode === "text" ? "text" : undefined, flex: paperHeight === null ? 1 : "none", height: paperHeight === null ? undefined : paperHeight, minHeight: 360, border: mode === "text" ? "1px solid transparent" : "1px dashed #7c3aed88", borderRadius: 6 }}>
-      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && (body.length || typeNormally) ? 0 : -1} placeholder={mode === "text" && typeNormally && !textBoxes.length && !drawing.length ? "Start typing\u2026" : ""} style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && (body.length || typeNormally) ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
-      {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].map(box => <div key={box.id} data-note-textbox-frame={box.id} style={{ position: "absolute", left: boxDrag?.id === box.id ? boxDrag.x : box.x, top: boxDrag?.id === box.id ? boxDrag.y : box.y, width: box.width, zIndex: 1, pointerEvents: mode === "text" ? "auto" : "none", opacity: boxDrag?.id === box.id ? 0.85 : 1 }}>
-        <textarea data-note-textbox={box.id} data-box-y={box.y} aria-label="Positioned note text" placeholder="Type here…" value={box.text} readOnly={mode !== "text"} maxLength={20000}
-          onFocus={() => setActiveTextId(box.id)}
-          onChange={event => {
-            const updated = { ...box, text: event.target.value };
-            const exists = textBoxesRef.current.some(item => item.id === box.id);
-            if (publishText(exists ? textBoxesRef.current.map(item => item.id === box.id ? updated : item) : [...textBoxesRef.current, updated])) setPendingBox(current => current?.id === box.id ? null : current);
-          }}
-          onBlur={() => {
-            if (!box.text.trim()) {
-              setPendingBox(current => current?.id === box.id ? null : current);
-              if (textBoxesRef.current.some(item => item.id === box.id)) publishText(textBoxesRef.current.filter(item => item.id !== box.id));
-            }
-          }}
-          onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.blur(); setActiveTextId(null); } }}
-          style={{ display: "block", width: "100%", height: 28, overflow: "hidden", resize: "none", background: "transparent", border: activeTextId === box.id && mode === "text" ? "1px dashed #a78bfa" : "1px solid transparent", borderRadius: 3, padding: 0, color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
-        {activeTextId === box.id && mode === "text" && <button type="button" data-note-textbox-move={box.id} aria-label="Move text box" title="Drag to move (arrow keys nudge)"
-          onMouseDown={event => event.preventDefault()}
-          onPointerDown={event => {
-            if (event.button !== 0 || boxDrag) return;
-            event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
-            setBoxDrag({ id: box.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: box.x, originY: box.y, x: box.x, y: box.y });
-          }}
-          onPointerMove={event => {
-            if (!boxDrag || boxDrag.pointerId !== event.pointerId) return;
-            const [x, y] = clampBoxPosition(boxDrag.originX + event.clientX - boxDrag.startX, boxDrag.originY + event.clientY - boxDrag.startY);
-            if (x !== boxDrag.x || y !== boxDrag.y) setBoxDrag({ ...boxDrag, x, y });
-          }}
-          onPointerUp={event => {
-            if (!boxDrag || boxDrag.pointerId !== event.pointerId) return;
-            const drag = boxDrag; setBoxDrag(null);
-            if (drag.x !== drag.originX || drag.y !== drag.originY) moveBoxTo(box, drag.x, drag.y);
-          }}
-          onPointerCancel={() => setBoxDrag(null)}
-          onKeyDown={event => {
-            const step = event.shiftKey ? 20 : 4;
-            const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
-            if (!delta) return;
-            event.preventDefault();
-            const current = latestBox(box);
-            const [x, y] = clampBoxPosition(current.x + delta[0], current.y + delta[1]);
-            if (x !== current.x || y !== current.y) moveBoxTo(box, x, y);
-          }}
-          style={{ position: "absolute", left: -10, top: -16, width: 20, height: 20, padding: 0, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#c4b5fd", cursor: boxDrag ? "grabbing" : "grab", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v20M2 12h20M9 5l3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3M19 9l3 3-3 3" /></svg>
-        </button>}
-        {activeTextId === box.id && mode === "text" && <button type="button" data-note-textbox-resize={box.id} aria-label="Resize text box" title="Drag to resize (double-click to fit text; arrow keys adjust)"
-          onMouseDown={event => event.preventDefault()}
-          onPointerDown={event => {
-            if (event.button !== 0 || boxResize || boxDrag) return;
-            event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
-            const startWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width);
-            setBoxResize({ id: box.id, pointerId: event.pointerId, startX: event.clientX, originWidth: startWidth, width: startWidth });
-          }}
-          onPointerMove={event => {
-            if (!boxResize || boxResize.pointerId !== event.pointerId) return;
-            const maxWidth = Math.max(60, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x);
-            const width = Math.round(Math.max(60, Math.min(maxWidth, boxResize.originWidth + event.clientX - boxResize.startX)));
-            if (width !== boxResize.width) setBoxResize({ ...boxResize, width });
-          }}
-          onPointerUp={event => {
-            if (!boxResize || boxResize.pointerId !== event.pointerId) return;
-            const resize = boxResize; setBoxResize(null);
-            if (resize.width !== resize.originWidth) resizeBoxTo(box, resize.width);
-          }}
-          onPointerCancel={() => setBoxResize(null)}
-          onDoubleClick={() => resizeBoxTo(box, Math.max(100, Math.min(280, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x)), false)}
-          onKeyDown={event => {
-            const step = event.shiftKey ? 40 : 8;
-            const delta = { ArrowLeft: -step, ArrowRight: step }[event.key];
-            if (!delta) return;
-            event.preventDefault();
-            const frameWidth = Math.round(event.currentTarget.closest("[data-note-textbox-frame]").getBoundingClientRect().width);
-            const maxWidth = Math.max(60, surfaceRef.current.getBoundingClientRect().width - latestBox(box).x);
-            resizeBoxTo(box, Math.max(60, Math.min(maxWidth, frameWidth + delta)));
-          }}
-          style={{ position: "absolute", right: -7, top: "max(50%, 24px)", transform: "translateY(-50%)", width: 12, height: 22, padding: 0, border: "1px solid #6d5bb0", borderRadius: 4, background: "#202033", cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
-          <span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} /><span aria-hidden="true" style={{ width: 1, height: 12, background: "#c4b5fd" }} />
-        </button>}
-        {activeTextId === box.id && mode === "text" && <button type="button" disabled={removingText} aria-label="Remove text box" title="Remove text box" onMouseDown={event => event.preventDefault()} onClick={async () => {
-          if (removingText) return;
-          if (box.text.trim() && !confirm("Remove this text box?")) return;
-          setRemovingText(true);
-          try {
-            if (box.text.trim() && !(await beforeRemoveTextBox())) return;
-            if (!textBoxesRef.current.some(item => item.id === box.id) || publishText(textBoxesRef.current.filter(item => item.id !== box.id))) { setPendingBox(null); setActiveTextId(null); }
-          } catch (error) { setMessage(error.message || "Could not save the recovery copy."); }
-          finally { setRemovingText(false); }
-        }} style={{ position: "absolute", right: -10, top: -16, width: 20, height: 20, border: "1px solid #45455a", borderRadius: 5, background: "#202033", color: "#ff8793", cursor: removingText ? "wait" : "pointer" }}>{removingText ? "\u2026" : "\u00d7"}</button>}
-      </div>)}
+      <textarea ref={textRef} aria-label="Note body" value={body} onChange={event => onBodyChange(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") onFinish(); }} readOnly={mode !== "text"} tabIndex={mode === "text" && (body.length || typeNormally) ? 0 : -1} placeholder={mode === "text" && typeNormally && !textBoxes.some(onNotePaper) && !drawing.some(onNotePaper) ? "Start typing…" : ""} style={{ position: "absolute", top: 0, left: 0, width: bodySize.width, height: bodySize.height, pointerEvents: mode === "text" && (body.length || typeNormally) ? "auto" : "none", overflow: "hidden", resize: "none", background: "transparent", border: "none", color: "#d8d8e2", fontSize: 14, lineHeight: 1.8, fontFamily: "inherit", outline: "none" }} />
+      {[...textBoxes, ...(pendingBox ? [pendingBox] : [])].filter(onNotePaper).map(box => renderTextBox(box))}
       <svg ref={svgRef} aria-label="Note drawing canvas" role="img" tabIndex={mode === "text" ? -1 : 0} data-note-drawing
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 2, pointerEvents: mode === "text" ? "none" : "auto", touchAction: mode === "text" ? "auto" : "none", cursor: mode === "pen" ? "crosshair" : "cell", userSelect: "none" }}
-        onPointerDown={event => {
-          if (event.button !== 0 || gesture.current) return;
-          const size = legacySize.current;
-          const anchored = anchorNoteDrawing(drawingRef.current, size.width, size.height);
-          if (anchored !== drawingRef.current && !publish(anchored)) return;
-          const point = pointAt(event), id = makeId("stroke");
-          const fixedWidth = pageWidth || event.currentTarget.getBoundingClientRect().width;
-          const stroke = mode === "pen" ? { id, color, width, space: "page", pageWidth: fixedWidth, points: [point] } : null;
-          // The page's saving limits, checked now rather than losing the stroke when the pen lifts.
-          if (stroke) { try { normalizeNoteDrawing([...drawingRef.current, stroke]); } catch (error) { setMessage(error.message); return; } }
-          event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
-          setPageWidth(fixedWidth);
-          gesture.current = { pointerId: event.pointerId, id, before: drawingRef.current, stroke,
-            room: NOTE_DRAWING_MAX_POINTS - drawingRef.current.reduce((sum, item) => sum + item.points.length, 0) };
-          setPenDown(true);
-          if (stroke) showLive(stroke);
-          else move(event);
-        }} onPointerMove={move} onPointerUp={event => { if (gesture.current?.pointerId === event.pointerId) { move(event); finishGesture(); } }} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture}
-        onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(event.shiftKey ? "redo" : "undo"); } }}>
-        {drawing.map(stroke => <g key={stroke.id} transform={stroke.space === "page" ? undefined : `scale(${(legacySize.current?.width || pageWidth || 1000) / 1000} ${(legacySize.current?.height || 700) / 700})`}>
-          {stroke.points.length === 1
-            ? <circle data-note-stroke={stroke.id} cx={stroke.points[0][0]} cy={stroke.points[0][1]} r={stroke.width / 2} fill={stroke.color} />
-            : <polyline data-note-stroke={stroke.id} points={stroke.points.map(point => point.join(",")).join(" ")} fill="none" stroke={stroke.color} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" />}
-        </g>)}
-        <polyline ref={liveRef} data-note-live-stroke points="" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        onPointerDown={event => beginGesture(event)} onPointerMove={move} onPointerUp={endGesture} onPointerCancel={finishGesture} onLostPointerCapture={finishGesture} onKeyDown={undoKeys}>
+        {drawing.filter(onNotePaper).map(stroke => noteStrokeShape(stroke, stroke.space === "page" ? undefined : `scale(${(legacySize.current?.width || pageWidth || 1000) / 1000} ${(legacySize.current?.height || 700) / 700})`))}
+        <polyline data-note-live-stroke points="" fill="none" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     </div>
   </div>;
@@ -6022,7 +6166,9 @@ function DailyGrind() {
     if (!(await protectBeforeDestructive("before-note-image-remove"))) return;
     const current = noteDraftRef.current;
     if (current?.id !== id) return;
-    const next = { ...current, images: (current.images || []).filter(image => image.id !== imageId) };
+    // Its ink and text boxes go with it (the recovery copy above still has them).
+    const next = { ...current, images: (current.images || []).filter(image => image.id !== imageId),
+      drawing: (current.drawing || []).filter(item => item.imageId !== imageId), textBoxes: (current.textBoxes || []).filter(item => item.imageId !== imageId) };
     rememberNoteRemovals(current, next);
     noteDraftRef.current = next; setNoteDraft(next); await persistNoteDraft(next);
   }
@@ -7041,11 +7187,8 @@ function DailyGrind() {
                         <input aria-label="Note section" value={noteDraft.tag} onChange={(e) => setNoteDraft((draft) => ({ ...draft, tag: e.target.value.replace(/^#/, "") }))} placeholder="Quick Notes" maxLength="30" style={{ width: 120, background: "#121220", border: "1px solid #353548", borderRadius: 6, color: "#c4b5fd", padding: "6px 8px", fontSize: 10.5, fontFamily: "inherit", outline: "none" }} />
                       </label>
                     </div>
-                    {(noteDraft.images || []).length > 0 && <section aria-label="Screenshots" style={{ flexShrink: 0, marginTop: 0, marginBottom: 20 }}>
-                      <h3 style={{ fontSize: 11, letterSpacing: 1, color: "#aaaabb", marginBottom: 12 }}>SCREENSHOTS</h3>
-                      {noteDraft.images.map(image => <NoteScreenshot key={image.id} image={image} onRemove={removeNoteImage} />)}
-                    </section>}
-                    {noteReadMode ? <NoteMarkdownView body={noteDraft.body} hasInk={(noteDraft.drawing || []).length > 0 || (noteDraft.textBoxes || []).length > 0} onEdit={() => setNoteReadMode(false)} /> : <NoteDrawingSurface key={noteDraft.id} toolbarHost={noteToolsHost} pen={notePen} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} body={noteDraft.body}
+                    {noteReadMode && (noteDraft.images || []).length > 0 && <NoteScreenshots images={noteDraft.images} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} onRemove={removeNoteImage} />}
+                    {noteReadMode ? <NoteMarkdownView body={noteDraft.body} hasInk={(noteDraft.drawing || []).some(onNotePaper) || (noteDraft.textBoxes || []).some(onNotePaper)} onEdit={() => setNoteReadMode(false)} /> : <NoteDrawingSurface key={noteDraft.id} toolbarHost={noteToolsHost} pen={notePen} drawing={noteDraft.drawing || []} textBoxes={noteDraft.textBoxes || []} images={noteDraft.images || []} onRemoveImage={removeNoteImage} body={noteDraft.body}
                       onBodyChange={body => setNoteDraft(draft => ({ ...draft, body }))} onFinish={finishNoteEditing} beforeRemoveTextBox={async () => { await flushCurrentNote(); return protectBeforeDestructive("before-text-box-delete"); }}
                       onTextBoxesChange={textBoxes => {
                         const current = noteDraftRef.current;

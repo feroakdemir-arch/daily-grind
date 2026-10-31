@@ -74,6 +74,15 @@
     points.push({ x: x2, y: y2 });
     return points.sort((a, b) => (y2 >= y1 ? a.y - b.y : b.y - a.y));
   }
+  // Ink and text boxes drawn on a screenshot carry its imageId; their x/y are pixels of the image shown
+  // pageWidth wide. How far right they reach, in image widths (at least 1), so the image can make room.
+  const onPaper = item => !item || item.imageId === undefined;
+  function markReach(strokes, boxes) {
+    let reach = 1;
+    for (const stroke of strokes) for (const point of stroke.points || []) reach = Math.max(reach, (point[0] + stroke.width / 2) / stroke.pageWidth);
+    for (const box of boxes) reach = Math.max(reach, (box.x + box.width) / box.pageWidth);
+    return reach;
+  }
   async function loadImage(data) {
     const image = new Image();
     await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error("A screenshot could not be rendered in the PDF.")); image.src = data; });
@@ -108,7 +117,7 @@
     // Canvas silently keeps "10px sans-serif" when a font string fails to parse; never measure with that.
     if (!measure.font.includes(`${NOTE_FONT_SIZE}px`)) measure.font = `${NOTE_FONT_SIZE}px ${NOTE_FONT_STACK}`;
     const usedFontFamily = measure.font.slice(measure.font.indexOf("px") + 2).trim();
-    const strokes = note.drawing || [], boxes = note.textBoxes || [];
+    const strokes = (note.drawing || []).filter(onPaper), boxes = (note.textBoxes || []).filter(onPaper);
     // Ink pins text to its editor pixels, so wrap at the editor width the ink was anchored to; a text-only
     // note has nothing to align with, so wrap it at a readable 700px like a normal page.
     const anchoredWidth = Math.max(0, ...strokes.map(stroke => stroke.pageWidth || 0), ...boxes.map(box => box.pageWidth || 0));
@@ -137,7 +146,7 @@
     bodyLines.forEach((line, i) => drawLine(line, MARGIN, i * lineHeight));
     // Positioned text boxes render inside a 1px frame border in the editor.
     for (const { box, lines } of boxLayouts) lines.forEach((line, i) => drawLine(line, MARGIN + (box.x + 1) * scale, (box.y + 1) * scale + i * lineHeight));
-    for (const stroke of note.drawing || []) {
+    for (const stroke of strokes) {
       const points = stroke.points || [];
       if (!points.length) continue;
       const color = inkColor(stroke.color);
@@ -159,23 +168,51 @@
     let cursor = Math.max(logicalBottom + 70, 80);
     if ((note.images || []).length) {
       const loadedImages = [];
-      for (const item of note.images) loadedImages.push({ item, image: await loadImage(await window.noteImageStore.load(item.assetId)) });
-      const first = loadedImages[0].image;
-      let firstWidth = Math.min(CONTENT_W, first.naturalWidth), firstHeight = first.naturalHeight * firstWidth / first.naturalWidth;
+      for (const item of note.images) {
+        const ink = (note.drawing || []).filter(stroke => stroke.imageId === item.id), labels = (note.textBoxes || []).filter(box => box.imageId === item.id);
+        loadedImages.push({ item, ink, labels, image: await loadImage(await window.noteImageStore.load(item.assetId)) });
+      }
       const maxHeight = nextCapacity - 100;
-      if (firstHeight > maxHeight) { firstHeight = maxHeight; firstWidth = first.naturalWidth * firstHeight / first.naturalHeight; }
+      const fit = ({ image, ink, labels }) => {
+        let width = Math.min(CONTENT_W / markReach(ink, labels), image.naturalWidth), height = image.naturalHeight * width / image.naturalWidth;
+        if (height > maxHeight) { height = maxHeight; width = image.naturalWidth * height / image.naturalHeight; }
+        return { width, height };
+      };
       let pos = pagePosition(cursor);
-      if (firstHeight + 110 > PAGE_H - FOOTER - pos.y) { cursor = pageStart(pos.page + 1); pos = pagePosition(cursor); }
+      if (fit(loadedImages[0]).height + 110 > PAGE_H - FOOTER - pos.y) { cursor = pageStart(pos.page + 1); pos = pagePosition(cursor); }
       const heading = page(pos.page); heading.fillStyle = "#6d28d9"; heading.font = "700 28px Arial"; heading.fillText("Screenshots", MARGIN, pos.y);
       cursor += 55;
-      for (const { item, image } of loadedImages) {
-        let width = Math.min(CONTENT_W, image.naturalWidth), height = image.naturalHeight * width / image.naturalWidth;
-        if (height > maxHeight) { height = maxHeight; width = image.naturalWidth * height / image.naturalHeight; }
+      for (const loaded of loadedImages) {
+        const { item, image, ink, labels } = loaded, { width, height } = fit(loaded);
         pos = pagePosition(cursor);
         const remaining = (pos.page === 0 ? PAGE_H - FOOTER : PAGE_H - FOOTER) - pos.y;
         if (height + 55 > remaining) { cursor = pageStart(pos.page + 1); pos = pagePosition(cursor); }
         const ctx = page(pos.page); ctx.fillStyle = "#374151"; ctx.font = "20px Arial"; ctx.fillText(item.name || "Screenshot", MARGIN, pos.y + 20);
-        ctx.drawImage(image, MARGIN, pos.y + 38, width, height);
+        const top = pos.y + 38;
+        ctx.drawImage(image, MARGIN, top, width, height);
+        // The screenshot's own marks, in their colours with the editor's dark halo and text chips.
+        ctx.save();
+        ctx.shadowColor = "rgba(8,8,16,0.9)"; ctx.shadowBlur = 2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+        for (const stroke of ink) {
+          const k = width / stroke.pageWidth, points = stroke.points || [];
+          if (!points.length) continue;
+          ctx.strokeStyle = ctx.fillStyle = stroke.color; ctx.lineWidth = Math.max(1, stroke.width * k);
+          ctx.beginPath();
+          if (points.length === 1) { ctx.arc(MARGIN + points[0][0] * k, top + points[0][1] * k, Math.max(1, stroke.width * k / 2), 0, Math.PI * 2); ctx.fill(); continue; }
+          points.forEach(([x, y], i) => i ? ctx.lineTo(MARGIN + x * k, top + y * k) : ctx.moveTo(MARGIN + x * k, top + y * k));
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0; ctx.textBaseline = "middle";
+        for (const box of labels) {
+          const k = width / box.pageWidth;
+          const longest = String(box.text || "").split("\n").reduce((max, line) => Math.max(max, measure.measureText(expandTabs(line)).width), 0);
+          const frameWidth = box.sized ? box.width : Math.ceil(Math.max(box.width, longest + 12));
+          const lines = wrapText(measure, box.text, frameWidth - 2);
+          ctx.fillStyle = "rgba(20,20,35,0.85)"; ctx.fillRect(MARGIN + box.x * k, top + box.y * k, frameWidth * k, (lines.length * NOTE_LINE_PX + 2) * k);
+          ctx.fillStyle = "#d8d8e2"; ctx.font = `${NOTE_FONT_SIZE * k}px ${usedFontFamily}`;
+          lines.forEach((line, i) => ctx.fillText(line, MARGIN + (box.x + 1) * k, top + (box.y + 1 + (i + 0.5) * NOTE_LINE_PX) * k));
+        }
+        ctx.restore();
         cursor += 38 + height + 45;
       }
     }
@@ -189,5 +226,5 @@
     return { pdf, pageCount: canvases.length, filename: `organized-me-${cleanName(note.title)}.pdf` };
   }
   async function download(note) { const result = await build(note); await result.pdf.save(result.filename, { returnPromise: true }); return result; }
-  window.notePdf = { build, download, cleanName, inkColor, wrapText, expandTabs, pagePosition, splitLineAcrossPages };
+  window.notePdf = { build, download, cleanName, inkColor, wrapText, expandTabs, pagePosition, splitLineAcrossPages, markReach };
 })();
