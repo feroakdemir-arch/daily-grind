@@ -41,3 +41,15 @@ test('refresh schedules the next local reset rather than assuming a fixed 24-hou
   assert.equal(c.nextFinishedTasksReset(3,new Date(2026,8,12,2,59,59)),1050);
   assert.equal(c.nextFinishedTasksReset(3,new Date(2026,8,12,0,0,0)),3*3600000+50);
 });
+
+test('steps finished on a day are listed with their task, without points', () => {
+  const lists = [{ id: 'l', title: "Today's Tasks", items: [{ id: 'biz', name: 'Business', points: 10, done: false, subtasks: [
+    { id: 's1', name: 'Set up 2nd account', done: true, doneDate: '2026-10-31' }, { id: 's2', name: 'find the best ai image gen', done: false },
+    { id: 's3', name: 'see copyvids problems', done: true, doneDate: '2026-10-30' }] }] }];
+  const today = c.finishedTasksForDay(lists, '2026-10-31');
+  assert.equal(today.length, 1);
+  assert.equal(today[0].name, 'Set up 2nd account');
+  assert.equal(today[0].stepOf, 'Business');
+  assert.equal(today[0].points, 0);
+  assert.equal(c.finishedTasksForDay(lists, '2026-10-30')[0].name, 'see copyvids problems');
+});

@@ -1851,7 +1851,9 @@ function normalizeSubtasks(value) {
   value.forEach((step) => {
     if (!step || typeof step !== "object" || typeof step.id !== "string" || !step.id || seen.has(step.id)) return;
     seen.add(step.id);
-    steps.push({ id: step.id, name: typeof step.name === "string" ? step.name.slice(0, 500) : "", done: step.done === true });
+    const kept = { id: step.id, name: typeof step.name === "string" ? step.name.slice(0, 500) : "", done: step.done === true };
+    if (kept.done && typeof step.doneDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(step.doneDate)) kept.doneDate = step.doneDate;
+    steps.push(kept);
   });
   return steps.slice(0, 100);
 }
@@ -1860,13 +1862,17 @@ function subtaskProgress(task) {
   return { done: steps.filter((step) => step.done).length, total: steps.length };
 }
 // change(steps) returns the task's new steps; found by task id, so a task that moved lists still updates.
-// A task left with no steps loses the field.
-function editSubtasks(taskLists, taskId, change) {
+// A task left with no steps loses the field. A step checked off now is dated `today`, so it shows among
+// that day's finished tasks.
+function editSubtasks(taskLists, taskId, change, today) {
   return taskLists.map((list) => {
     if (!list.items.some((task) => task.id === taskId)) return list;
     return { ...list, items: list.items.map((task) => {
       if (task.id !== taskId) return task;
-      const steps = normalizeSubtasks(change(normalizeSubtasks(task.subtasks)));
+      const before = normalizeSubtasks(task.subtasks);
+      const wasDone = new Set(before.filter((step) => step.done).map((step) => step.id));
+      const steps = normalizeSubtasks(change(before)).map((step) =>
+        step.done && !wasDone.has(step.id) && today ? { ...step, doneDate: today } : step);
       const next = { ...task };
       if (steps.length) next.subtasks = steps; else delete next.subtasks;
       return next;
@@ -2960,6 +2966,16 @@ function finishedTasksForDay(taskLists, day) {
         points: Math.max(0, Number(task.points) || 0), trackedSeconds: Math.max(0, Number(task.trackedSeconds) || 0) });
     }
   }
+  // Steps carry no points, but a step finished that day counts as finished work.
+  for (const list of taskLists || []) {
+    for (const task of list.items || []) {
+      for (const step of Array.isArray(task.subtasks) ? task.subtasks : []) {
+        if (!step || !step.done || step.doneDate !== day) continue;
+        const id = `${task.id}/${step.id}:${day}`;
+        result.set(id, { id, name: step.name, listTitle: list.title, stepOf: task.name, points: 0, trackedSeconds: 0 });
+      }
+    }
+  }
   for (const list of taskLists || []) {
     for (const entry of list.completedLog || []) {
       if (entry.date !== day) continue;
@@ -3080,8 +3096,8 @@ function TodaysFinishedTasks({ taskLists, resetHour }) {
     {finished.length ? <div style={{ maxHeight: 360, overflowY: "auto" }}>
       {finished.map(task => <div key={task.id} data-finished-task={task.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: "1px solid #2d2d3a" }}>
         <span aria-hidden="true" style={{ color: "#4cd137", fontWeight: 900 }}>✓</span>
-        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 10.5, color: "#8b8b9e", marginTop: 4 }}>{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
-        <span style={{ fontSize: 10, color: "#a78bfa", fontWeight: 800 }}>+{task.points}</span>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#e2e2ea", fontWeight: 700, overflowWrap: "anywhere" }}>{task.name}</div><div style={{ fontSize: 10.5, color: "#8b8b9e", marginTop: 4, overflowWrap: "anywhere" }}>{task.stepOf ? `Step of ${task.stepOf} · ` : ""}{task.listTitle}{task.trackedSeconds > 0 ? ` · ${fmtTaskDuration(task.trackedSeconds)}` : ""}</div></div>
+        {task.stepOf ? <span style={{ fontSize: 9, color: "#8b8b9e", fontWeight: 800, letterSpacing: 1 }}>STEP</span> : <span style={{ fontSize: 10, color: "#a78bfa", fontWeight: 800 }}>+{task.points}</span>}
       </div>)}
     </div> : <p style={{ fontSize: 12, color: "#8b8b9e", padding: "12px 0" }}>{day === today ? "Nothing finished today yet. Completed tasks will appear here." : `Nothing finished on ${dayLabel}.`}</p>}
   </section>;
@@ -3114,15 +3130,17 @@ function TaskStepsToggle({ task, open, onToggle }) {
   );
 }
 
-// A task's steps, under the task while it is open: check them off, tap one to rename it, remove it, add more.
-function TaskSteps({ task, onChange, onFocus }) {
+// A task's steps, under the task while it is open (and in the Pomodoro): check them off, tap one to rename
+// it, remove it, add more. markNext tags the first unchecked step NEXT.
+function TaskSteps({ task, onChange, onFocus, markNext = false, focusWhenEmpty = true }) {
   const steps = normalizeSubtasks(task.subtasks);
+  const next = markNext ? steps.find((step) => !step.done) : null;
   const [text, setText] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
   const inputRef = useRef(null);
   // Opened to break the task down (no steps yet): the cursor goes straight to the first step.
-  useEffect(() => { if (!normalizeSubtasks(task.subtasks).length) inputRef.current?.focus(); }, []);
+  useEffect(() => { if (focusWhenEmpty && !normalizeSubtasks(task.subtasks).length) inputRef.current?.focus(); }, []);
   const add = () => {
     const name = text.trim();
     if (!name) return;
@@ -3152,7 +3170,8 @@ function TaskSteps({ task, onChange, onFocus }) {
             : <span role="button" tabIndex={0} title="Tap to rename"
                 onClick={() => { setEditingId(step.id); setEditText(step.name); }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setEditingId(step.id); setEditText(step.name); } }}
-                style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", cursor: "text", color: step.done ? "#8b8b9e" : "#d8d8e2", textDecoration: step.done ? "line-through" : "none" }}>{step.name}</span>}
+                style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", cursor: "text", color: step.done ? "#8b8b9e" : "#d8d8e2", fontWeight: step === next ? 700 : 400, textDecoration: step.done ? "line-through" : "none" }}>{step.name}</span>}
+          {step === next && editingId !== step.id && <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, color: "#c4b5fd", border: "1px solid #7c3aed", borderRadius: 999, padding: "1px 7px", flexShrink: 0 }}>NEXT</span>}
           {onFocus && !step.done && <button type="button" onClick={() => onFocus(step)} aria-label={`Send ${step.name} to the Pomodoro`} title="Work on this step in the Pomodoro"
             style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: "1px solid #2f2f44", borderRadius: 999, color: "#9a9aae", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 600, padding: "2px 8px", flexShrink: 0 }}>
             <span aria-hidden="true">{"🍅"}</span>Focus
@@ -3177,27 +3196,15 @@ function TaskSteps({ task, onChange, onFocus }) {
 }
 
 // A habit's timer shows the time tracked today (or, while running, for the day it counts toward).
-// A whole task sent to the pomodoro brings its steps along: the list shows under "Working on", the first
-// unchecked step is marked NEXT, and checking one off here checks it off in the task list too.
+// A whole task sent to the pomodoro brings its steps along, with the same editor as the task list: check off,
+// tap to rename, remove, add more. Every change is the task's own steps, so it shows in the list too, and a
+// step checked off here counts among that day's finished tasks.
 function PomoTaskSteps({ task, onChange }) {
   const steps = normalizeSubtasks(task.subtasks);
-  if (!steps.length) return null;
-  const next = steps.find((step) => !step.done);
   return (
     <div data-pomo-steps={task.id} style={{ maxWidth: 420, margin: "12px auto 0", textAlign: "left", background: "#12122a", border: "1px solid #2d2d3a", borderRadius: 10, padding: "8px 12px" }}>
-      <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 1.2, color: "#8b8b9e", marginBottom: 2 }}>STEPS {steps.filter((step) => step.done).length}/{steps.length}</div>
-      {steps.map((step) => (
-        <div key={step.id} data-step-id={step.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0" }}>
-          <button type="button" className="hit-expand check-hit" aria-pressed={step.done}
-            aria-label={`${step.done ? "Uncheck" : "Check off"} ${step.name}`} title={step.done ? "Uncheck" : "Check off"}
-            onClick={() => onChange((current) => current.map((item) => item.id === step.id ? { ...item, done: !item.done } : item))}
-            style={{ ...S.tCircle, width: 16, height: 16, borderRadius: 8, background: step.done ? "#4cd137" : "transparent", borderColor: step.done ? "#4cd137" : "#555566" }}>
-            {step.done && <span style={{ fontSize: 9, color: "#fff", lineHeight: 1 }}>{"✓"}</span>}
-          </button>
-          <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.4, overflowWrap: "anywhere", color: step.done ? "#8b8b9e" : "#d8d8e2", fontWeight: step === next ? 700 : 400, textDecoration: step.done ? "line-through" : "none" }}>{step.name}</span>
-          {step === next && <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1, color: "#c4b5fd", border: "1px solid #7c3aed", borderRadius: 999, padding: "1px 7px", flexShrink: 0 }}>NEXT</span>}
-        </div>
-      ))}
+      <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 1.2, color: "#8b8b9e", marginBottom: 2 }}>{steps.length ? `STEPS ${steps.filter((step) => step.done).length}/${steps.length}` : "BREAK IT DOWN"}</div>
+      <TaskSteps task={task} onChange={onChange} markNext focusWhenEmpty={false} />
     </div>
   );
 }
@@ -5582,8 +5589,8 @@ function DailyGrind() {
   }, [save]);
   // A task's steps (subtasks): change(steps) returns the new steps.
   const editTaskSteps = useCallback((taskId, change) => {
-    save((prev) => ({ ...prev, taskLists: editSubtasks(prev.taskLists, taskId, change) }));
-  }, [save]);
+    save((prev) => ({ ...prev, taskLists: editSubtasks(prev.taskLists, taskId, change, today) }));
+  }, [save, today]);
   const moveTaskBetweenLists = useCallback((sourceListId, taskId, targetListId, targetPendingIndex) => {
     save((prev) => {
       const sourceList = prev.taskLists.find((list) => list.id === sourceListId);

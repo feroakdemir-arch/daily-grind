@@ -71,3 +71,17 @@ test("two devices editing different steps of one task both keep their edits", ()
     { id: "c", name: "Cite sources", done: false },
   ]);
 });
+
+test("a step checked off is dated with the day it was finished; unchecking drops the date", () => {
+  let next = c.editSubtasks(lists(), "hw", (steps) => [...steps, { id: "s2", name: "Q2", done: false }], "2026-10-31");
+  assert.equal(task(next, "hw").subtasks[1].doneDate, undefined);
+  next = c.editSubtasks(next, "hw", (steps) => steps.map((s) => s.id === "s2" ? { ...s, done: true } : s), "2026-10-31");
+  assert.equal(task(next, "hw").subtasks[1].doneDate, "2026-10-31");
+  // A step that was already done keeps its own day when another step changes.
+  next = c.editSubtasks(next, "hw", (steps) => steps.map((s) => s.id === "s1" ? { ...s, name: "Q1 (redo)" } : s), "2026-11-01");
+  assert.equal(task(next, "hw").subtasks[1].doneDate, "2026-10-31");
+  next = c.editSubtasks(next, "hw", (steps) => steps.map((s) => s.id === "s2" ? { ...s, done: false } : s), "2026-11-01");
+  assert.equal("doneDate" in task(next, "hw").subtasks[1], false);
+  assert.equal(c.normalizeSubtasks([{ id: "x", name: "X", done: false, doneDate: "2026-10-31" }])[0].doneDate, undefined);
+  assert.equal(c.normalizeSubtasks([{ id: "x", name: "X", done: true, doneDate: "nope" }])[0].doneDate, undefined);
+});
