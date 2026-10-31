@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const html=fs.readFileSync(require.resolve('../index.html'),'utf8');
-const code=html.slice(html.indexOf('function moveHabitById('),html.indexOf('function HabitCard('));
+const code=html.slice(html.indexOf('function moveItemById('),html.indexOf('function HabitCard('));
 function target(){const listeners=new Map();return {listeners,addEventListener(n,f){if(!listeners.has(n))listeners.set(n,new Set());listeners.get(n).add(f);},removeEventListener(n,f){listeners.get(n)?.delete(f);},emit(n,e={}){for(const f of [...(listeners.get(n)||[])])f(e);},count(){return [...listeners.values()].reduce((n,s)=>n+s.size,0);}};}
 function setup(){
  const document=target(),window={...target(),scrollY:0},handle=target(),sessionRef={current:null},previews=[],drops=[];let stopped=0,scroll;
@@ -37,6 +37,6 @@ test('a tap and secondary touch do not reorder; auto-scroll keeps the original h
 });
 test('reordering uses IDs against the latest list and preserves all habit data',()=>{
  const {c}=setup();const items=[{id:'new'},{id:'a',name:'A',points:20},{id:'b'},{id:'c'}];
- const result=c.moveHabitById(items,'a','c',true);assert.equal(result.map(i=>i.id).join(','),'new,b,c,a');assert.equal(result[3],items[1]);assert.equal(items[1].id,'a');
- assert.equal(c.moveHabitById(items,'missing','c',true),items);assert.equal(c.moveHabitById(items,'a','missing',true),items);
+ const result=c.moveItemById(items,'a','c',true);assert.equal(result.map(i=>i.id).join(','),'new,b,c,a');assert.equal(result[3],items[1]);assert.equal(items[1].id,'a');
+ assert.equal(c.moveItemById(items,'missing','c',true),items);assert.equal(c.moveItemById(items,'a','missing',true),items);
 });

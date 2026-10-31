@@ -3131,16 +3131,28 @@ function TaskStepsToggle({ task, open, onToggle }) {
 }
 
 // A task's steps, under the task while it is open (and in the Pomodoro): check them off, tap one to rename
-// it, remove it, add more. markNext tags the first unchecked step NEXT.
+// it, drag its handle to move it, remove it, add more. markNext tags the first unchecked step NEXT.
 function TaskSteps({ task, onChange, onFocus, markNext = false, focusWhenEmpty = true }) {
   const steps = normalizeSubtasks(task.subtasks);
   const next = markNext ? steps.find((step) => !step.done) : null;
   const [text, setText] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
+  const [drag, setDrag] = useState(null);
   const inputRef = useRef(null);
+  const dragSessionRef = useRef(null);
+  const dragCleanupRef = useRef(null);
   // Opened to break the task down (no steps yet): the cursor goes straight to the first step.
   useEffect(() => { if (focusWhenEmpty && !normalizeSubtasks(task.subtasks).length) inputRef.current?.focus(); }, []);
+  useEffect(() => () => { dragCleanupRef.current?.(); }, []);
+  const startDrag = (event, step) => {
+    const cleanup = startRowPointerDrag(event, {
+      sessionRef: dragSessionRef, groupId: task.id, itemId: step.id,
+      containerSelector: "[data-task-steps]", rowSelector: "[data-step-id]", rowId: (row) => row.dataset.stepId,
+      onPreview: setDrag, onDrop: (taskId, stepId, targetId, after) => onChange((current) => moveItemById(current, stepId, targetId, after)),
+    });
+    if (cleanup) dragCleanupRef.current = cleanup;
+  };
   const add = () => {
     const name = text.trim();
     if (!name) return;
@@ -3154,8 +3166,21 @@ function TaskSteps({ task, onChange, onFocus, markNext = false, focusWhenEmpty =
   };
   return (
     <div data-task-steps={task.id} style={{ paddingLeft: 10, borderLeft: "2px solid #2d2d3a" }}>
-      {steps.map((step) => (
-        <div key={step.id} data-step-id={step.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0" }}>
+      {steps.map((step) => {
+        const isMe = !!drag && drag.itemId === step.id;
+        const mark = !!drag && !isMe && drag.dropId === step.id ? (drag.dragIdx > drag.dropIdx ? "top" : "bottom") : null;
+        return (
+        <div key={step.id} data-step-id={step.id} style={{
+          display: "flex", alignItems: "center", gap: 9, padding: "5px 0", position: "relative",
+          borderTop: mark === "top" ? "2px solid #7c3aed" : "2px solid transparent",
+          borderBottom: mark === "bottom" ? "2px solid #7c3aed" : "2px solid transparent",
+          transform: isMe ? `translateY(${drag.offset}px)` : "none", transition: isMe ? "none" : "transform 0.15s",
+          background: isMe ? "#1d1b33" : "transparent", boxShadow: isMe ? "0 8px 20px rgba(124,58,237,0.35)" : "none",
+          zIndex: isMe ? 5 : "auto", pointerEvents: drag && !isMe ? "none" : "auto",
+        }}>
+          <span onPointerDown={(event) => startDrag(event, step)} data-step-drag-handle={step.id} title="Drag to move"
+            aria-label={`Move ${step.name}`} role="button"
+            style={{ cursor: "grab", color: "#5c5c72", fontSize: 16, fontWeight: 900, letterSpacing: -2, lineHeight: 1, userSelect: "none", touchAction: "none", padding: "0 2px", flexShrink: 0 }}>{"⋮"}</span>
           <button type="button" className="hit-expand check-hit" aria-pressed={step.done}
             aria-label={`${step.done ? "Uncheck" : "Check off"} ${step.name}`} title={step.done ? "Uncheck" : "Check off"}
             onClick={() => onChange((current) => current.map((item) => item.id === step.id ? { ...item, done: !item.done } : item))}
@@ -3180,7 +3205,8 @@ function TaskSteps({ task, onChange, onFocus, markNext = false, focusWhenEmpty =
             onClick={() => onChange((current) => current.filter((item) => item.id !== step.id))}
             style={{ ...S.tX, padding: 0 }}><Icon name="x" size={14} /></button>
         </div>
-      ))}
+        );
+      })}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 2px" }}>
         <span aria-hidden="true" style={{ ...S.tAddIcon, fontSize: 14 }}>+</span>
         <input ref={inputRef} value={text} aria-label={`Add a step to ${task.name}`}
@@ -4357,9 +4383,9 @@ function TaskListCard({ list, listIdx, today, taskState, onToggle, onToggleTimer
   );
 }
 
-function moveHabitById(items, habitId, targetId, after) {
-  const source = items.findIndex(item => item.id === habitId);
-  if (source < 0 || habitId === targetId || !items.some(item => item.id === targetId)) return items;
+function moveItemById(items, itemId, targetId, after) {
+  const source = items.findIndex(item => item.id === itemId);
+  if (source < 0 || itemId === targetId || !items.some(item => item.id === targetId)) return items;
   const next = [...items];
   const [moved] = next.splice(source, 1);
   const target = next.findIndex(item => item.id === targetId);
@@ -4367,17 +4393,20 @@ function moveHabitById(items, habitId, targetId, after) {
   return next;
 }
 
-function startHabitPointerDrag(event, options) {
-  const { sessionRef, sectionId, habitId, onPreview, onDrop } = options;
+// Drag a row by its handle within its group (habits in a section, steps of a task). Previews
+// { groupId, itemId, dragIdx, dropIdx, dropId, offset } while moving (null at the end), then calls
+// onDrop(groupId, itemId, dropId, after) once if the row moved. Returns a cancel function.
+function startRowPointerDrag(event, options) {
+  const { sessionRef, groupId, itemId, containerSelector, rowSelector, rowId, onPreview, onDrop } = options;
   if (sessionRef.current || event.isPrimary === false || event.button !== 0) return null;
   const handle = event.currentTarget;
-  const section = handle.closest("[data-habitsec]");
+  const section = handle.closest(containerSelector);
   if (!section) return null;
-  const rows = [...section.querySelectorAll("[data-habit-id]")].map(row => {
+  const rows = [...section.querySelectorAll(rowSelector)].map(row => {
     const rect = row.getBoundingClientRect();
-    return { id: row.dataset.habitId, mid: rect.top + rect.height / 2 + window.scrollY };
+    return { id: rowId(row), mid: rect.top + rect.height / 2 + window.scrollY };
   });
-  const sourceIndex = rows.findIndex(row => row.id === habitId);
+  const sourceIndex = rows.findIndex(row => row.id === itemId);
   if (sourceIndex < 0) return null;
   event.preventDefault(); event.stopPropagation();
   const pointerId = event.pointerId, startY = event.clientY, startScrollY = window.scrollY;
@@ -4388,7 +4417,7 @@ function startHabitPointerDrag(event, options) {
     const offset = currentY - startY + window.scrollY - startScrollY;
     if (Math.abs(offset) >= 4) moved = true;
     if (moved) targetIndex = rows.reduce((closest, row, i) => Math.abs(currentY + window.scrollY - row.mid) < Math.abs(currentY + window.scrollY - rows[closest].mid) ? i : closest, sourceIndex);
-    onPreview({ secId: sectionId, habitId, dragIdx: sourceIndex, dropIdx: targetIndex, dropId: rows[targetIndex].id, offset });
+    onPreview({ groupId, itemId, dragIdx: sourceIndex, dropIdx: targetIndex, dropId: rows[targetIndex].id, offset });
   };
   const finish = commit => {
     if (finished) return;
@@ -4403,7 +4432,7 @@ function startHabitPointerDrag(event, options) {
     if (sessionRef.current === session) sessionRef.current = null;
     try { if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId); } catch (_) {}
     onPreview(null);
-    if (commit && moved && targetIndex !== sourceIndex) onDrop(sectionId, habitId, rows[targetIndex].id, targetIndex > sourceIndex);
+    if (commit && moved && targetIndex !== sourceIndex) onDrop(groupId, itemId, rows[targetIndex].id, targetIndex > sourceIndex);
   };
   const onMove = ev => { if (ev.pointerId !== pointerId) return; if (ev.cancelable) ev.preventDefault(); currentY = ev.clientY; preview(); };
   const onUp = ev => { if (ev.pointerId === pointerId) finish(true); };
@@ -4411,7 +4440,7 @@ function startHabitPointerDrag(event, options) {
   const onLostCapture = ev => { if (ev.pointerId === pointerId) finish(false); };
   const onBlur = () => finish(false);
   const onVisibility = () => { if (document.visibilityState === "hidden") finish(false); };
-  const session = { habitId, sectionId, cancel: () => finish(false) };
+  const session = { itemId, groupId, cancel: () => finish(false) };
   sessionRef.current = session;
   document.addEventListener("pointermove", onMove, { passive: false });
   document.addEventListener("pointerup", onUp);
@@ -4423,6 +4452,14 @@ function startHabitPointerDrag(event, options) {
   preview();
   stopAutoScroll = startDragAutoScroll(() => currentY, preview);
   return session.cancel;
+}
+
+function startHabitPointerDrag(event, { sessionRef, sectionId, habitId, onPreview, onDrop }) {
+  return startRowPointerDrag(event, {
+    sessionRef, groupId: sectionId, itemId: habitId, onDrop,
+    containerSelector: "[data-habitsec]", rowSelector: "[data-habit-id]", rowId: row => row.dataset.habitId,
+    onPreview: p => onPreview(p && { secId: p.groupId, habitId: p.itemId, dragIdx: p.dragIdx, dropIdx: p.dropIdx, dropId: p.dropId, offset: p.offset }),
+  });
 }
 
 function HabitCard({ item, secId, idx, data, save, today, weekDates, tl, habitDrag, habitDragSessionRef, setHabitDrag, reorderHabit, openEditHabit, toggleHabitTimer }) {
@@ -5507,7 +5544,7 @@ function DailyGrind() {
   function reorderHabit(secId, habitId, targetId, after) {
     save((current) => ({ ...current, habitSections: current.habitSections.map((s) => {
       if (s.id !== secId) return s;
-      const items = moveHabitById(s.items, habitId, targetId, after);
+      const items = moveItemById(s.items, habitId, targetId, after);
       return { ...s, items };
     }) }));
   }
