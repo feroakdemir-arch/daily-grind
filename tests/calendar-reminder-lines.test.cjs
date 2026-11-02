@@ -43,6 +43,23 @@ test("two reminders whose chips would cover each other sit side by side; separat
   assert.deepEqual(result.sleep, { col: 0, cols: 1 });
 });
 
+// Pixels from the user's Nov 2 week (82px an hour, 18px chips): MELATONIN's line at 8 PM is y=252.
+test("a chip rests above its line when an event starts there, so the event's name stays readable", () => {
+  const chaplainChats = { top: 252, bottom: 282 }, wrestling = { top: 88, bottom: 118 };
+  assert.equal(c.reminderChipSide(252, 18, [wrestling, chaplainChats]), "above");
+});
+
+test("a chip goes below its line when above would cover an event's time", () => {
+  const task = { top: 211, bottom: 240 }; // Task 7:30-9:00: name and time end 12px above the 8 PM line
+  assert.equal(c.reminderChipSide(252, 18, [task]), "below");
+});
+
+test("a chip at the very top of the grid goes below; with names on both sides the less covered side wins", () => {
+  assert.equal(c.reminderChipSide(10, 18, []), "below");
+  assert.equal(c.reminderChipSide(100, 18, [{ top: 80, bottom: 95 }, { top: 100, bottom: 104 }]), "below");
+  assert.equal(c.reminderChipSide(100, 18, [{ top: 95, bottom: 99 }, { top: 100, bottom: 130 }]), "above");
+});
+
 test("the grid only needs a reminder's start hour, whatever end it kept", () => {
   assert.equal(c.calendarLastHour([{ start: "22:30", end: "10:00", reminder: true }], 21), 22);
   assert.equal(c.calendarLastHour([{ start: "22:30", end: "10:00" }], 21), 33, "a block ending 10:00 runs into the next morning");

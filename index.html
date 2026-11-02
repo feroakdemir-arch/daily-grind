@@ -2838,6 +2838,15 @@ function layoutDayEvents(items) {
   layoutGroup(items.filter(item => item.reminder));
   return layout;
 }
+// Which side of its line a reminder's chip rests on (Nov 2: a chip centred on the line hid the name of an
+// event starting then). "above" sits in the bottom of the event before, which never has text, unless that
+// covers more of an event's name and time than "below" would. zones: [{ top, bottom }] in px, the text at
+// the top of each event in the day.
+function reminderChipSide(lineY, chipH, zones) {
+  const covered = (top) => zones.reduce((sum, zone) => sum + Math.max(0, Math.min(top + chipH, zone.bottom) - Math.max(top, zone.top)), 0);
+  if (lineY - chipH < 0) return "below";
+  return covered(lineY - chipH) <= covered(lineY) ? "above" : "below";
+}
 
 function taskElapsedSeconds(task, now = Date.now()) {
   const saved = Math.max(0, Number(task.trackedSeconds) || 0);
@@ -7747,16 +7756,16 @@ function DailyGrind() {
                     // (it floats full-width on top) so the rest do not reshuffle under the pointer.
                     // Side by side only when the real times overlap: an event ending at 10:00 and one starting
                     // at 10:00 each keep the full column width.
-                    // A reminder's chip is centred on its line; its span (in minutes) only spaces chips that
-                    // would cover each other, never the events.
+                    // A reminder's chip rests above or below its line; its span (in minutes, both sides) only
+                    // spaces chips that would cover each other, never the events.
                     const chipFont = Math.max(10, eventFont - 1.5), chipH = Math.round(chipFont + 8);
-                    const chipHalfMin = chipH / 2 / HOUR_H * 60;
+                    const chipMin = chipH / HOUR_H * 60;
                     const layoutItems = dayEvents
                       .filter(evt => !(calDragging && calDragging.id === (evt._origId || evt.id)))
                       .map(evt => {
                         const shift = evt._spilloverFromDate ? 24 * 60 : 0;
                         const start = timeToMin(evt.start) + shift;
-                        if (evt.reminder) return { key: evt.id, reminder: true, start: start - chipHalfMin, end: start + chipHalfMin };
+                        if (evt.reminder) return { key: evt.id, reminder: true, start: start - chipMin, end: start + chipMin };
                         return { key: evt.id, start, end: Math.max(calendarEndMinutes(evt.start, evt.end) + shift, start + 1) };
                       });
                     const overlap = layoutDayEvents(layoutItems);
@@ -7765,6 +7774,15 @@ function DailyGrind() {
                     const blockItems = layoutItems.filter(item => !item.reminder);
                     const nextStartAfter = new Map(blockItems.map(item => [item.key,
                       blockItems.reduce((next, other) => other.key !== item.key && other.start >= item.end && other.start < next ? other.start : next, Infinity)]));
+                    // Where each event's name and time are drawn (its top lines), so chips keep off them.
+                    // A phone's week columns are too narrow for a named chip: it becomes a bell at the right end of
+                    // its line, where only an event's (one-line) name reaches; wrapped times stay on the left.
+                    const compactChips = calCols > 1 && window.innerWidth <= 760;
+                    const textZones = blockItems.map(item => {
+                      const top = (item.start - startMinBase) / 60 * HOUR_H;
+                      const lines = compactChips ? 1 : (overlap.get(item.key) || { cols: 1 }).cols > 1 ? 3 : 2;
+                      return { top, bottom: top + Math.min(Math.max((item.end - item.start) / 60 * HOUR_H, 20), eventFont * 1.2 * lines + 2) };
+                    });
                     const openEvent = (evt) => {
                       const origId = evt._origId || evt.id;
                       const origEvt = calEvents.find(ev => ev.id === origId) || evt;
@@ -7780,7 +7798,9 @@ function DailyGrind() {
                         const { col, cols } = overlap.get(evt.id) || { col: 0, cols: 1 };
                         const columnLeft = `40px + ${di} * ((100% - 40px) / ${calCols}) + 1px`;
                         const laneW = `(((100% - 40px) / ${calCols} - 3px) / ${cols})`;
+                        // The chip rests on the line (above it, or below when that keeps an event's name clear).
                         // The button is taller than the chip it draws so it is easier to tap.
+                        const chipTop = reminderChipSide(topPx, chipH, textZones) === "above" ? topPx - chipH : topPx;
                         const hitH = Math.max(chipH, 26);
                         return (
                           <React.Fragment key={evt.id}>
@@ -7789,14 +7809,15 @@ function DailyGrind() {
                               background: `repeating-linear-gradient(90deg, ${color} 0 6px, transparent 6px 10px)`, zIndex: 11, pointerEvents: "none" }} />
                             <button type="button" data-calendar-reminder={evt.id} aria-label={`Reminder: ${evt.title}, ${calendarTimeLabel(evt.start)}`} title={`${evt.title} · ${calendarTimeLabel(evt.start)}`}
                               onClick={(e) => { e.stopPropagation(); openEvent(evt); }} onMouseDown={(e) => e.stopPropagation()}
-                              style={{ position: "absolute", left: `calc(${columnLeft} + ${col} * ${laneW})`, maxWidth: `calc(${laneW} - ${cols > 1 ? 2 : 0}px)`,
-                                top: Math.max(0, topPx - hitH / 2), height: hitH, zIndex: 12, display: "flex", alignItems: "center", padding: 0, margin: 0,
+                              style={{ position: "absolute", left: compactChips ? `calc(${columnLeft} + (${col} + 1) * ${laneW} - ${chipH + 2}px)` : `calc(${columnLeft} + ${col} * ${laneW})`,
+                                ...(compactChips ? { width: chipH + 2, justifyContent: "center" } : { maxWidth: `calc(${laneW} - ${cols > 1 ? 2 : 0}px)` }),
+                                top: chipTop - (hitH - chipH) / 2, height: hitH, zIndex: 12, display: "flex", alignItems: "center", padding: 0, margin: 0,
                                 background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", minWidth: 0 }}>
-                              <span style={{ display: "flex", alignItems: "center", gap: 3, height: chipH, maxWidth: "100%", minWidth: 0, boxSizing: "border-box", padding: "0 7px 0 4px",
+                              <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: chipH, maxWidth: "100%", minWidth: compactChips ? chipH : 0, boxSizing: "border-box", padding: compactChips ? 0 : "0 7px 0 4px",
                                 borderRadius: 999, border: `1px solid ${color}`, background: "#1a1a2e", boxShadow: "0 1px 3px #00000066",
                                 color: "#ececf2", fontSize: chipFont, fontWeight: 700, lineHeight: 1, whiteSpace: "nowrap" }}>
-                                <span style={{ color, display: "flex", flexShrink: 0 }}><Icon name="bell" size={chipFont + 1} stroke={2.4} /></span>
-                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{evt.title}</span>
+                                <span style={{ color, display: "flex", flexShrink: 0 }}><Icon name="bell" size={compactChips ? chipFont : chipFont + 1} stroke={2.4} /></span>
+                                {!compactChips && <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{evt.title}</span>}
                               </span>
                             </button>
                           </React.Fragment>
