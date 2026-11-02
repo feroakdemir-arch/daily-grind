@@ -2076,8 +2076,9 @@ function calendarTimeLabel(time) {
   const hour = Math.floor(minutes / 60) % 24;
   return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, "0")} ${hour >= 12 ? "PM" : "AM"}${minutes >= 1440 ? " (+1 day)" : ""}`;
 }
+// A reminder is a moment, not a block, so only its start hour needs to be on the grid.
 function calendarLastHour(events, preferredHour) {
-  return Math.min(47, events.reduce((last, event) => Math.max(last, Math.ceil(calendarEndMinutes(event.start, event.end) / 60) - 1), preferredHour));
+  return Math.min(47, events.reduce((last, event) => Math.max(last, Math.ceil((event.reminder ? calendarTimeMinutes(event.start) + 1 : calendarEndMinutes(event.start, event.end)) / 60) - 1), preferredHour));
 }
 // Every event is drawn exactly once. An event is drawn in its own day's column when it starts at or
 // after the grid's first hour; an earlier one is drawn in the past-midnight hours at the bottom of the
@@ -2100,7 +2101,8 @@ function calendarSpillCutoffMin(startHour, endHour) {
 // Saving an edit to a repeating event (Oct 9), like Delete's three choices. scope "day": that date becomes its
 // own one-off event with the edits and the series skips it; "following": the series ends before that date and a
 // new series with the edits starts on it; "all": the whole series takes the edits. updates = the edit form's
-// { title, start, end, color, desc, repeat, repeatDays } (repeat undefined = None). Returns the new event list.
+// { title, start, end, color, desc, repeat, repeatDays, reminder } (repeat undefined = None, reminder undefined =
+// a normal block). Returns the new event list.
 function calEditScope(events, seriesId, day, updates, scope, newId) {
   const series = events.find((event) => event.id === seriesId);
   if (!series) return events;
@@ -2112,7 +2114,7 @@ function calEditScope(events, seriesId, day, updates, scope, newId) {
       ...(becomesOneOff && day ? { date: day, exceptions: undefined, untilDate: undefined } : {}) }));
   }
   if (scope === "day") {
-    const oneOff = clean({ id: newId, date: day, title: updates.title, start: updates.start, end: updates.end, color: updates.color, desc: updates.desc });
+    const oneOff = clean({ id: newId, date: day, title: updates.title, start: updates.start, end: updates.end, color: updates.color, desc: updates.desc, reminder: updates.reminder });
     return [...events.map((event) => event.id !== seriesId ? event : { ...event, exceptions: [...new Set([...(event.exceptions || []), day])] }), oneOff];
   }
   const later = (series.exceptions || []).filter((date) => date > day);
@@ -2154,6 +2156,9 @@ function parseCalendarData(raw) {
     };
     if (repeats.has(event.repeat)) normalized.repeat = event.repeat; else delete normalized.repeat;
     if (validDate(event.untilDate)) normalized.untilDate = event.untilDate; else delete normalized.untilDate;
+    // Reminder (Nov 2): drawn as a thin line at its start time instead of a block; push alerts are unchanged.
+    // Older app copies spread the field through untouched and simply draw a block.
+    if (event.reminder === true) normalized.reminder = true; else delete normalized.reminder;
     return normalized;
   });
 }
@@ -2792,23 +2797,45 @@ function CalColorPicker({ value, onChange }) {
   </div>;
 }
 
-// Side-by-side layout for one day column (Google Calendar style). items: [{ key, start, end }] in minutes.
+// The add and edit forms' Reminder switch: on, the event is drawn as a thin line at its start time.
+function CalReminderSwitch({ value, onChange }) {
+  return <button type="button" role="switch" aria-checked={value} onClick={() => onChange(!value)}
+    style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", marginTop: 10, padding: "9px 10px", borderRadius: 10, border: `1px solid ${value ? "#7c3aed" : "#2d2d3a"}`, background: value ? "#7c3aed1a" : "#12122a", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+    <span style={{ color: value ? "#c4b5fd" : "#8b8b9e" }}><Icon name="bell" size={16} /></span>
+    <span style={{ flex: 1, minWidth: 0 }}>
+      <span style={{ display: "block", fontSize: 12, fontWeight: 800, color: value ? "#e9e3ff" : "#c0c0cc" }}>Reminder</span>
+      <span style={{ display: "block", fontSize: 10.5, color: "#8b8b9e", marginTop: 1 }}>A thin line at the start time instead of a block</span>
+    </span>
+    <span aria-hidden="true" style={{ position: "relative", width: 34, height: 20, borderRadius: 999, flexShrink: 0, background: value ? "#7c3aed" : "#2d2d3a", transition: "background 0.15s" }}>
+      <span style={{ position: "absolute", top: 2, left: value ? 16 : 2, width: 16, height: 16, borderRadius: "50%", background: "#fff", transition: "left 0.15s" }} />
+    </span>
+  </button>;
+}
+
+// Side-by-side layout for one day column (Google Calendar style). items: [{ key, start, end, reminder? }] in minutes.
 // Events that overlap, directly or through a chain, form a cluster; each event takes the first sub-column
 // that is free at its start, and every event in the cluster gets the cluster's column count.
+// Reminders are lines across the column, not blocks: they never take a sub-column, so the events around
+// them keep their width. They are laid out only among themselves (end = where the reminder's chip ends),
+// so two chips that would cover each other sit side by side.
 // Returns Map key -> { col, cols }.
 function layoutDayEvents(items) {
   const layout = new Map();
-  const sorted = [...items].sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
-  let cluster = [], columnEnds = [], clusterEnd = -Infinity;
-  const flush = () => { for (const { key, col } of cluster) layout.set(key, { col, cols: columnEnds.length }); cluster = []; columnEnds = []; };
-  for (const item of sorted) {
-    if (item.start >= clusterEnd) { flush(); clusterEnd = -Infinity; }
-    let col = columnEnds.findIndex(end => end <= item.start);
-    if (col === -1) { col = columnEnds.length; columnEnds.push(item.end); } else columnEnds[col] = item.end;
-    cluster.push({ key: item.key, col });
-    clusterEnd = Math.max(clusterEnd, item.end);
-  }
-  flush();
+  const layoutGroup = (group) => {
+    const sorted = [...group].sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+    let cluster = [], columnEnds = [], clusterEnd = -Infinity;
+    const flush = () => { for (const { key, col } of cluster) layout.set(key, { col, cols: columnEnds.length }); cluster = []; columnEnds = []; };
+    for (const item of sorted) {
+      if (item.start >= clusterEnd) { flush(); clusterEnd = -Infinity; }
+      let col = columnEnds.findIndex(end => end <= item.start);
+      if (col === -1) { col = columnEnds.length; columnEnds.push(item.end); } else columnEnds[col] = item.end;
+      cluster.push({ key: item.key, col });
+      clusterEnd = Math.max(clusterEnd, item.end);
+    }
+    flush();
+  };
+  layoutGroup(items.filter(item => !item.reminder));
+  layoutGroup(items.filter(item => item.reminder));
   return layout;
 }
 
@@ -3477,6 +3504,7 @@ const ICON_PATHS = {
   left: ["m15 18-6-6 6-6"],
   right: ["m9 18 6-6-6-6"],
   calendar: ["M8 2v4", "M16 2v4", { rect: [3, 4, 18, 18, 2] }, "M3 10h18"],
+  bell: ["M10.268 21a2 2 0 0 0 3.464 0", "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"],
   trophy: ["M6 9H4.5a2.5 2.5 0 0 1 0-5H6", "M18 9h1.5a2.5 2.5 0 0 0 0-5H18", "M4 22h16", "M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22", "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22", "M18 2H6v7a6 6 0 0 0 12 0V2Z"],
   alert: ["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"],
   star: ["M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"],
@@ -5039,6 +5067,7 @@ function DailyGrind() {
   const [calSelectedEvent, setCalSelectedEvent] = useState(null);
   const [calEditMode, setCalEditMode] = useState(false);
   const [calEventDesc, setCalEventDesc] = useState("");
+  const [calEventReminder, setCalEventReminder] = useState(false);
   const [calCreating, setCalCreating] = useState(null); // {date, startMin, endMin}
   const [calDeleteConfirm, setCalDeleteConfirm] = useState(false);
   // Saving an edit to a repeating event first asks which days it applies to (this day / following / all).
@@ -6691,11 +6720,12 @@ function DailyGrind() {
     }
     return window.storage.set("dg-cal-events", serialized, removing ? { removing } : undefined).catch((error) => { console.error(error); return null; });
   }
-  function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays) {
+  function addCalEvent(dateStr, title, start, end, color, repeat, desc, repeatDays, reminder) {
     const evt = { id: makeId("ce"), date: dateStr, title, start, end, color: color || CAL_DEFAULT_COLOR };
     if (repeat && repeat !== "none") evt.repeat = repeat;
     if (repeat === "custom" && repeatDays && repeatDays.length) evt.repeatDays = [...repeatDays].sort((a,b) => a-b);
     if (desc) evt.desc = desc;
+    if (reminder) evt.reminder = true;
     saveCalEvents((events) => [...events, evt]);
   }
   function editCalEvent(id, updates) {
@@ -7435,8 +7465,12 @@ function DailyGrind() {
             calDragging?.newEnd ? Math.ceil(calendarTimeMinutes(calDragging.newEnd) / 60) - 1 : configuredEndHour
           ));
           // A blank or half-typed time, or Custom with no days, used to close the form and silently drop the event.
-          const calEventFormProblem = !(calendarTimeMinutes(calEventStart) < 1440) || !Number.isFinite(calendarTimeMinutes(calEventEnd))
-            ? "Enter a start and end time."
+          // A reminder hides the end field and keeps the end it had (so turning Reminder off brings the block
+          // back as it was); one with no usable end gets start + 15 minutes, which the saved data needs.
+          const calSavedEnd = calEventReminder && !Number.isFinite(calendarTimeMinutes(calEventEnd)) && calendarTimeMinutes(calEventStart) < 1440
+            ? calendarStoredTime(calendarTimeMinutes(calEventStart) + 15) : calEventEnd;
+          const calEventFormProblem = !(calendarTimeMinutes(calEventStart) < 1440) || !Number.isFinite(calendarTimeMinutes(calSavedEnd))
+            ? (calEventReminder ? "Enter a time." : "Enter a start and end time.")
             : calEventRepeat === "custom" && calEventRepeatDays.length === 0 ? "Pick at least one day to repeat on." : "";
           const calStartHour = calendarGridStartHour(calDates.map(d => getEventsForDate(localDateStr(d))), configuredStartHour, calEndHour);
           const spillCutoffMin = calendarSpillCutoffMin(calStartHour, calEndHour);
@@ -7580,7 +7614,7 @@ function DailyGrind() {
                         setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
-                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc(""); setCalEventReminder(false);
                       }
                       setCalCreating(null);
                       return;
@@ -7605,7 +7639,7 @@ function DailyGrind() {
                         setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
-                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc(""); setCalEventReminder(false);
                       }
                       setCalCreating(null);
                       return;
@@ -7655,7 +7689,7 @@ function DailyGrind() {
                         setCalAddEvent(targetDate);
                         setCalEventStart(startStr);
                         setCalEventEnd(endStr);
-                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc("");
+                        setCalEventTitle(""); setCalEventRepeat("none"); setCalEventDesc(""); setCalEventReminder(false);
                       }
                       setCalCreating(null);
                       return;
@@ -7713,19 +7747,61 @@ function DailyGrind() {
                     // (it floats full-width on top) so the rest do not reshuffle under the pointer.
                     // Side by side only when the real times overlap: an event ending at 10:00 and one starting
                     // at 10:00 each keep the full column width.
+                    // A reminder's chip is centred on its line; its span (in minutes) only spaces chips that
+                    // would cover each other, never the events.
+                    const chipFont = Math.max(10, eventFont - 1.5), chipH = Math.round(chipFont + 8);
+                    const chipHalfMin = chipH / 2 / HOUR_H * 60;
                     const layoutItems = dayEvents
                       .filter(evt => !(calDragging && calDragging.id === (evt._origId || evt.id)))
                       .map(evt => {
                         const shift = evt._spilloverFromDate ? 24 * 60 : 0;
                         const start = timeToMin(evt.start) + shift;
+                        if (evt.reminder) return { key: evt.id, reminder: true, start: start - chipHalfMin, end: start + chipHalfMin };
                         return { key: evt.id, start, end: Math.max(calendarEndMinutes(evt.start, evt.end) + shift, start + 1) };
                       });
                     const overlap = layoutDayEvents(layoutItems);
                     // Very short events are drawn at least 20px tall so their title fits, but never down into
                     // the next event: the extra height stops where the next one starts.
-                    const nextStartAfter = new Map(layoutItems.map(item => [item.key,
-                      layoutItems.reduce((next, other) => other.key !== item.key && other.start >= item.end && other.start < next ? other.start : next, Infinity)]));
+                    const blockItems = layoutItems.filter(item => !item.reminder);
+                    const nextStartAfter = new Map(blockItems.map(item => [item.key,
+                      blockItems.reduce((next, other) => other.key !== item.key && other.start >= item.end && other.start < next ? other.start : next, Infinity)]));
+                    const openEvent = (evt) => {
+                      const origId = evt._origId || evt.id;
+                      const origEvt = calEvents.find(ev => ev.id === origId) || evt;
+                      setCalSelectedEvent({ ...origEvt, _displayDate: evt._spilloverFromDate || ds });
+                      setCalEditMode(false);
+                    };
                     return dayEvents.map(evt => {
+                      if (evt.reminder) {
+                        // A dashed line across the whole column at the start time (clicks pass through to the
+                        // grid and the events under it) and a small chip on it that opens the event.
+                        const color = evt.color || "#4fc3f7";
+                        const topPx = ((timeToMin(evt.start) + (evt._spilloverFromDate ? 24 * 60 : 0) - startMinBase) / 60) * HOUR_H;
+                        const { col, cols } = overlap.get(evt.id) || { col: 0, cols: 1 };
+                        const columnLeft = `40px + ${di} * ((100% - 40px) / ${calCols}) + 1px`;
+                        const laneW = `(((100% - 40px) / ${calCols} - 3px) / ${cols})`;
+                        // The button is taller than the chip it draws so it is easier to tap.
+                        const hitH = Math.max(chipH, 26);
+                        return (
+                          <React.Fragment key={evt.id}>
+                            <div aria-hidden="true" data-calendar-reminder-line={evt.id} style={{
+                              position: "absolute", left: `calc(${columnLeft})`, width: `calc((100% - 40px) / ${calCols} - 3px)`, top: topPx - 1, height: 2,
+                              background: `repeating-linear-gradient(90deg, ${color} 0 6px, transparent 6px 10px)`, zIndex: 11, pointerEvents: "none" }} />
+                            <button type="button" data-calendar-reminder={evt.id} aria-label={`Reminder: ${evt.title}, ${calendarTimeLabel(evt.start)}`} title={`${evt.title} · ${calendarTimeLabel(evt.start)}`}
+                              onClick={(e) => { e.stopPropagation(); openEvent(evt); }} onMouseDown={(e) => e.stopPropagation()}
+                              style={{ position: "absolute", left: `calc(${columnLeft} + ${col} * ${laneW})`, maxWidth: `calc(${laneW} - ${cols > 1 ? 2 : 0}px)`,
+                                top: Math.max(0, topPx - hitH / 2), height: hitH, zIndex: 12, display: "flex", alignItems: "center", padding: 0, margin: 0,
+                                background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", minWidth: 0 }}>
+                              <span style={{ display: "flex", alignItems: "center", gap: 3, height: chipH, maxWidth: "100%", minWidth: 0, boxSizing: "border-box", padding: "0 7px 0 4px",
+                                borderRadius: 999, border: `1px solid ${color}`, background: "#1a1a2e", boxShadow: "0 1px 3px #00000066",
+                                color: "#ececf2", fontSize: chipFont, fontWeight: 700, lineHeight: 1, whiteSpace: "nowrap" }}>
+                                <span style={{ color, display: "flex", flexShrink: 0 }}><Icon name="bell" size={chipFont + 1} stroke={2.4} /></span>
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{evt.title}</span>
+                              </span>
+                            </button>
+                          </React.Fragment>
+                        );
+                      }
                       const isDraggingThis = calDragging && calDragging.id === (evt._origId || evt.id);
                       if (isDraggingThis && calDragging.newDate && calDragging.newDate !== ds) return null; // hide from original column
                       const displayStart = isDraggingThis && calDragging.newStart ? calDragging.newStart : evt.start;
@@ -7762,10 +7838,7 @@ function DailyGrind() {
                         }}
                           onClick={(e) => { e.stopPropagation();
                             if (calDragging && calDragging.moved) return; // don't open popup after drag
-                            const origId = evt._origId || evt.id;
-                            const origEvt = calEvents.find(ev => ev.id === origId) || evt;
-                            setCalSelectedEvent({ ...origEvt, _displayDate: evt._spilloverFromDate || ds });
-                            setCalEditMode(false);
+                            openEvent(evt);
                           }}
                           onMouseDown={(e) => { e.stopPropagation(); e.preventDefault();
                             const origId = evt._origId || evt.id;
@@ -7844,7 +7917,7 @@ function DailyGrind() {
                       <div style={{ height: 6, background: evt.color || "#4fc3f7" }} />
                       {/* Action bar */}
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, padding: "10px 14px 0" }}>
-                        <button onClick={() => { setCalEditMode(true); setCalEditScopeAsk(false); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); }}
+                        <button onClick={() => { setCalEditMode(true); setCalEditScopeAsk(false); setCalEventTitle(evt.title); setCalEventStart(evt.start); setCalEventEnd(evt.end); setCalEventColor(evt.color || "#4fc3f7"); setCalEventRepeat(evt.repeat || "none"); setCalEventRepeatDays(Array.isArray(evt.repeatDays) ? evt.repeatDays : []); setCalEventDesc(evt.desc || ""); setCalEventReminder(!!evt.reminder); }}
                           style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#8b8b9e", padding: "4px 8px" }}>{"\u270E"}</button>
                         <button onClick={() => {
                           if (evt.repeat || evt._repeating) { setCalDeleteConfirm(true); }
@@ -7863,8 +7936,9 @@ function DailyGrind() {
                           <h3 style={{ fontSize: 20, fontWeight: 700, color: "#f0f0f4", margin: 0 }}>{evt.title}</h3>
                         </div>
                         <div style={{ fontSize: 13, color: "#8b8b9e", marginBottom: 4 }}>
-                          {dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} {"\u00B7"} {fmtTime(evt.start)} - {fmtTime(evt.end)}
+                          {dateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} {"\u00B7"} {evt.reminder ? fmtTime(evt.start) : <>{fmtTime(evt.start)} - {fmtTime(evt.end)}</>}
                         </div>
+                        {evt.reminder && <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#c4b5fd", marginBottom: 4 }}><Icon name="bell" size={13} /> Reminder</div>}
                         {repeatLabel && <div style={{ fontSize: 12, color: "#7c3aed", marginBottom: 8 }}>{"\u21BB"} {repeatLabel}</div>}
                         {evt.desc && (
                           <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #2d2d3a" }}>
@@ -7916,9 +7990,12 @@ function DailyGrind() {
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
                       <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
                         <input aria-label="Event start time" type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
-                        <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>
+                      {calEventReminder
+                        ? <div style={{ flex: 1, alignSelf: "flex-end", paddingBottom: 10, fontSize: 10.5, color: "#8b8b9e", lineHeight: 1.4 }}>A line at this time, no end</div>
+                        : <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                        <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>}
                     </div>
+                    <CalReminderSwitch value={calEventReminder} onChange={setCalEventReminder} />
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
@@ -7948,7 +8025,7 @@ function DailyGrind() {
                       const applyEdit = (scope) => {
                         if (calEventFormProblem) return;
                         const isCustom = calEventRepeat === "custom" && calEventRepeatDays.length > 0;
-                        const updates = { title: calEventTitle.trim(), start: calEventStart, end: calEventEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined };
+                        const updates = { title: calEventTitle.trim(), start: calEventStart, end: calSavedEnd, color: calEventColor, repeat: calEventRepeat === "none" ? undefined : calEventRepeat, repeatDays: isCustom ? [...calEventRepeatDays].sort((a,b) => a-b) : undefined, desc: calEventDesc.trim() || undefined, reminder: calEventReminder || undefined };
                         const seriesId = calSelectedEvent.id, newId = makeId("ce");
                         saveCalEvents((events) => calEditScope(events, seriesId, day, updates, scope, newId));
                         setCalSelectedEvent(null); setCalEditMode(false); setCalEditScopeAsk(false);
@@ -7997,9 +8074,12 @@ function DailyGrind() {
                     <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
                       <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>START</label>
                         <input aria-label="Event start time" type="time" style={S.inp} value={calEventStart} onChange={(e) => setCalEventStart(e.target.value)} /></div>
-                      <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
-                        <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>
+                      {calEventReminder
+                        ? <div style={{ flex: 1, alignSelf: "flex-end", paddingBottom: 10, fontSize: 10.5, color: "#8b8b9e", lineHeight: 1.4 }}>A line at this time, no end</div>
+                        : <div style={{ flex: 1 }}><label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4 }}>END</label>
+                        <input aria-label="Event end time" type="time" style={S.inp} value={calendarClockTime(calEventEnd)} onChange={(e) => setCalEventEnd(e.target.value)} />{calendarEndMinutes(calEventStart, calEventEnd) >= 1440 && <div style={{ color: "#c4b5fd", fontSize: 10, marginTop: 6 }}>Ends the next day</div>}</div>}
                     </div>
+                    <CalReminderSwitch value={calEventReminder} onChange={setCalEventReminder} />
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>DESCRIPTION</label>
                     <textarea style={{ ...S.inp, minHeight: 60, resize: "vertical" }} value={calEventDesc} onChange={(e) => setCalEventDesc(e.target.value)} placeholder="Add details..." />
                     <label style={{ fontSize: 10.5, color: "#8b8b9e", letterSpacing: 1.2, fontWeight: 700, display: "block", marginBottom: 4, marginTop: 8 }}>REPEAT</label>
@@ -8026,8 +8106,8 @@ function DailyGrind() {
                       <button onClick={() => setCalAddEvent(null)} style={S.cBtn}>Cancel</button>
                       <button disabled={!!calEventFormProblem} onClick={() => {
                         if (calEventTitle.trim() && !calEventFormProblem) {
-                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calEventEnd, calEventColor, calEventRepeat, calEventDesc.trim(), calEventRepeatDays);
-                          setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc("");
+                          addCalEvent(calAddEvent, calEventTitle.trim(), calEventStart, calSavedEnd, calEventColor, calEventRepeat, calEventDesc.trim(), calEventRepeatDays, calEventReminder);
+                          setCalAddEvent(null); setCalEventRepeat("none"); setCalEventRepeatDays([]); setCalEventDesc(""); setCalEventReminder(false);
                         }
                       }} style={{ ...S.okBtn, opacity: calEventFormProblem ? 0.5 : 1 }}>Add Event</button>
                     </div>
